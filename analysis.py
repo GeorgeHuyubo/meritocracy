@@ -1577,6 +1577,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Meritocracy 平衡性分析   {args.players} 人 x {args.games} 局"
           f"   对局玩家={args.agents}   seed={args.seed}")
     print("=" * 56)
+    # --agents 只管前三节。消融/漏斗/三角这些自带对局循环，一律用思考型 AI，
+    # 不然表头写着 random，读的人会以为消融结果和 AI 的改动无关。
+    if args.agents != "smart" and {"ablation", "funnel", "triangle"} & set(out):
+        which = "、".join(
+            n for n in ("ablation", "funnel", "triangle") if n in out
+        )
+        print(f"  注：{which} 这几节固定用思考型 AI 对局，不受 --agents 影响")
 
     if "leadership" in out:
         d = out["leadership"]

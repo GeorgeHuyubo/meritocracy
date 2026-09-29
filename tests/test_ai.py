@@ -251,6 +251,77 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         game, ids, pool = self._table(0, ["WORK"] * 6, my_money=0)
         self.assertFalse(ai.wants_redraw(game, ids[0], pool))
 
+    def test_underestimating_his_hidden_cash_still_counts_as_about_to_win(self):
+        """钱是暗的，估出来只会偏低——刹车不能等估计值过线才踩。
+
+        复盘 F7KF 第 7 轮：老张真有 45 块（门槛 37），AI 估 26，
+        于是「他下一步就夺冠」判 False，谁都没去拦，他当轮登顶。
+        """
+        game, ids, pool = self._table(0, ["WORK"] * 6, know_his_money=False)
+        agent = pool.get(ids[0])
+        model = agent.models.setdefault(ids[1], ai.OpponentModel())
+        model.money_est = CFG.money_cost(self.TOP) * 0.7  # 估低三成
+        winner = [o for o in game.public_state()["players"] if o["id"] == ids[1]][0]
+        self.assertTrue(agent._about_to_win(winner, model))
+        self.assertTrue(ai.wants_redraw(game, ids[0], pool))
+
+    def test_a_hopeless_estimate_still_does_not_trigger_it(self):
+        """留余量不等于见谁都当大敌——差得远的还是不该触发。"""
+        game, ids, pool = self._table(0, ["WORK"] * 6, know_his_money=False)
+        agent = pool.get(ids[0])
+        model = agent.models.setdefault(ids[1], ai.OpponentModel())
+        model.money_est = CFG.money_cost(self.TOP) * 0.2
+        winner = [o for o in game.public_state()["players"] if o["id"] == ids[1]][0]
+        self.assertFalse(agent._about_to_win(winner, model))
+
+    def test_it_keeps_redrawing_if_the_new_hand_is_also_useless(self):
+        """换一次没摸到就放弃等于没救——他赢了，省下的钱一分也花不掉。"""
+        game, ids, pool = self._table(0, ["WORK"] * 6)
+        tries = 0
+        for _ in range(ai.MAX_PANIC_REDRAWS):
+            if not ai.wants_redraw(game, ids[0], pool):
+                break
+            game.hands[ids[0]] = [DealtCard(card=Card.WORK, value=10)] * CFG.hand_size
+            game.redraw(ids[0])
+            game.hands[ids[0]] = [DealtCard(card=Card.WORK, value=10)] * CFG.hand_size
+            tries += 1
+        self.assertGreater(tries, 1, "只换一次就认命了")
+
+    def test_seized_cash_is_worthless_when_someone_is_one_step_from_winning(self):
+        """用户原话：就算抄到钱了也没用啊 —— 他一登顶，游戏当场结束。
+
+        这是举报选错人的根因：领跑者刚砸钱升完级，身上估着 0 块，
+        「举报他」看起来一文不值，AI 转头去抄一个兜里有钱但毫无威胁的人。
+        """
+        game, ids, pool = self._table(0, ["REPORT"] + ["WORK"] * 5)
+        agent = pool.get(ids[0])
+        public, private = game.public_state(), game.private_state(ids[0])
+        agent.observe(public)
+        # 领跑者刚买完官，现钱估成 0；一个路人却攒了一大笔
+        agent.models[ids[1]].money_est = 0.0
+        agent.models[ids[2]].money_est = CFG.money_cost(1) * 3
+        opp = {o["id"]: o for o in public["players"]}
+        lead = agent._score_report(public, private, opp[ids[1]])[0]
+        fat = agent._score_report(public, private, opp[ids[2]])[0]
+        self.assertGreater(
+            lead, fat, f"举报快赢的 {lead:.3f} 居然不如举报有钱的路人 {fat:.3f}"
+        )
+
+    def test_mid_game_cash_is_not_discounted(self):
+        """这一折只能在终局生效。要是 payload 里少了 max_rounds 之类的字段，
+        它会静默退化成"钱永远不值钱"，AI 从此不敢再举报捞钱——
+        这种错不会抛异常，只能靠断言中局那一档必须是满值。"""
+        game = Game(game_id="mid", cfg=CFG, rng=random.Random(5))
+        for name in ("我", "甲", "乙"):
+            game.add_player(name)
+        game.start_game()
+        ids = sorted(game.players)
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(5))
+        agent = pool.get(ids[0])
+        public = game.public_state()
+        agent.observe(public)
+        self.assertEqual(agent._cash_horizon(public), 1.0)
+
     def test_does_not_redraw_when_nobody_is_close(self):
         game = Game(game_id="calm", cfg=CFG, rng=random.Random(3))
         for name in ("我", "甲", "乙"):

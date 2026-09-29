@@ -161,8 +161,13 @@ class Hub:
                 if sel is None or sel.locked:
                     continue
                 try:
-                    # 有人马上要赢、而手上没有干扰牌时，AI 会花钱重抽去拦他
-                    if ai.wants_redraw(game, pid, room.pool):
+                    # 有人马上要赢、而手上没有干扰牌时，AI 会花钱重抽去拦他。
+                    # 换一次还是没摸到干扰牌就接着换：他登顶游戏就结束了，
+                    # 这时候省下来的钱一分都花不出去。价格逐次翻倍，
+                    # 付不起时 wants_redraw 自己会转 False，不会换个没完。
+                    for _ in range(ai.MAX_PANIC_REDRAWS):
+                        if not ai.wants_redraw(game, pid, room.pool):
+                            break
                         game.redraw(pid)
                     game.select_actions(pid, ai.choose(game, pid, room.pool))
                     game.lock_action(pid)

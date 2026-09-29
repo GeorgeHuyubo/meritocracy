@@ -5,8 +5,10 @@
 * 它**只吃 `game.public_state()` 和自己的 `game.private_state(pid)`**，
   也就是浏览器里那个玩家能看到的一模一样的 JSON。作弊在结构上就不可能。
 * 它维护一份对每个对手**金钱的估计**。金钱是隐藏的，但可以从公开信息推断：
-    - 财富广播点名了谁，以及档位区间（1-2 / 3-4 / 5-7 / 8+）
+    - 财富广播点名了谁，以及那一档的金额区间（档位见 config.WEALTH_BROADCAST_TIERS）
     - 某人政绩没涨 => 他本轮没打 WORK => 有可能在贪
+    - 政绩涨了也**不能**判他清白：一轮打两张牌，可以工作+贪污，
+      而以权谋私本身就同时给政绩和钱，看起来和埋头干活一模一样
     - 完全没有财富广播 => 本轮**没有任何人**贪污，所有人的钱都没变
     - "四处打点"晋升 => 他的钱至少够门槛，晋升后被 /5 砍掉
     - 被举报打回基层 => 他的钱清零
@@ -77,7 +79,11 @@ class Weights:
     # 干扰收益的整体系数。0.2 是**校准**出来的：把权重从 1.0 往下扫，
     # 直到"禁用这张牌的 AI"不再打得更好（消融差归零）。1.0 时 AI 会高估干扰约 5 倍，
     # 出牌率虚高到 114%，但实际是净负收益。
-    interfere_attack: float = 0.2
+    # 0.2 -> 0.15：给"拦住领跑者"加权之后（见 _share），攻击的估值整体抬高了，
+    # 消融差从 +1.20 恶化到 +2.20（4 个种子 x 1500 局的均值，>0 = 负收益）。
+    # 选靶子变准是好事，但"更常出手"不是——这里把频率旋钮调回去，
+    # 重测 +0.90，比改之前还准一点。0.12 会矫枉过正（-1.02）。
+    interfere_attack: float = 0.15
     interfere_report: float = 0.2
     caught_dread: float = 1.0  # 对"贪污被抓"的恐惧程度
     base_report_pressure: float = 0.22  # 单个对手本轮举报我的基准概率
@@ -90,6 +96,10 @@ class Weights:
     # 拦住一个下一级就是国家主席的人，等于直接阻止别人赢下整局，
     # 这份好处不该按"全桌平分"打折——他赢了我就全输。
     endgame_block_weight: float = 4.0
+    # 判断"他下一步就夺冠"时，钱这一项按门槛的几折算。
+    # 钱是暗的，money_est 是下界（贪污看不见、以权谋私伪装成干活），
+    # 1.0 意味着只信估计值，结果就是终局刹车形同虚设。
+    endgame_money_doubt: float = 0.6
     noise: float = 0.02  # 决策噪声，避免完全可预测
     # 目标评分差在**最高分的这个比例**之内视为打平，打平就随机挑。
     # 必须用相对值：绝对阈值（原来是 0.02）在开局能用，到了中局就坏了——
@@ -218,7 +228,15 @@ class SmartAgent:
             elif not anyone_corrupted:
                 gained = 0.0  # 没有广播 => 全场无人贪污，这是确定信息
             elif worked:
-                gained = 0.0  # 打了 WORK 就不可能同时贪污
+                # 「政绩涨了」**不等于**「没捞钱」——每轮能打 2 张牌，
+                # 完全可以 工作 + 贪污；而以权谋私更是一张牌同时给政绩和钱，
+                # 打出来看上去和埋头工作一模一样，钱却照样算赃款。
+                # 以前这里直接记 0，于是闷声发财的领先者被系统性低估：
+                # 复盘 F7KF 第 7 轮，老张实际有 45 块（门槛 37），AI 只估到 26，
+                # 「他下一步就夺冠」那道刹车因此一次都没踩。
+                p_dirty = 0.45 if int(self.cfg.picks_per_round) > 1 else 0.0
+                gained = p_dirty * self._expected_graft_money(rank_before)
+                model.corrupt_evidence += p_dirty
             else:
                 # 他没打 WORK，可能在贪、在举报、在攻击。贪的话也一定不超过榜首。
                 p_corrupt = 0.45
@@ -307,17 +325,47 @@ class SmartAgent:
         )
 
     def _about_to_win(self, opp: dict[str, Any], model: "OpponentModel") -> bool:
-        """他是不是下一次晋升就直接当主席了（而且资源已经够了）。"""
+        """他是不是下一次晋升就直接当主席了（而且资源已经够了）。
+
+        政绩是公开的，按实数比。**钱是暗的**，`money_est` 只能算个下界——
+        贪污看不见，以权谋私看起来又像在老实干活。所以钱这一项留出
+        `endgame_money_doubt` 的余量：宁可多拦一次，也不要在他登顶那轮
+        才发现自己估少了。少拦一次的代价是整局输掉，多拦一次只亏一个回合。
+        """
         cfg = self.cfg
         rank = opp["rank"]
         if rank != cfg.president_rank - 1:
             return False
         tc, mc = cfg.merit_cost(rank), cfg.money_cost(rank)
         merit_ready = tc is not None and opp["merit"] >= tc
-        money_ready = mc is not None and model.money_est >= mc
+        money_ready = mc is not None and model.money_est >= mc * self.w.endgame_money_doubt
         if cfg.needs_both(rank):
             return merit_ready and money_ready
         return merit_ready or money_ready
+
+    def _cash_horizon(self, public: dict[str, Any]) -> float:
+        """抄到手的一笔钱，现在还值几折。
+
+        钱本身不算分，它得先换成官职才算数。所以两件事会让它贬值：
+          * **有人下一步就夺冠** —— 他一登顶游戏立刻结束，我口袋里的钱
+            一分也来不及花。这时候该比的是"能不能拦住他"，不是"能抄多少"。
+          * **回合快打完了** —— 剩的轮数不够我再升一级，同理。
+
+        不加这一折，举报的目标就会被"谁最有钱"带着走：复盘 F7KF，
+        老张刚砸钱升到省级、身上估着 0 块，于是"举报老张"看起来一文不值，
+        AI 转头去抄手里有四十块的真人——哪怕老张的威胁值是他的两倍。
+        """
+        rounds_left = max(0, int(public.get("max_rounds", 0)) - int(public.get("round", 0)))
+        for o in public["players"]:
+            if o["id"] == self.id:
+                continue
+            if self._about_to_win(o, self.models.get(o["id"], OpponentModel())):
+                return 0.15  # 他赢了就散场，攒钱毫无意义
+        if rounds_left <= 0:
+            return 0.15
+        if rounds_left == 1:
+            return 0.5  # 只够用在这一轮，兑不成官职就白拿
+        return 1.0
 
     def _diffusion(self, public: dict[str, Any]) -> float:
         """纯打压行为的收益稀释系数。
@@ -328,6 +376,20 @@ class SmartAgent:
         """
         n_opp = max(1, len(public["players"]) - 1)
         return 1.0 / n_opp
+
+    def _share(self, public: dict[str, Any], threat: float) -> float:
+        """按住某个人这件事，好处里有多少是**我自己**的。
+
+        "搭便车"那套算法只在对手赢不了的时候成立：拖慢一个离夺冠还远的人，
+        省下来的便宜确实全桌平分，我凭什么单独出力。但对手越接近登顶，
+        逻辑就越反过来——他赢了我也输，拦住他是在救我自己的命，
+        这份好处一分都不该按人头摊薄。
+
+        所以用威胁值在「全桌平分」和「全归我」之间插值。平方是为了让它
+        只在真正的领跑者身上生效，不要把中游选手也算成生死大敌。
+        """
+        base = self._diffusion(public)
+        return base + (1.0 - base) * threat ** 2
 
     def _report_pressure(self, public: dict[str, Any], private: dict[str, Any]) -> float:
         """我这轮要是贪了，被举报查实的概率大概多少。
@@ -735,9 +797,9 @@ class SmartAgent:
                 self_value *= 1.0 - self._p_being_attacked()
 
         # --- 对方的损失（好处全桌分，要打稀释折扣）---
-        share = self._diffusion(public)
         hush_hit = locals().get("hush_hit", 0.0)
         threat = self._threat(t_rank, self._progress(t_rank, model.money_est, t_merit))
+        share = self._share(public, threat)
         # 打掉的政绩最多只值"他一级晋升的进度"。不封顶的话，denial 模式下
         # damage 是对方整个政绩存量，能算出"一次攻击挡掉两级"这种荒谬估值。
         deny = min(damage / tc, 1.0) * threat
@@ -827,7 +889,8 @@ class SmartAgent:
         my_cut = pool / expected_split
 
         mc = cfg.money_cost(my_rank)
-        cash_value = (my_cut / mc) if mc else 0.0
+        # 攒着的钱要按"还来不来得及花"打折；能当场换成一级官职的那部分不打折。
+        cash_value = (my_cut / mc) * self._cash_horizon(public) if mc else 0.0
         if mc and my_money + my_cut >= mc:
             cash_value += self.w.promotion_bonus  # 这笔赃款直接把我送上去
 
@@ -843,7 +906,8 @@ class SmartAgent:
         wmax = max(1, cfg.warnings_before_demotion)
         setback += (opp.get("warnings", 0) + 1) / wmax * threat * 0.5
 
-        setback *= self._diffusion(public)  # 把人按住是公共品，赃款才是我的
+        # 把人按住基本是公共品，赃款才是我的；但他越接近登顶，这份好处越是我自己的
+        setback *= self._share(public, threat)
 
         # 拦住"下一步就夺冠"的人是例外：那不是少升一级，是阻止整局结束，
         # 这份好处也不该按人数稀释——他赢了，桌上每个人都输。
@@ -888,12 +952,24 @@ class AgentPool:
         return self.agents[player_id]
 
 
+MAX_PANIC_REDRAWS = 3
+"""终局抢救时最多连换几手牌。
+
+价格每换一次翻倍，所以真正的刹车是钱包；这个上限只是防止
+一个巨富 AI 把整轮时间耗在洗牌上。
+"""
+
+
 def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
     """要不要花钱重抽这一手牌。
 
-    只在一种情况下值得：**有人下一步就夺冠，而我手上一张干扰牌都没有**。
+    只有一种情况值得：**有人快要夺冠，而我手上一张干扰牌都没有**。
     这时候一个回合的产出毫无意义（他赢了就结束了），砸钱换牌去拦他才是对的。
     其余时候不换：换牌的钱和攒钱升职抢的是同一个钱包。
+
+    "快要夺冠"取两条，满足一条就算：估计资源已经够了（`_about_to_win`），
+    或者人已经站在主席门口、晋升进度过了 75%。后面这条是因为钱是暗的，
+    估计值总是偏低——等它真的过线，往往就是他登顶的那一轮了。
     """
     agent = pool.get(player_id)
     public = game.public_state()
@@ -911,6 +987,12 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
         model = agent.models.get(opp["id"], OpponentModel())
         if agent._about_to_win(opp, model):
             return True
+        # 还差一点、但已经站在主席门口的人，也值得砸钱换一手牌去拦。
+        # 等到估计值真的过线往往已经晚了——他那一轮就登顶了。
+        if opp["rank"] == agent.cfg.president_rank - 1:
+            prog = agent._progress(opp["rank"], model.money_est, opp["merit"])
+            if prog >= 0.75:
+                return True
     return False
 
 
