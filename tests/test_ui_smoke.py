@@ -1,0 +1,156 @@
+"""把每个界面都用真实 payload 渲染一遍，确保前端不抛异常。
+
+为什么需要这个：前端渲染里任何一处 ReferenceError 都会让 render() 提前退出，
+界面就停在上一屏不动——而 Python 这边的测试一个都抓不到。
+真踩过一次：终局画面调了一个已经被删掉的函数，玩家永远卡在"结算中"。
+
+需要 node。没装 node 就跳过。
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(APP_DIR))
+
+import ai  # noqa: E402
+from config import DEFAULT_CONFIG  # noqa: E402
+from game import Game  # noqa: E402
+
+CFG = DEFAULT_CONFIG
+NODE = shutil.which("node")
+
+
+def expected_card_effects(rank: int = 0, value: int = 10) -> dict:
+    """牌面上该显示的数字，由**引擎**算出来，交给前端比对。
+
+    踩过：以权谋私的政绩在前端写死了 /2，配置改成 1/4 之后牌面一直显示错的
+    （该 +2 却写 +5），而所有 Python 测试都照样绿。
+    """
+    import rules
+
+    return {
+        "rank": rank,
+        "value": value,
+        "WORK": rules.work_merit(value, rank, None, CFG),
+        "CORRUPT": rules.corrupt_money(value, rank, None, CFG),
+        "GRAFT_money": rules.corrupt_money(value, rank, None, CFG),
+        "GRAFT_merit": rules.graft_merit(value, rank, None, CFG),
+    }
+
+
+def api_config_payload() -> dict:
+    """直接问真正的 /api/config 要数据，免得测试里的规则表和线上对不上。"""
+    import asyncio
+
+    import server
+
+    resp = asyncio.run(server.api_config())
+    return json.loads(resp.body)
+
+
+def build_payloads() -> list[dict]:
+    """打一整局，把每个阶段的 public/private payload 录下来。"""
+    out: list[dict] = []
+    game = Game(game_id="uismoke", cfg=CFG, rng=random.Random(4))
+    for i in range(4):
+        game.add_player(f"P{i + 1}")
+
+    def snap(label: str, pid: int | None = 1) -> None:
+        out.append(
+            {
+                "label": label,
+                "public": game.public_state(),
+                "private": game.private_state(pid) if pid else None,
+                "my_id": pid,
+            }
+        )
+
+    snap("大厅")
+    snap("未加入（旁观）", None)
+    game.start_game()
+    snap("行动选择")
+
+    # 选了两张牌 -> 结算顺序面板要能渲染（含晋升卡那几条提示分支）
+    hand = game.hands[1]
+    promo = next((i for i, d in enumerate(hand) if d.card.is_promotion), None)
+    other = next(i for i in range(len(hand)) if i != promo)
+    for label, pair in (
+        ("行动选择（两张牌，排好顺序）", [0, 1]),
+        ("行动选择（晋升卡在前）", [promo, other] if promo is not None else [0, 1]),
+        ("行动选择（晋升卡在后）", [other, promo] if promo is not None else [1, 0]),
+    ):
+        out.append({
+            "label": label,
+            "public": game.public_state(),
+            "private": game.private_state(1),
+            "my_id": 1,
+            "picks": [
+                {"index": i, "card": hand[i].card.value,
+                 "target": 2 if hand[i].card.needs_target else None}
+                for i in pair
+            ],
+        })
+
+    pool = ai.AgentPool(cfg=CFG, rng=random.Random(4))
+    first = True
+    while not game.is_over:
+        for pid in sorted(game.players):
+            game.select_actions(pid, ai.choose(game, pid, pool))
+            game.lock_action(pid)
+        game.reveal_event()
+        if first:
+            snap("事件揭示")
+        game.resolve()
+        if first:
+            snap("本轮结算")
+            first = False
+        if not game.is_over:
+            game.advance_round()
+    snap("游戏结束（全揭示）")
+    return out
+
+
+@unittest.skipUnless(NODE, "需要 node 才能跑前端渲染")
+class TestUIRenders(unittest.TestCase):
+    def test_every_screen_renders_without_throwing(self):
+        payloads = build_payloads()
+        labels = [p["label"] for p in payloads]
+        self.assertIn("游戏结束（全揭示）", labels, "得覆盖到终局画面")
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as fh:
+            json.dump({"config": api_config_payload(), "screens": payloads,
+                       "card_effects": expected_card_effects()},
+                      fh, ensure_ascii=False)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [NODE, str(APP_DIR / "tests" / "ui_smoke.js"), path],
+                capture_output=True, text=True, timeout=60,
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+        self.assertEqual(
+            proc.returncode, 0,
+            f"有界面渲染失败：\n{proc.stdout}\n{proc.stderr}",
+        )
+
+    def test_app_js_is_syntactically_valid(self):
+        proc = subprocess.run(
+            [NODE, "--check", str(APP_DIR / "static" / "app.js")],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

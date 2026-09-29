@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Meritocracy</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="title">Meritocracy</div>
+  <div class="round" id="roundInfo">—</div><div class="round" id="roomTag"></div>
+  <div class="conn" id="connState">连接中…</div>
+</header>
+
+<main id="app">
+
+  <!-- ============ 进门 ============ -->
+  <section id="screen-join" class="screen">
+    <h2>开局</h2>
+    <input id="nameInput" type="text" maxlength="12" placeholder="你的名字" autocomplete="off">
+    <button id="createBtn" class="primary">创建房间</button>
+    <div class="orline">或者</div>
+    <div class="joinrow">
+      <input id="roomInput" type="text" maxlength="4" placeholder="房间号"
+             autocomplete="off" autocapitalize="characters">
+      <button id="joinBtn">加入</button>
+    </div>
+    <p class="hint" id="joinHint"></p>
+  </section>
+
+  <!-- ============ 大厅 ============ -->
+  <section id="screen-lobby" class="screen">
+    <h2>等待开局</h2>
+    <div class="roomcode">房间号 <b id="roomCode">----</b>
+      <span class="subtle">（同一 WiFi 下把这个号告诉别人就能加入）</span></div>
+    <div class="subtle" id="lobbyCount">已加入 0 人</div>
+    <ul id="lobbyList" class="plainlist"></ul>
+    <button id="addAiBtn" class="ghost">+ 添加一名 AI 玩家</button>
+    <button id="startBtn" class="primary">开始游戏</button>
+    <p class="hint" id="lobbyHint"></p>
+    <details class="rules">
+      <summary>规则速览</summary>
+      <div class="rulesbox"></div>
+    </details>
+  </section>
+
+  <!-- ============ 行动选择 ============ -->
+  <section id="screen-action" class="screen">
+    <div class="mypanel" id="myPanel"></div>
+
+    <h3>选择行动卡 <span id="handHint" class="subtle"></span></h3>
+    <div id="hand" class="hand"></div>
+    <div id="orderBox" class="orderbox hidden">
+      <div class="ordhead">结算顺序 <span class="subtle">按这个顺序依次结算，排前面的先生效</span></div>
+      <div id="orderList" class="ordlist"></div>
+      <div id="orderHint" class="ordhint subtle"></div>
+    </div>
+
+    <details class="rules" id="rulesPanelAction">
+      <summary>📖 规则速查 · 升职条件 / 每张牌到底干什么</summary>
+      <div class="rulesbox"></div>
+    </details>
+
+    <div id="targetBox" class="targetbox hidden">
+      <h3>为这张牌选择目标</h3>
+      <div id="targets" class="targets"></div>
+    </div>
+
+    <div class="btnrow">
+      <button id="redrawBtn" class="ghost">换一手牌</button>
+      <button id="lockBtn" class="primary">锁定行动</button>
+    </div>
+    <div id="lockState" class="subtle"></div>
+    <button id="forceBtn" class="ghost hidden">强制推进（房主）</button>
+    <button id="abortBtn" class="ghost hidden">结束本局，重开（房主）</button>
+
+    <h3>其他玩家</h3>
+    <table class="board" id="boardTable"></table>
+    <p class="hint">你看不到别人的金钱和手牌，别人也看不到你的。</p>
+
+    <details class="rules" id="ledgerPanel">
+      <summary>我的流水账</summary>
+      <div id="ledgerBox"></div>
+    </details>
+
+  </section>
+
+  <!-- ============ 事件揭示 ============ -->
+  <section id="screen-reveal" class="screen">
+    <div class="eventcard">
+      <div class="eventlabel">本轮全局事件</div>
+      <div class="eventname" id="revealName">—</div>
+      <div class="eventdesc" id="revealDesc"></div>
+    </div>
+    <div class="subtle">结算中…</div>
+  </section>
+
+  <!-- ============ 本轮结果 ============ -->
+  <section id="screen-result" class="screen">
+    <div class="eventcard small">
+      <div class="eventlabel">本轮全局事件</div>
+      <div class="eventname" id="resultEventName">—</div>
+      <div class="eventdesc" id="resultEventDesc"></div>
+    </div>
+
+    <h3>我的结算</h3>
+    <div id="privateResult" class="privatebox"></div>
+
+    <h3>公开通报</h3>
+    <ul id="publicMessages" class="plainlist"></ul>
+
+    <h3>坊间传闻</h3>
+    <ul id="wealthMessages" class="plainlist gossip"></ul>
+
+    <h3>当前局势</h3>
+    <table class="board" id="resultBoard"></table>
+
+    <details class="rules">
+      <summary>📖 规则速查 · 升职条件 / 每张牌到底干什么</summary>
+      <div class="rulesbox"></div>
+    </details>
+
+    <button id="readyBtn" class="primary">继续</button>
+    <div id="readyState" class="subtle"></div>
+    <button id="abortBtn2" class="ghost hidden">结束本局，重开（房主）</button>
+  </section>
+
+  <!-- ============ 游戏结束 ============ -->
+  <section id="screen-over" class="screen">
+    <h2>游戏结束</h2>
+    <div id="overReason" class="overreason"></div>
+    <h3>最终排名</h3>
+    <table class="board" id="finalBoard"></table>
+    <h3>我的复盘</h3>
+    <div id="postmortem" class="privatebox"></div>
+    <h3>全场揭晓</h3>
+    <div id="revealBox"></div>
+
+    <details class="rules" id="ledgerPanelOver">
+      <summary>我的流水账</summary>
+      <div id="ledgerBoxOver"></div>
+    </details>
+    <button id="resetBtn" class="ghost">房主：开新的一局</button>
+    <p class="hint">重开会保留房间里的所有人（含 AI），直接回到大厅。</p>
+  </section>
+
+</main>
+
+<details id="logPanel">
+  <summary>公开记录</summary>
+  <ul id="logList" class="plainlist log"></ul>
+</details>
+
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
