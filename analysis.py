@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import random
@@ -28,6 +29,7 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1275,6 +1277,158 @@ def analyse_ablation(
     return out
 
 
+def analyse_funnel(
+    n_players: int, games: int, cfg: Config, rng: random.Random
+) -> dict[str, Any]:
+    """金钱路线的逐级漏斗：贪到手的钱，最后有多少真的换成了官职。
+
+    为什么要这把尺子：胜率消融是"一局一个样本"，3000 局的区间半宽还有 ±1.45，
+    而很多规则改动的真实效应就在 ±1 以内，永远测不出来。
+    漏斗是"一个事件一个样本"，几万个样本，两个配置之间的差别是确定的。
+
+    同时算政绩路线的同口径存活率作为对照 —— 单看一个数字没有意义，
+    要看两条路线**相比之下**谁更难走。
+    """
+    c: Counter = Counter()
+    for g in range(games):
+        game = Game(game_id="funnel", cfg=cfg, rng=rng)
+        for i in range(n_players):
+            game.add_player(f"P{i + 1}")
+        pool = ai.AgentPool(cfg=cfg, rng=rng)
+        game.start_game()
+        while not game.is_over:
+            for pid in sorted(game.players):
+                game.select_actions(pid, ai.choose(game, pid, pool))
+                game.lock_action(pid)
+            game.reveal_event()
+            outcome = game.resolve()
+            for o in outcome.outcomes.values():
+                # --- 金钱路线：贪 -> 扛过举报 -> 拿去买官 -> 官升成 ---
+                if o.corrupt_amount > 0:
+                    c["corrupt_plays"] += 1
+                    c["corrupt_gross"] += o.corrupt_amount
+                    c["corrupt_kept"] += o.net_corrupt_gain
+                    if o.money_confiscated or o.hush_money_paid:
+                        c["corrupt_seized"] += 1
+                    else:
+                        c["corrupt_survived"] += 1
+                # 想拿钱买官的回合（不管成没成）
+                if o.pending_bribe > 0 or o.promotion is PromotionKind.MONEY:
+                    c["bribe_attempts"] += 1
+                    if o.promotion is PromotionKind.MONEY:
+                        c["bribe_succeeded"] += 1
+                    else:
+                        c["bribe_lost_events"] += 1
+                        c["bribe_burned"] += o.bribe_lost
+                # --- 政绩路线对照：干活 -> 扛过抢功 -> 政绩升职成 ---
+                if o.merit_gained > 0:
+                    c["work_plays"] += 1
+                    c["work_gross"] += o.merit_gained
+                    c["work_kept"] += max(
+                        0, o.merit_gained - o.merit_stolen_by_attackers
+                    )
+                    if o.merit_stolen_by_attackers:
+                        c["work_robbed"] += 1
+                    else:
+                        c["work_survived"] += 1
+                if o.tried_merit_promotion:
+                    c["merit_promo_attempts"] += 1
+                    if o.promotion is PromotionKind.MERIT:
+                        c["merit_promo_succeeded"] += 1
+            if not game.is_over:
+                game.advance_round()
+
+    def rate(a: str, b: str) -> float:
+        return round(100 * c[a] / c[b], 2) if c[b] else 0.0
+
+    money_end_to_end = (
+        (c["corrupt_survived"] / c["corrupt_plays"]) *
+        (c["bribe_succeeded"] / c["bribe_attempts"])
+        if c["corrupt_plays"] and c["bribe_attempts"] else 0.0
+    )
+    merit_end_to_end = (
+        (c["work_survived"] / c["work_plays"]) *
+        (c["merit_promo_succeeded"] / c["merit_promo_attempts"])
+        if c["work_plays"] and c["merit_promo_attempts"] else 0.0
+    )
+    return {
+        "games": games,
+        "money": {
+            "plays": c["corrupt_plays"],
+            "survived_pct": rate("corrupt_survived", "corrupt_plays"),
+            "kept_pct": round(100 * c["corrupt_kept"] / max(1, c["corrupt_gross"]), 2),
+            "bribe_attempts": c["bribe_attempts"],
+            "bribe_success_pct": rate("bribe_succeeded", "bribe_attempts"),
+            "burned_total": c["bribe_burned"],
+            "end_to_end_pct": round(100 * money_end_to_end, 2),
+        },
+        "merit": {
+            "plays": c["work_plays"],
+            "survived_pct": rate("work_survived", "work_plays"),
+            "kept_pct": round(100 * c["work_kept"] / max(1, c["work_gross"]), 2),
+            "promo_attempts": c["merit_promo_attempts"],
+            "promo_success_pct": rate("merit_promo_succeeded", "merit_promo_attempts"),
+            "end_to_end_pct": round(100 * merit_end_to_end, 2),
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# 配置覆盖：让"改一条规则再跑一遍"变成一条命令
+# --------------------------------------------------------------------------
+
+
+def _coerce(name: str, raw: str, declared: Any) -> Any:
+    """按 Config 上声明的类型把命令行字符串转成值。"""
+    t = str(declared)
+    if t == "bool":
+        low = raw.strip().lower()
+        if low in ("1", "true", "yes", "on"):
+            return True
+        if low in ("0", "false", "no", "off"):
+            return False
+        raise ValueError(f"{name} 是 bool，给个 true/false，不是 {raw!r}")
+    if t == "int":
+        return int(raw)
+    if t == "float":
+        return float(raw)
+    if t == "Fraction":
+        return Fraction(raw)
+    if t == "str":
+        return raw
+    raise ValueError(
+        f"{name} 的类型是 {t}，命令行覆盖只支持 bool/int/float/Fraction/str。"
+        f"这种复合字段请直接改 config.py"
+    )
+
+
+def apply_overrides(cfg: Config, settings: list[str]) -> Config:
+    """把 --set key=value 落到一个新的 Config 上。
+
+    用 dataclasses.replace，和 tests/test_rules.py 里那些
+    `dataclasses.replace(CFG, attack_mode="denial")` 的夹具是同一套做法。
+    字段名或值不对就当场报错——静默忽略会让整轮实验白跑。
+    """
+    if not settings:
+        return cfg
+    types = {f.name: f.type for f in dataclasses.fields(Config)}
+    changes: dict[str, Any] = {}
+    for item in settings:
+        if "=" not in item:
+            raise SystemExit(f"--set 要写成 key=value，收到 {item!r}")
+        key, raw = item.split("=", 1)
+        key = key.strip()
+        if key not in types:
+            near = [n for n in types if key in n or n in key][:5]
+            hint = f"（是不是想写：{', '.join(near)}）" if near else ""
+            raise SystemExit(f"config.py 里没有 {key!r} 这个字段{hint}")
+        try:
+            changes[key] = _coerce(key, raw, types[key])
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+    return dataclasses.replace(cfg, **changes)
+
+
 # --------------------------------------------------------------------------
 # 输出
 # --------------------------------------------------------------------------
@@ -1304,7 +1458,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--section",
         choices=("all", "leader", "rank", "actions", "choices", "reports", "triangle",
-                 "ablation", "strategy",
+                 "ablation", "funnel", "strategy",
                  "postmortem", "events", "full"),
         default="all",
     )
@@ -1317,9 +1471,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--examples", type=int, default=5,
                     help="死因分析要打印几局具体例子")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--set", action="append", default=[], metavar="KEY=VALUE", dest="settings",
+        help="临时覆盖 config.py 里的一个字段，可重复。"
+             "例：--set report_catches_bribery=false。用来做规则 A/B。",
+    )
     args = ap.parse_args(argv)
 
-    cfg = DEFAULT_CONFIG
+    cfg = apply_overrides(DEFAULT_CONFIG, args.settings)
     out: dict[str, Any] = {"players": args.players, "games": args.games, "seed": args.seed}
 
     FULL = args.section in ("all", "full")
@@ -1369,6 +1528,11 @@ def main(argv: list[str] | None = None) -> int:
             "examples": [narrate(d, cfg) for d in diags[: args.examples]],
             "loser_experience": analyse_loser_experience(records, cfg),
         }
+    if args.section == "funnel":
+        out["funnel"] = analyse_funnel(
+            args.players, args.games, cfg, random.Random(args.seed)
+        )
+
     if args.section == "ablation":
         out["ablation"] = analyse_ablation(
             args.players, args.games, cfg, random.Random(args.seed),
@@ -1527,6 +1691,23 @@ def main(argv: list[str] | None = None) -> int:
         for name, v in d["by_target_rank"].items():
             print(f"    {name:<10}{v['share_pct']:>7.1f}%{v['hit_pct']:>8.1f}%"
                   f"{v['mean_take']:>10.2f}")
+
+    if "funnel" in out:
+        d = out["funnel"]
+        m, w = d["money"], d["merit"]
+        h("金钱路线 vs 政绩路线：逐级漏斗")
+        print(f"  {d['games']} 局。看的是「赚到的东西最后有多少真换成了官职」。\n")
+        print(f"  {'':<16}{'金钱路线':>14}{'政绩路线':>14}")
+        print(f"  {'产出回合数':<14}{m['plays']:>14}{w['plays']:>14}")
+        print(f"  {'扛过干扰':<15}{m['survived_pct']:>13.1f}%{w['survived_pct']:>13.1f}%"
+              f"   <- 金钱怕举报，政绩怕抢功")
+        print(f"  {'产出留存率':<14}{m['kept_pct']:>13.1f}%{w['kept_pct']:>13.1f}%")
+        print(f"  {'兑现尝试次数':<13}{m['bribe_attempts']:>14}{w['promo_attempts']:>14}")
+        print(f"  {'兑现成功率':<14}{m['bribe_success_pct']:>13.1f}%"
+              f"{w['promo_success_pct']:>13.1f}%")
+        print(f"  {'端到端存活率':<13}{m['end_to_end_pct']:>13.1f}%"
+              f"{w['end_to_end_pct']:>13.1f}%   <- 赚+花两关都过")
+        print(f"\n  行贿打水漂的钱总共 {m['burned_total']}")
 
     if "ablation" in out:
         d = out["ablation"]
