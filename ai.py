@@ -84,7 +84,10 @@ class Weights:
     # 选靶子变准是好事，但"更常出手"不是——这里把频率旋钮调回去，
     # 重测 +0.90，比改之前还准一点。0.12 会矫枉过正（-1.02）。
     interfere_attack: float = 0.15
-    interfere_report: float = 0.2
+    # 0.2 -> 0.16：同上，给"拦领跑者"加权后举报也被整体高估，
+    # 消融差从 -0.54 恶化到 +1.55（6 种子 x 1500 局），出牌率虚高到 63%。
+    # 拧到 0.16 重测 +0.04，出牌率回到 53%。
+    interfere_report: float = 0.16
     caught_dread: float = 1.0  # 对"贪污被抓"的恐惧程度
     base_report_pressure: float = 0.22  # 单个对手本轮举报我的基准概率
     leader_suspicion: float = 2.0  # 我是明面领先者时，被举报概率的放大倍数
