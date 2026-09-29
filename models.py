@@ -362,6 +362,7 @@ class PlayerRoundOutcome:
             "promotion_card_played": self.promotion_card_played,
             "promotion_money_cost": self.promotion_money_cost,
             "promotion_merit_cost": self.promotion_merit_cost,
+            "promotion_merit_decay": self.promotion_merit_decay,
             "money_before_promotion": self.money_before_promotion,
             "merit_before_promotion": self.merit_before_promotion,
             "promotion_blocked": self.promotion_blocked_by_attack_report

@@ -326,7 +326,7 @@ def _resolve_promotion_card(
         kind = PromotionKind.BOTH
         if outcome.merit_promotion_blocked:
             outcome.private_notes.append(
-                "政绩这条路被人挡下，改走打点——最后一步的钱照样要花。"
+                "政绩这条路被人挡下，改走打点上位。"
             )
     elif merit_ok:
         kind = PromotionKind.MERIT
@@ -503,6 +503,17 @@ def warnings_for(kind: DemotionKind, cfg: Config = DEFAULT_CONFIG) -> int:
 # --------------------------------------------------------------------------
 
 
+def _join_names(names_list: list[str], cfg: Config) -> str:
+    """把一串名字连成中文里读得顺的列表：甲、乙和丙。
+
+    直接用 " 和 " 连接在两人时没问题，五个人就变成
+    "甲 和 乙 和 丙 和 丁 和 戊"，读起来很别扭。
+    """
+    if len(names_list) <= 1:
+        return "".join(names_list)
+    return "、".join(names_list[:-1]) + cfg.wealth_broadcast_name_joiner + names_list[-1]
+
+
 def _report_source_phrase(outcome) -> str:
     """公报里怎么说这次查办是哪来的。
 
@@ -553,7 +564,7 @@ def wealth_broadcast_detail(
 
     for tier, (low, high, single_tpl, multi_tpl) in enumerate(cfg.wealth_broadcast_tiers):
         if top >= low and (high is None or top <= high):
-            joined = cfg.wealth_broadcast_name_joiner.join(names)
+            joined = _join_names(names, cfg)
             tpl = single_tpl if len(names) == 1 else multi_tpl
             return [tpl.format(names=joined)], names, tier
     return [], [], None
@@ -982,9 +993,7 @@ def resolve_round(
                         f"{names[target_id]} 政绩本来就没多少，你的攻击扑了个空。"
                     )
                 if cfg.attack_announces_attacker:
-                    who = cfg.wealth_broadcast_name_joiner.join(
-                        names[aid] for aid in attacker_ids
-                    )
+                    who = _join_names([names[aid] for aid in attacker_ids], cfg)
                     attack_msgs.append(
                         f"{who} 拿 {names[target_id]} 开刀，"
                         + (f"他本轮无功可抢，被扣掉 {penalty} 点政绩。" if penalty
@@ -1009,9 +1018,7 @@ def resolve_round(
             # 明攻击：把抢功的人指名道姓写进公报，被抢的人才知道该报复谁。
             # （匿名举报保持暗箭，两张牌形成明/暗对照。）
             if cfg.attack_announces_attacker:
-                who = cfg.wealth_broadcast_name_joiner.join(
-                    names[aid] for aid in attacker_ids
-                )
+                who = _join_names([names[aid] for aid in attacker_ids], cfg)
                 attack_msgs.append(
                     f"{who} 抢走了 {names[target_id]} 的 {taken} 点功劳。"
                 )
@@ -1068,9 +1075,7 @@ def resolve_round(
                     )
                 if public is not None:
                     if cfg.attack_announces_attacker:
-                        who = cfg.wealth_broadcast_name_joiner.join(
-                            names[aid] for aid in attacker_ids
-                        )
+                        who = _join_names([names[aid] for aid in attacker_ids], cfg)
                         attack_msgs.append(f"{who} 拿 {names[target_id]} 开刀，{public}")
                     else:
                         attack_msgs.append(f"{names[target_id]} 遭到政治攻击，{public}")
@@ -1109,9 +1114,7 @@ def resolve_round(
             # 明攻击：把抢功的人指名道姓写进公报，被抢的人才知道该报复谁。
             # （匿名举报保持暗箭，两张牌形成明/暗对照。）
             if cfg.attack_announces_attacker:
-                who = cfg.wealth_broadcast_name_joiner.join(
-                    names[aid] for aid in attacker_ids
-                )
+                who = _join_names([names[aid] for aid in attacker_ids], cfg)
                 attack_msgs.append(
                     f"{who} 抢走了 {names[target_id]} 的 {taken} 点功劳。"
                 )
@@ -1243,6 +1246,8 @@ def resolve_round(
             p.warnings -= cfg.warnings_before_demotion
             apply_demotion(p, DemotionKind.MINOR, cfg)
             demoted = True
+        # 已经在基层的人降无可降：官职没动，就别播"由基层降为基层"
+        hit_the_floor = demoted and p.rank == before
         o.warnings_after = p.warnings
         o.demotion = DemotionKind.MINOR if demoted else DemotionKind.NONE
 
@@ -1253,7 +1258,12 @@ def resolve_round(
         if bribe:
             bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
         detail = "，".join(bits)
-        if demoted:
+        if demoted and hit_the_floor:
+            report_msgs.append(
+                f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
+                f"警告记满——但已经在{cfg.rank_name(p.rank)}，再降无可降。"
+            )
+        elif demoted:
             report_msgs.append(
                 f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
                 f"警告记满，由{cfg.rank_name(before)}降为{cfg.rank_name(p.rank)}。"
@@ -1365,8 +1375,10 @@ def resolve_round(
     for p in ordered:
         o = outcome.outcomes[p.id]
         if o.promotion is PromotionKind.NONE:
-            if o.promotion_blocked_by_attack_report:
-                # 规则书第 16 节：攻击挡住政绩晋升，举报没收了升官要用的钱
+            attempted = o.promotion_card_played or not cfg.promotion_requires_card
+            if o.promotion_blocked_by_attack_report and attempted:
+                # 规则书第 16 节：攻击堵死政绩那条路，举报堵死金钱那条路。
+                # 没打晋升卡就没有"泡汤"这回事——本来也没在升。
                 promo_msgs.append(
                     f"{names[p.id]} 同时遭到政治攻击与匿名举报，本轮晋升泡汤。"
                 )
@@ -1374,7 +1386,7 @@ def resolve_round(
                 o.merit_promotion_blocked
                 # 没打晋升卡就没有"被拦下"这回事——本来也升不了，
                 # 播这句会让人以为自己挨了一刀，其实那一刀打空了
-                and (o.promotion_card_played or not cfg.promotion_requires_card)
+                and attempted
                 # "眼看就要上位被一状告倒"那句已经把这件事说透了，别再补一句弱的
                 and not o.merit_wiped_by_attack
             ):

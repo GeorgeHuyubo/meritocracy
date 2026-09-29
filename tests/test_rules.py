@@ -1475,6 +1475,47 @@ class TestPresidentNeedsBoth(unittest.TestCase):
         self.assertEqual(p.rank, 1)
 
 
+class TestBroadcastWording(unittest.TestCase):
+    """公报的措辞要对得上每一种实际情况 —— 这些都是真实对局里读出来的毛病。"""
+
+    def test_already_at_the_bottom_says_so(self):
+        """降无可降的时候别播"由基层公务员降为基层公务员"。"""
+        tgt = player(1, rank=0, merit=5, money=30, warnings=1)
+        out = resolve(
+            [tgt, player(2, rank=0)],
+            {1: [Action(Card.CORRUPT, value=18)], 2: [Action(Card.REPORT, 1)]},
+            cfg=REAL_CFG,
+        )
+        said = " ".join(out.public_messages)
+        self.assertIn("再降无可降", said)
+        self.assertNotIn("降为基层公务员", said)
+
+    def test_section_16_line_needs_an_actual_promotion_attempt(self):
+        """没打晋升卡就没有"晋升泡汤"这回事。"""
+        tc, mc = REAL_CFG.merit_cost(0), REAL_CFG.money_cost(0)
+        tgt = player(1, rank=0, merit=tc + 5, money=mc + 5)
+        out = resolve(
+            [tgt, player(2, rank=0), player(3, rank=0)],
+            {1: [Action(Card.CORRUPT, value=18)],
+             2: [Action(Card.ATTACK, 1)], 3: [Action(Card.REPORT, 1)]},
+            cfg=REAL_CFG,
+        )
+        self.assertFalse(out.outcomes[1].promotion_card_played)
+        self.assertNotIn("晋升泡汤", " ".join(out.public_messages))
+
+    def test_many_names_read_as_a_chinese_list(self):
+        """五个人别连成"甲 和 乙 和 丙 和 丁 和 戊"。"""
+        target = player(1, rank=0, merit=0)
+        others = [player(i, rank=0) for i in range(2, 7)]
+        acts = {1: [Action(Card.WORK, value=8), Action(Card.WORK, value=8)]}
+        for o in others:
+            acts[o.id] = [Action(Card.ATTACK, 1)]
+        out = resolve([target, *others], acts, cfg=REAL_CFG)
+        line = next(m for m in out.public_messages if "功劳" in m)
+        self.assertIn("、", line)
+        self.assertEqual(line.count(" 和 "), 1)   # 只有最后一个用「和」
+
+
 class TestAttackBroadcastIsNotSelfContradictory(unittest.TestCase):
     """公报不能一边说"未受政绩处罚"，一边说"经济问题被人揭发"。
 

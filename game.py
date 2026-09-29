@@ -668,6 +668,7 @@ class Game:
                 for r in range(self.cfg.president_rank)
             ],
             "tenure_required": self.cfg.tenure_required,
+            "merit_overflow_divisor": self.cfg.merit_overflow_divisor,
             "warnings_before_demotion": self.cfg.warnings_before_demotion,
             "picks_per_round": self.cfg.picks_per_round,
             "hand_size": self.cfg.hand_size,

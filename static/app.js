@@ -222,8 +222,18 @@ function renderOrder() {
 
   // 晋升卡摆在哪里，这轮的产出就按哪个官职算——说清楚
   const promoAt = local.findIndex((x) => x.card.startsWith("PROMOTE"));
+  // 只有**实际要掏钱**的晋升才会被"刚贪的钱当轮花不出去"拖住。
+  // 政绩升职一分钱不用出，排在贪污后面照样当场兑现——别吓唬人。
+  const np = priv.next_promotion || {};
+  const meritEnough = np.merit_gap === 0;
+  const card = promoAt >= 0 ? local[promoAt].card : null;
+  const willSpendMoney =
+    card === "PROMOTE_MONEY" ||
+    (card === "PROMOTE_ANY" && !meritEnough) ||
+    (!!np.needs_both && card !== null);   // 最后一步钱和政绩一起花
   const dirtyBefore =
     promoAt > 0 &&
+    willSpendMoney &&
     local.slice(0, promoAt).some((x) => ["CORRUPT", "GRAFT"].includes(x.card));
   const producesAfter = local
     .slice(promoAt + 1)
@@ -559,15 +569,21 @@ function privateResultHtml() {
   // ---- 政绩流水 ----
   const mled = [];
   if (r.merit_gained) mled.push([`干活所得`, `+${r.merit_gained}`, "good"]);
-  if (r.merit_from_attacks) mled.push([`揭发记功`, `+${r.merit_from_attacks}`, "good"]);
-  if (r.attack_merit_loss) mled.push([`被攻击损失`, `−${r.attack_merit_loss}`, "bad"]);
+  if (r.merit_from_attacks) mled.push([`抢功所得`, `+${r.merit_from_attacks}`, "good"]);
+  // 被抢走的和被戴帽子扣的是两回事，分开列
+  const robbed = r.merit_stolen_by_attackers || 0;
+  const fined = (r.attack_merit_loss || 0) - robbed;
+  if (robbed) mled.push([`功劳被抢走`, `−${robbed}`, "bad"]);
+  if (fined > 0) mled.push([`被戴帽子（没干正事）`, `−${fined}`, "bad"]);
   if (r.merit_wiped_by_attack)
     mled.push([`晋升被拦，政绩作废`, `−${r.merit_wiped_by_attack}`, "bad"]);
-  if (r.promotion_merit_cost) {
-    const left = r.merit_before_promotion - r.promotion_merit_cost;
+  if (r.promotion_merit_cost)
     mled.push([`晋升花掉`, `−${r.promotion_merit_cost}`, "bad"]);
-    if (left > 0) mled.push([`余额 ${left} 兑现后打五折`, `→ ${r.merit_after}`, "bad"]);
-  }
+  // 升职后政绩一律打折（÷5），不管是怎么升上去的 —— 贿赂升、熬工龄也一样，
+  // 所以不能只在 promotion_merit_cost 非零时才算。用服务端量好的实际打折量。
+  if (r.promotion_merit_decay)
+    mled.push([`升职后政绩 ÷${pub.merit_overflow_divisor || 5}`,
+               `−${r.promotion_merit_decay}`, "bad"]);
   if (mled.length) {
     L.push('<div class="ledger"><div class="ledhead">政绩</div>');
     mled.forEach(([k, v, cls]) =>
