@@ -274,6 +274,17 @@ ATTACK_STEAL_RANK_BONUS: Fraction = Fraction(0)
 # 匿名举报保持暗箭，两张牌形成明/暗对照。
 ATTACK_ANNOUNCES_ATTACKER: bool = True
 
+# 「穿小鞋」放的黑料。纯风味文本，结算上没有任何影响 ——
+# 但公报要让人一眼看出这一刀走的是三个效果里的哪一个，而不是干巴巴一句
+# "遭到政治攻击"。多备几条免得每轮都是同一句。
+ATTACK_SMEAR_RUMORS: list[str] = [
+    "说他私生活作风有问题，海外还有个私生子开玛莎拉蒂",
+    "说他老家的宅子三百平，图纸都流出来了",
+    "翻出他十年前的一笔旧账，材料递到了上面",
+    "说他爱人的公司刚好中标了他分管的项目",
+    "递了一沓匿名信上去，说他学历是买的",
+]
+
 # 拦下一次政绩晋升时，是否把目标政绩清零。
 # 关掉 = 只是「暂缓升职」：这一轮升不上去，但政绩一点不掉。
 # 开着的话这是全游戏最大的一次性破坏（一刀能削 43 点）而且攻击者一分不拿，
@@ -444,11 +455,47 @@ EVENT_DEFINITIONS: list[dict[str, Any]] = [
 # --------------------------------------------------------------------------
 
 # (最小金额, 最大金额或 None, 单人模板, 多人模板)
-WEALTH_BROADCAST_TIERS: list[tuple[int, int | None, str, str]] = [
-    (1, 2, "{names} 最近生活条件改善了。", "{names} 最近都生活条件改善了。"),
-    (3, 4, "{names} 换了辆新车。", "{names} 最近都换了辆新车。"),
-    (5, 7, "{names} 开上豪车了。", "{names} 最近都开上豪车了。"),
-    (8, None, "{names} 住上洋房了。", "{names} 最近都住上洋房了。"),
+# 财富广播的档位：(下限, 上限, 单人说法, 多人说法)，每档给多条，随机挑一条播。
+#
+# 档位分界按实测的"每轮贪得最多的人净落袋"分位数定：
+#   25% 16 / 中位 25 / 75% 38 / 90% 55
+# 老分界是 1-2 / 3-4 / 5-7 / 8+，那是贪污期望还只有 10 的时候定的；
+# 现在期望 18、到省级能到 50，99% 的播报都落在顶档，永远是"住上洋房了"。
+#
+# 每档多备几条也是为了这个：同一句话每轮重复，玩家就不看了。
+WEALTH_BROADCAST_TIERS: list[tuple[int, int | None, list[str], list[str]]] = [
+    (1, 15, [
+        "{names} 最近气色不错。",
+        "{names} 请客的次数明显多了。",
+        "{names} 给家里换了台大冰箱。",
+    ], [
+        "{names} 最近气色都不错。",
+        "{names} 最近请客都勤了。",
+    ]),
+    (16, 27, [
+        "{names} 换了辆新车。",
+        "{names} 手上那块表像是新的。",
+        "{names} 家里孩子转去私立学校了。",
+    ], [
+        "{names} 最近都换了车。",
+        "{names} 手上的表都换新了。",
+    ]),
+    (28, 44, [
+        "{names} 开上豪车了。",
+        "{names} 在市里又添了一套房。",
+        "{names} 爱人辞职不上班了。",
+    ], [
+        "{names} 最近都开上豪车了。",
+        "{names} 都在市里添置了房产。",
+    ]),
+    (45, None, [
+        "{names} 住上洋房了。",
+        "{names} 把孩子送出国念书了。",
+        "{names} 老家盖起三层小楼，门口还蹲了对石狮子。",
+    ], [
+        "{names} 最近都住上洋房了。",
+        "{names} 都把孩子送出国了。",
+    ]),
 ]
 WEALTH_BROADCAST_NAME_JOINER: str = " 和 "
 
@@ -533,6 +580,9 @@ class Config:
     attack_steal_scaled_by_rank: bool = ATTACK_STEAL_SCALED_BY_RANK
     attack_steal_rank_bonus: Fraction = ATTACK_STEAL_RANK_BONUS
     attack_announces_attacker: bool = ATTACK_ANNOUNCES_ATTACKER
+    attack_smear_rumors: list[str] = field(
+        default_factory=lambda: list(ATTACK_SMEAR_RUMORS)
+    )
     attack_resets_tenure: bool = ATTACK_RESETS_TENURE
     attack_wipes_merit_on_block: bool = ATTACK_WIPES_MERIT_ON_BLOCK
     attack_on_corruption: str = ATTACK_ON_CORRUPTION
@@ -556,7 +606,9 @@ class Config:
     event_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(e) for e in EVENT_DEFINITIONS]
     )
-    wealth_broadcast_tiers: list[tuple[int, int | None, str, str]] = field(
+    wealth_broadcast_tiers: list[
+        tuple[int, int | None, list[str], list[str]]
+    ] = field(
         default_factory=lambda: list(WEALTH_BROADCAST_TIERS)
     )
     wealth_broadcast_name_joiner: str = WEALTH_BROADCAST_NAME_JOINER

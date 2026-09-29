@@ -1275,15 +1275,39 @@ class TestWealthBroadcast(unittest.TestCase):
         msgs = rules.wealth_broadcast([("玩家1", 20)], CFG)
         self.assertNotIn("20", msgs[0])
 
-    def test_tiers(self):
-        self.assertIn("生活条件改善", rules.wealth_broadcast([("A", 1)], CFG)[0])
-        self.assertIn("生活条件改善", rules.wealth_broadcast([("A", 2)], CFG)[0])
-        self.assertIn("新车", rules.wealth_broadcast([("A", 3)], CFG)[0])
-        self.assertIn("新车", rules.wealth_broadcast([("A", 4)], CFG)[0])
-        self.assertIn("豪车", rules.wealth_broadcast([("A", 5)], CFG)[0])
-        self.assertIn("豪车", rules.wealth_broadcast([("A", 7)], CFG)[0])
-        self.assertIn("洋房", rules.wealth_broadcast([("A", 8)], CFG)[0])
-        self.assertIn("洋房", rules.wealth_broadcast([("A", 99)], CFG)[0])
+    def test_tiers_track_the_configured_bounds(self):
+        """档位不写死具体句子——每档有好几条随机挑，只断言"落在哪一档"。"""
+        for tier, (low, high, singles, _multis) in enumerate(CFG.wealth_broadcast_tiers):
+            for amount in filter(None, (low, high)):
+                _, _, got = rules.wealth_broadcast_detail([("A", amount)], CFG)
+                self.assertEqual(got, tier, f"{amount} 应该落在第 {tier} 档")
+            _, _, got = rules.wealth_broadcast_detail([("A", (high or low + 50))], CFG)
+            self.assertEqual(got, tier)
+
+    def test_the_top_tier_is_actually_reachable_and_not_everything(self):
+        """老分界（顶档 8+）在现在的经济下 99% 的播报都落顶档，永远是同一句。"""
+        tiers = CFG.wealth_broadcast_tiers
+        top_low = tiers[-1][0]
+        # 一笔普通的基层贪污不该直接顶格
+        typical = sum(v * n for v, n in CFG.corrupt_card_distribution) / sum(
+            n for _, n in CFG.corrupt_card_distribution
+        )
+        self.assertLess(typical, top_low, "一笔普通贪污就顶格，说明分界太低")
+
+    def test_each_tier_offers_more_than_one_line(self):
+        """同一句每轮重复玩家就不看了。"""
+        for low, _high, singles, multis in CFG.wealth_broadcast_tiers:
+            self.assertGreater(len(singles), 1, f"{low} 档单人说法只有一条")
+            self.assertGreaterEqual(len(multis), 1, f"{low} 档缺多人说法")
+
+    def test_variants_actually_vary(self):
+        import random as _r
+
+        seen = {
+            rules.wealth_broadcast_detail([("A", 50)], CFG, _r.Random(i))[0][0]
+            for i in range(30)
+        }
+        self.assertGreater(len(seen), 1, "随机挑了半天还是同一句")
 
     def test_ties_are_all_broadcast(self):
         msgs = rules.wealth_broadcast([("玩家1", 6), ("玩家2", 2), ("玩家3", 6)], CFG)
@@ -2159,9 +2183,9 @@ class TestIdleTargetPenalty(unittest.TestCase):
             cfg=REAL_CFG,
         )
         said = " ".join(out.public_messages)
-        self.assertIn("暂缓升职", said)
-        self.assertNotIn("白打一场", said)
-        self.assertNotIn("无政绩", said)
+        self.assertIn("升职暂缓", said)
+        self.assertNotIn("扣了个空", said)
+        self.assertNotIn("戴帽子", said)
 
     def test_a_clean_zero_merit_target_is_a_total_whiff(self):
         tgt, o, _ = self._hit(target_merit=0)
@@ -2176,7 +2200,7 @@ class TestIdleTargetPenalty(unittest.TestCase):
             {1: [Action(Card.CORRUPT, value=18)], 2: [Action(Card.ATTACK, 1)]},
             cfg=REAL_CFG,
         )
-        self.assertIn("无政绩", " ".join(out.public_messages))
+        self.assertIn("扣了个空", " ".join(out.public_messages))
 
     def test_a_producer_is_robbed_instead_of_fined(self):
         """干了活就走抢功那条路，不该再叠一份"没干活"的处罚。"""
@@ -2231,7 +2255,7 @@ class TestPromotionCounterMatrix(unittest.TestCase):
         self.assertEqual(o.promotion, PromotionKind.NONE)
         self.assertEqual(me.merit, self.TC + 5)  # 一点不掉，只是暂缓
         self.assertEqual(o.merit_wiped_by_attack, 0)
-        self.assertIn("暂缓升职", said)
+        self.assertIn("升职暂缓", said)
 
     def test_merit_promotion_ignores_reports(self):
         me, o, _ = self._go(Card.PROMOTE_MERIT, reported=True, merit=self.TC + 5)

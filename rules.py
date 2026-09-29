@@ -548,7 +548,9 @@ def storm_targets(
 
 
 def wealth_broadcast_detail(
-    corrupt_by_name: Iterable[tuple[str, int]], cfg: Config = DEFAULT_CONFIG
+    corrupt_by_name: Iterable[tuple[str, int]],
+    cfg: Config = DEFAULT_CONFIG,
+    rng=None,
 ) -> tuple[list[str], list[str], int | None]:
     """返回 (广播文案, 榜首玩家名, 档位下标)。
 
@@ -562,10 +564,12 @@ def wealth_broadcast_detail(
     top = max(amount for _, amount in entries)
     names = [name for name, amount in entries if amount == top]
 
-    for tier, (low, high, single_tpl, multi_tpl) in enumerate(cfg.wealth_broadcast_tiers):
+    for tier, (low, high, singles, multis) in enumerate(cfg.wealth_broadcast_tiers):
         if top >= low and (high is None or top <= high):
             joined = _join_names(names, cfg)
-            tpl = single_tpl if len(names) == 1 else multi_tpl
+            pool = singles if len(names) == 1 else multis
+            # 同一句每轮重复玩家就不看了，所以每档备了几条随机挑
+            tpl = rng.choice(pool) if (rng is not None and pool) else pool[0]
             return [tpl.format(names=joined)], names, tier
     return [], [], None
 
@@ -992,18 +996,18 @@ def resolve_round(
                     outcome.outcomes[aid].private_notes.append(
                         f"{names[target_id]} 政绩本来就没多少，你的攻击扑了个空。"
                     )
+                # 这里是 steal_merit 模式，没有"戴帽子"那套罚款（penalty 是
+                # steal_work 分支的局部变量，引用它会直接 UnboundLocalError）。
                 if cfg.attack_announces_attacker:
                     who = _join_names([names[aid] for aid in attacker_ids], cfg)
                     attack_msgs.append(
-                        f"{who} 拿 {names[target_id]} 开刀，"
-                        + (f"他本轮无功可抢，被扣掉 {penalty} 点政绩。" if penalty
-                           else "但他本轮既无功劳也无政绩，白打一场。")
+                        f"{who} 想抢 {names[target_id]} 的功劳，"
+                        f"可他政绩本来就没多少，扑了个空。"
                     )
                 else:
                     attack_msgs.append(
-                        f"{names[target_id]} 遭到政治攻击，"
-                        + (f"本轮无功可抢，被扣掉 {penalty} 点政绩。" if penalty
-                           else "但没什么可损失的。")
+                        f"{names[target_id]} 遭到政治攻击，但政绩本来就没多少，"
+                        f"对方扑了个空。"
                     )
                 continue
             target.merit = max(0, target.merit - taken)
@@ -1019,12 +1023,15 @@ def resolve_round(
             # （匿名举报保持暗箭，两张牌形成明/暗对照。）
             if cfg.attack_announces_attacker:
                 who = _join_names([names[aid] for aid in attacker_ids], cfg)
+                verb = "把功劳揽了过去" if len(attacker_ids) == 1 else "一起把功劳分了"
                 attack_msgs.append(
-                    f"{who} 抢走了 {names[target_id]} 的 {taken} 点功劳。"
+                    f"【抢功】{names[target_id]} 埋头苦干，"
+                    f"{who} 在上级面前{verb}，抢走 {taken} 点政绩。"
                 )
             else:
                 attack_msgs.append(
-                    f"{names[target_id]} 的功劳被人抢了，损失 {taken} 点政绩。"
+                    f"【抢功】{names[target_id]} 埋头苦干，功劳却被人在上级面前揽了去，"
+                    f"损失 {taken} 点政绩。"
                 )
             continue
 
@@ -1057,14 +1064,14 @@ def resolve_round(
                 #   b) 他政绩真的是 0     -> 这一刀什么也没捞着
                 #   c) 其余               -> 没在攒政绩，没功劳可抢
                 if penalty > 0:
-                    note = f"给他记了一笔，扣掉 {penalty} 点政绩。"
-                    public = f"他本轮无功可抢，被扣掉 {penalty} 点政绩。"
+                    note = f"给他扣了顶不务正业的帽子，扣掉 {penalty} 点政绩。"
+                    public = f"扣掉 {penalty} 点政绩。"
                 elif did_honest_work:
                     note = "他这轮在忙着凭政绩升职，扣不了帽子——但你把他的升职按住了。"
                     public = None  # "暂缓升职"那句已经说明白了，别再补一句"白打"
                 elif target.merit <= 0:
                     note = "他政绩本来就是 0，这一刀彻底落空。"
-                    public = "但他本轮既无功劳也无政绩，白打一场。"
+                    public = "可他政绩本来就是 0，这顶帽子扣了个空。"
                 else:
                     note = "他这轮没在攒政绩，没功劳可抢。"
                     public = "但他本轮没什么功劳可抢。"
@@ -1076,9 +1083,15 @@ def resolve_round(
                 if public is not None:
                     if cfg.attack_announces_attacker:
                         who = _join_names([names[aid] for aid in attacker_ids], cfg)
-                        attack_msgs.append(f"{who} 拿 {names[target_id]} 开刀，{public}")
+                        attack_msgs.append(
+                            f"【戴帽子】{names[target_id]} 这一轮没干正事，"
+                            f"{who} 参了他一本不务正业，{public}"
+                        )
                     else:
-                        attack_msgs.append(f"{names[target_id]} 遭到政治攻击，{public}")
+                        attack_msgs.append(
+                            f"【戴帽子】{names[target_id]} 这一轮没干正事，"
+                            f"被人参了一本不务正业，{public}"
+                        )
                 continue
             pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
             pool = min(pool, target.merit)
@@ -1115,12 +1128,15 @@ def resolve_round(
             # （匿名举报保持暗箭，两张牌形成明/暗对照。）
             if cfg.attack_announces_attacker:
                 who = _join_names([names[aid] for aid in attacker_ids], cfg)
+                verb = "把功劳揽了过去" if len(attacker_ids) == 1 else "一起把功劳分了"
                 attack_msgs.append(
-                    f"{who} 抢走了 {names[target_id]} 的 {taken} 点功劳。"
+                    f"【抢功】{names[target_id]} 埋头苦干，"
+                    f"{who} 在上级面前{verb}，抢走 {taken} 点政绩。"
                 )
             else:
                 attack_msgs.append(
-                    f"{names[target_id]} 的功劳被人抢了，损失 {taken} 点政绩。"
+                    f"【抢功】{names[target_id]} 埋头苦干，功劳却被人在上级面前揽了去，"
+                    f"损失 {taken} 点政绩。"
                 )
             continue
 
@@ -1380,7 +1396,8 @@ def resolve_round(
                 # 规则书第 16 节：攻击堵死政绩那条路，举报堵死金钱那条路。
                 # 没打晋升卡就没有"泡汤"这回事——本来也没在升。
                 promo_msgs.append(
-                    f"{names[p.id]} 同时遭到政治攻击与匿名举报，本轮晋升泡汤。"
+                    f"【穿小鞋】{names[p.id]} 政绩这条路被人放黑料挡住，"
+                    f"转走门路又被匿名举报，本轮晋升泡汤。"
                 )
             elif (
                 o.merit_promotion_blocked
@@ -1390,7 +1407,21 @@ def resolve_round(
                 # "眼看就要上位被一状告倒"那句已经把这件事说透了，别再补一句弱的
                 and not o.merit_wiped_by_attack
             ):
-                promo_msgs.append(f"{names[p.id]} 遭到政治攻击，暂缓升职。")
+                smear = (
+                    rng.choice(cfg.attack_smear_rumors)
+                    if cfg.attack_smear_rumors else "放出黑料"
+                )
+                if cfg.attack_announces_attacker and o.attacked_by:
+                    who = _join_names([names[a] for a in o.attacked_by], cfg)
+                    promo_msgs.append(
+                        f"【穿小鞋】{names[p.id]} 本要凭政绩升职，"
+                        f"{who} 放出黑料，{smear}——升职暂缓。"
+                    )
+                else:
+                    promo_msgs.append(
+                        f"【穿小鞋】{names[p.id]} 本要凭政绩升职，"
+                        f"有人放出黑料，{smear}——升职暂缓。"
+                    )
 
 
         # ---- 7. 工龄 ----
@@ -1426,7 +1457,8 @@ def resolve_round(
     # ---- 财富广播 --------------------------------------------------------
     # 用"落袋"的净额，不是毛收入：当场被没收/抄家的人不该还被传"住上洋房"
     msgs, top_names, tier = wealth_broadcast_detail(
-        ((names[pid], o.net_corrupt_gain) for pid, o in outcome.outcomes.items()), cfg
+        ((names[pid], o.net_corrupt_gain) for pid, o in outcome.outcomes.items()),
+        cfg, rng,
     )
     outcome.wealth_broadcast = msgs
     outcome.wealth_top_ids = [pid for pid in sorted(names) if names[pid] in top_names]
