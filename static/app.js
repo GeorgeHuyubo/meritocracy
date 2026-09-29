@@ -307,20 +307,21 @@ function renderAction() {
         // 干扰牌以前只写"举报一人"，等于什么都没说
         const cut = cfgCache ? fracText(cfgCache.report_reward_ratio) : "一部分";
         const wmax = cfgCache ? cfgCache.warnings_before_demotion : 2;
-        effect = `他<b>贪钱或拿钱买官</b>就查实<br>记一次严重警告、<b>贿赂升职作废</b><br>` +
-          `<span class="warn2">赃款没收 ${cut} 归你；警告满 ${wmax} 次他降级；` +
-          `匿名</span>`;
+        effect =
+          `① 举报他<b>贪污受贿</b> → 赃款没收，${cut} 归我<br>` +
+          `② 举报他<b>贿赂升职</b> → 官没了，钱也要不回来<br>` +
+          `<span class="warn2">两样都记一次降职警告（满 ${wmax} 次降一级）；` +
+          `他这轮清白就白打 · 匿名，他不知道是我</span>`;
       } else if (c === "ATTACK") {
         // 关键是说清楚"抢来的政绩归我"——这是这张牌和纯破坏的根本区别，
         // 光写"抢走他的产出"看不出自己能拿到什么。
         const f = cfgCache ? fracText(cfgCache.attack_steal_fraction) : "1/2";
         const fine = (priv.card_preview || {}).idle_penalty;
         effect =
-          `他这轮挣的政绩，<b>${f} 归我</b><br>` +
-          `他的<b>政绩升职暂缓</b>一轮（政绩不掉）<br>` +
-          `<span class="warn2">他这轮没干正事（工作 / 政绩升职）→ 抢不到，` +
-          `改扣他${fine ? ` ${fine}` : "一笔"} 政绩（我拿不到）；` +
-          `公报会点名说是我干的</span>`;
+          `① <b>抢功</b>：他埋头工作 → 他这轮挣的政绩 ${f} 归我<br>` +
+          `② <b>穿小鞋</b>：他政绩升职 → 放黑料挡住他（他政绩不掉）<br>` +
+          `③ <b>戴帽子</b>：他没干正事 → 扣他 ${fine || "一笔"} 政绩（我拿不到）<br>` +
+          `<span class="warn2">明枪：公报点名说是我干的</span>`;
       }
       const cls = [
         "card",
@@ -473,7 +474,7 @@ function myPanelHtml() {
         ${tag(moneyOK, np.money_gap, "金钱")}
       </div>
       <div class="goalrow">
-        <span class="lbl">警告</span>
+        <span class="lbl">降职警告</span>
         <span class="num ${priv.warnings ? "warnlbl" : ""}">${priv.warnings} / ${
           pub.warnings_before_demotion
         }</span>
@@ -498,7 +499,7 @@ function myPanelHtml() {
       </div>
     </div>
     <div class="hintline">官职倍率 <b>x${(priv.card_preview || {}).rank_multiplier || 1}</b>
-      · 贪钱或拿钱买官被举报查实 = 赃款没收 + 记一次严重警告<br>${
+      · 贪钱或拿钱买官被举报查实 = 赃款没收 + 记一次降职警告<br>${
       meritOK || moneyOK
         ? "<b class=ok>可以升官了 —— 但必须打出对应的晋升卡</b>"
         : "攒够政绩或金钱，再打出晋升卡才能升。工龄满了会自动升。"
@@ -514,7 +515,7 @@ function boardHtml(showLock, final) {
         ? `<td class="num">${pub.locked_players.includes(p.id) ? '<span class=tick>✓</span>' : "…"}</td>`
         : "";
       const warn = p.warnings
-        ? `<span class="warncount" title="严重警告">⚠${p.warnings}</span>`
+        ? `<span class="warncount" title="降职警告">⚠${p.warnings}</span>`
         : "";
       return `<tr${me}><td><span class="dot ${p.connected ? "" : "off"}"></span>${esc(
         p.name
@@ -584,13 +585,13 @@ function privateResultHtml() {
     L.push('<div class="line bad">本轮晋升被阻止。</div>');
   if (r.warnings_issued)
     L.push(
-      `<div class="line bad">被举报查实，记严重警告 ${r.warnings_issued} 次` +
+      `<div class="line bad">被举报查实，记降职警告 ${r.warnings_issued} 次` +
         `（累计 ${r.warnings_after} / ${pub.warnings_before_demotion}）。</div>`
     );
   if (r.bribe_lost)
     L.push(`<div class="line bad">行贿的 ${r.bribe_lost} 打了水漂，官也没升成。</div>`);
   if (r.demotion === "MINOR")
-    L.push('<div class="line bad">警告记满，降一级，警告清空。</div>');
+    L.push('<div class="line bad">降职警告记满，降一级，警告清空。</div>');
   if (r.tenure_reset_by_attack)
     L.push(`<div class="line bad">资历被搅黄，${r.tenure_reset_by_attack} 轮工龄清零</div>`);
   (r.notes || []).forEach((n) => L.push(`<div class="line subtle">${esc(n)}</div>`));
@@ -847,25 +848,24 @@ function rulesHtml(c) {
       但这笔钱会被举报和反腐风暴盯上。期望收益是埋头工作的 3 倍。</li>
   <li><b>以权谋私</b>：钱为主（比中饱私囊少），顺带一点政绩 ——
       这点政绩<b>一定少于埋头工作</b>，只是顺手之作。钱同样算贪污。</li>
-  <li><b>匿名举报</b>：目标本轮只要<b>贪了钱</b>或者<b>拿钱买官</b>，就算查实。查实后：
-      <br>· 本轮贪污所得<b>全部没收</b>（其中 ${frac(c.report_reward_ratio)} 归举报人，其余充公）；存款不动
-      <br>· 拿钱买的官作废，而且<b>行贿的钱也要不回来</b>
-      <br>· 记一次<b>严重警告</b>，工龄清零
-      <br>· 警告攒满 <b>${c.warnings_before_demotion}</b> 次 → 降一级，警告清空重新记
-      <br><b>举报是匿名的</b>，被举报的人不知道是谁干的。</li>
-  <li><b>政治攻击 · 抢功（明枪）</b>：
-      把目标这一轮<b>挣到的政绩</b>切下 <b>${frac(c.attack_steal_fraction)}</b>
-      <b>装进自己兜里</b> —— 他少多少，你就多多少，不是白白打掉。
-      同时让他这一轮的<b>政绩升职暂缓</b>（政绩一点不掉，只是这轮升不上去）。
-      <br>· <b>他这一轮没干活就一点都抢不到</b> —— 所以专打正在埋头建设的人
-      <br>· 他这轮<b>没干正事</b>（既没埋头工作、也没凭政绩升职）→ 改成按他的官职
-        扣一笔政绩（基层 4 / 县级 6 / 市级 8 / 省级 10）。
-        这笔是<b>罚款不是赃物</b>，你拿不到，所以互相攻击仍然是两败俱伤
-      <br>· 闷声捞钱、拿钱买官、忙着搞别人 —— 都算没干正事，照罚
-      <br>· 几个人抢同一个目标要<b>平分那一份</b>，他还是只掉那么多
-      <br>· 抢官大的人更值：省级一张埋头工作产 15 点，基层只产 6 点
-      <br>· <b>公报会点名</b>写明是谁动的手，对方下一轮知道该找谁算账</li>
-</ul>
+  <li><b>匿名举报（暗箭）</b>—— 专治走金钱路线的人，两种情况能抓：
+      <br>① 他这轮<b>贪污受贿</b> → 赃款全部没收（${frac(c.report_reward_ratio)} 归你，其余充公），存款不动
+      <br>② 他这轮<b>贿赂升职</b> → 官升不成，而且<b>行贿的钱也要不回来</b>（这笔也归你一半）
+      <br>两种都会给他记<b>一次降职警告</b>、工龄清零；
+      警告攒满 <b>${c.warnings_before_demotion}</b> 次就降一级，然后警告清空重新记。
+      <br>他这一轮要是清白的，这张牌就<b>白打</b>。
+      <b>匿名</b> —— 他不知道是谁举报的。</li>
+  <li><b>政治攻击（明枪）</b>—— 专治走政绩路线的人，一张牌三个作用：
+      <br>① <b>抢功</b>：他在埋头工作 → 他这轮挣的政绩
+        <b>${frac(c.attack_steal_fraction)} 归你</b>（几个人一起抢就平分这一份，他只掉这么多）
+      <br>② <b>穿小鞋</b>：他想靠政绩升职 → 放黑料<b>挡住他</b>，这轮升不上去
+        （只是暂缓，他<b>政绩一点不掉</b>）
+      <br>③ <b>戴帽子</b>：他这轮<b>没干正事</b>（既没埋头工作、也没凭政绩升职，
+        而是在捞钱 / 买官 / 搞别人）→ 给他扣一笔政绩，
+        按他的官职算（基层 4 / 县级 6 / 市级 8 / 省级 10）。
+        这笔是<b>罚款，你拿不到</b>
+      <br><b>公开署名</b> —— 公报里点名写着是你干的，他下轮知道该找谁算账。
+      <br><b>抢官大的人更值</b>：省级一张埋头工作产 15 点，基层只产 6 点。</li>
 
 <h4>升职的克制关系</h4>
 <table class="rtab">
@@ -878,8 +878,10 @@ function rulesHtml(c) {
       <b>失败，金钱损失，政绩保留</b></td></tr>
   </tbody>
 </table>
-<p class="rsub"><b>攻击克政绩路线，举报克金钱路线。</b>通用升职是"有退路"，
-但退路也会被堵。省级→主席要同时花钱和政绩，所以两张牌都拦得住它。</p>
+<p class="rsub"><b>攻击克政绩路线，举报克金钱路线。</b>通用升职是"有退路"，但退路也会被堵。
+<br><b>省级→主席这一步也一样</b>：虽然钱和政绩要一起花，但"你走的是正规程序还是关系"
+由你打哪张卡决定 —— 打政绩升职就只怕攻击（被拦下只是暂缓，<b>一分钱不损失</b>），
+打贿赂升职就只怕举报。</p>
 
 <h4>全局事件（所有人锁定后才揭晓）</h4>
 <ul class="rlist">${events}</ul>

@@ -155,6 +155,7 @@ class Game:
             p.merit = 0
             p.rank = self.cfg.base_rank
             p.tenure = 0
+            p.warnings = 0
 
         self.phase = Phase.LOBBY
         self.round_number = 0
@@ -838,6 +839,7 @@ class Game:
                     "merit": p.merit,
                     "rank": p.rank,
                     "tenure": p.tenure,
+                    "warnings": p.warnings,
                     "token": p.token,
                     "is_ai": p.is_ai,
                 }
@@ -889,6 +891,7 @@ class Game:
                 merit=int(row["merit"]),
                 rank=int(row["rank"]),
                 tenure=int(row["tenure"]),
+                warnings=int(row.get("warnings") or 0),
                 token=row["token"],
                 connected=bool(row.get("is_ai")),  # AI 永远在线
                 is_ai=bool(row.get("is_ai")),

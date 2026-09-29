@@ -133,3 +133,44 @@ class TestStorage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWarningsSurviveRestart(unittest.TestCase):
+    """降职警告是跨轮累计的，不存盘的话服务器一重启就等于大赦天下。"""
+
+    def test_warnings_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GameStore(Path(tmp) / "w.db")
+            game = Game(game_id="w", cfg=DEFAULT_CONFIG, rng=random.Random(1))
+            for i in range(3):
+                game.add_player(f"P{i + 1}")
+            game.start_game()
+            game.players[1].warnings = 1
+            game.players[2].warnings = 0
+            store.save(game)
+
+            back = store.load("w", cfg=DEFAULT_CONFIG)
+            self.assertEqual(back.players[1].warnings, 1)
+            self.assertEqual(back.players[2].warnings, 0)
+            store.close()
+
+    def test_old_databases_without_the_column_still_load(self):
+        """旧库没有 warnings 列，迁移要能自动补上，不能让存档打不开。"""
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                "CREATE TABLE players (game_id TEXT, player_id INTEGER, name TEXT,"
+                " token TEXT, money INTEGER, merit INTEGER, rank INTEGER,"
+                " tenure INTEGER, is_ai INTEGER DEFAULT 0,"
+                " PRIMARY KEY (game_id, player_id));"
+            )
+            conn.commit()
+            conn.close()
+
+            store = GameStore(path)
+            cols = {r[1] for r in store.conn.execute("PRAGMA table_info(players)")}
+            self.assertIn("warnings", cols)
+            store.close()

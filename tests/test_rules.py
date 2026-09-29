@@ -890,24 +890,40 @@ class TestBriberyIsReportable(unittest.TestCase):
         self.assertEqual(mine.money_from_reports, o.bribe_lost // 2)
 
     def test_the_final_step_counts_as_bribery_too(self):
-        """省级 -> 主席要同时花钱和政绩，那笔钱一样是行贿。
+        """最后一步算不算行贿，取决于**打的是哪张卡**，不取决于钱花没花。
 
-        踩过：因为"政绩也够"就被当成走政绩路线放过了，
-        结果最该被拦的那一步反而查不到。
+        省级->主席钱和政绩一起花，但"我走的是正规程序还是关系"是你自己声明的：
+        打贿赂升职 = 走关系 -> 举报抓得到；打政绩升职 = 走正规 -> 举报碰不到。
         """
         top = REAL_CFG.president_rank - 1
-        tgt = player(1, rank=top, merit=REAL_CFG.merit_cost(top) + 5,
-                     money=REAL_CFG.money_cost(top) + 5)
+        tc, mc = REAL_CFG.merit_cost(top), REAL_CFG.money_cost(top)
+
+        # 贿赂升职：被举报查实，钱没了、记警告、官没升
+        briber = player(1, rank=top, merit=tc + 5, money=mc + 5)
         out = resolve(
-            [tgt, player(2)],
-            {1: [Action(Card.PROMOTE_ANY)], 2: [Action(Card.REPORT, 1)]},
+            [briber, player(2)],
+            {1: [Action(Card.PROMOTE_MONEY)], 2: [Action(Card.REPORT, 1)]},
             cfg=REAL_CFG,
         )
         o = out.outcomes[1]
         self.assertTrue(o.report_effective)
-        self.assertEqual(o.bribe_lost, REAL_CFG.money_cost(top))
+        self.assertEqual(o.bribe_lost, mc)
+        self.assertEqual(o.warnings_issued, 1)
         self.assertEqual(o.promotion, PromotionKind.NONE)
-        self.assertEqual(tgt.rank, top)  # 没能登顶
+        self.assertEqual(briber.rank, top)
+
+        # 政绩升职：同样花了钱，但走的是正规程序，举报碰不到
+        honest = player(1, rank=top, merit=tc + 5, money=mc + 5)
+        out2 = resolve(
+            [honest, player(2)],
+            {1: [Action(Card.PROMOTE_MERIT)], 2: [Action(Card.REPORT, 1)]},
+            cfg=REAL_CFG,
+        )
+        o2 = out2.outcomes[1]
+        self.assertFalse(o2.report_effective)
+        self.assertEqual(o2.bribe_lost, 0)
+        self.assertEqual(o2.promotion, PromotionKind.BOTH)
+        self.assertEqual(honest.rank, REAL_CFG.president_rank)  # 登顶
 
     def test_the_switch_makes_bribery_safe_again(self):
         """关掉 REPORT_CATCHES_BRIBERY：举报只管贪污，光买官不构成罪名。"""
@@ -1426,14 +1442,24 @@ class TestPresidentNeedsBoth(unittest.TestCase):
 
     def test_attack_still_blocks_it(self):
         tc, mc = REAL_CFG.merit_cost(self.TOP), REAL_CFG.money_cost(self.TOP)
+        # 政绩升职没有退路：被攻击就是暂缓
         p = self._p(merit=tc, money=mc)
         out = resolve(
             [p, player(2)],
-            {1: [Action(Card.PROMOTE_ANY)], 2: [Action(Card.ATTACK, 1)]},
+            {1: [Action(Card.PROMOTE_MERIT)], 2: [Action(Card.ATTACK, 1)]},
             cfg=REAL_CFG,
         )
         self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
         self.assertEqual(p.rank, self.TOP)
+        # 通用升职有退路：政绩被挡，改走打点，照样登顶
+        p2 = self._p(merit=tc, money=mc)
+        out2 = resolve(
+            [p2, player(2)],
+            {1: [Action(Card.PROMOTE_ANY)], 2: [Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        self.assertEqual(out2.outcomes[1].promotion, PromotionKind.BOTH)
+        self.assertEqual(p2.rank, REAL_CFG.president_rank)
 
     def test_tenure_cannot_carry_you_to_the_top(self):
         """熬资历最多熬到省级，最后一步必须靠双条件挣。"""
@@ -1835,17 +1861,23 @@ class TestAttackedPromotionFallback(unittest.TestCase):
         # 起始 mc+5，扣掉门槛 mc，余额不衰减（工资是回合开头发的，不在结算里）
         self.assertEqual(me.money, 5)
 
-    def test_top_step_has_no_fallback_because_it_needs_merit(self):
+    def test_top_step_merit_card_has_no_fallback(self):
+        """最后一步打政绩升职被攻击拦下 = 暂缓，而且**零惩罚**。"""
         top = REAL_CFG.president_rank - 1
-        me = player(1, rank=top,
-                    merit=REAL_CFG.merit_cost(top), money=REAL_CFG.money_cost(top))
+        tc, mc = REAL_CFG.merit_cost(top), REAL_CFG.money_cost(top)
+        me = player(1, rank=top, merit=tc + 10, money=mc + 20)
         out = resolve(
             [me, player(2)],
-            {1: [Action(Card.PROMOTE_ANY)], 2: [Action(Card.ATTACK, 1)]},
+            {1: [Action(Card.PROMOTE_MERIT)], 2: [Action(Card.ATTACK, 1)]},
             cfg=REAL_CFG,
         )
-        self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+        o = out.outcomes[1]
+        self.assertEqual(o.promotion, PromotionKind.NONE)
         self.assertEqual(me.rank, top)
+        self.assertEqual(me.money, mc + 20)   # 钱一分没花
+        self.assertEqual(me.merit, tc + 10)   # 政绩一分没掉
+        self.assertEqual(o.bribe_lost, 0)
+        self.assertEqual(o.warnings_issued, 0)
 
 
 class TestPathEconomics(unittest.TestCase):

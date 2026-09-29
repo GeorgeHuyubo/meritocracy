@@ -948,11 +948,21 @@ class TestRestart(unittest.TestCase):
         # token 一变，客户端存的身份就作废，所有人都得重新输名字
         self.assertEqual(before, after)
 
+    def test_warnings_do_not_carry_into_the_next_game(self):
+        """降职警告是累计的，重开必须清零——不然上一局的处分跟着你进新局。"""
+        game = self._mid_game()
+        for p in game.players.values():
+            p.warnings = 1
+        game.restart(requester_id=game.host_id)
+        for p in game.players.values():
+            self.assertEqual(p.warnings, 0, p.name)
+
     def test_scores_and_history_are_wiped(self):
         game = self._mid_game()
         game.restart(requester_id=game.host_id)
         for p in game.players.values():
             self.assertEqual((p.money, p.merit, p.rank, p.tenure), (0, 0, 0, 0))
+            self.assertEqual(p.warnings, 0)
         self.assertEqual(game.history, [])
         self.assertEqual(game.archive, [])
         self.assertEqual(game.ledger, {})

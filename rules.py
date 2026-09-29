@@ -296,21 +296,38 @@ def _resolve_promotion_card(
         money_ok = card.can_use_money and has_money_for_promotion(player, cfg)
 
     if cfg.needs_both(player.rank):
-        # 这一级要政绩和金钱同时达标，被攻击一挡就彻底没戏
-        if outcome.attacked or not can_promote_with_both(player, cfg):
+        # 这一级钱和政绩都要花，所以"走的是哪条路"不由资源决定，**由打出的卡决定**：
+        #   政绩升职 -> 声明走正规程序：怕政治攻击，被拦下只是暂缓、零惩罚
+        #   贿赂升职 -> 声明走关系：怕匿名举报，被查实要赔钱记警告
+        #   通用升职 -> 先按政绩升职算；被攻击拦下就回退成贿赂升职
+        # 上面那段已经把"被攻击 + 能用政绩"的情况标记成 merit_promotion_blocked
+        # 并把 merit_ok 置了 False，所以这里只看还剩哪条路。
+        if not can_promote_with_both(player, cfg):
             if not auto:
                 gaps = []
                 if not has_merit_for_promotion(player, cfg):
                     gaps.append("政绩不够")
                 if not has_money_for_promotion(player, cfg):
                     gaps.append("钱不够")
-                if outcome.attacked:
-                    gaps.append("被人按住了")
                 outcome.private_notes.append(
                     "这一级要政绩和金钱同时达标：" + "、".join(gaps or ["条件不足"])
                 )
             return
+        if outcome.merit_promotion_blocked and not card.can_use_money:
+            # 政绩升职没有退路：暂缓，且**不受任何惩罚**（钱不掉、不记警告）
+            if not auto:
+                outcome.private_notes.append(
+                    "最后一步被政治攻击按住了，只是暂缓——钱和政绩都还在。"
+                )
+            return
+        if outcome.attacked and not card.can_use_merit:
+            # 贿赂升职声明的是关系路线，政治攻击拦不住它
+            pass
         kind = PromotionKind.BOTH
+        if outcome.merit_promotion_blocked:
+            outcome.private_notes.append(
+                "政绩这条路被人挡下，改走打点——最后一步的钱照样要花。"
+            )
     elif merit_ok:
         kind = PromotionKind.MERIT
     elif money_ok:
@@ -473,7 +490,7 @@ def classify_report(
 
 
 def warnings_for(kind: DemotionKind, cfg: Config = DEFAULT_CONFIG) -> int:
-    """这次查实记几个严重警告。"""
+    """这次查实记几个降职警告。"""
     if kind is DemotionKind.NONE:
         return 0
     if kind is DemotionKind.MAJOR:
@@ -770,17 +787,18 @@ def resolve_round(
                 # 都无关。攻击那一步要靠它判断他这轮是不是在干正事。
                 if card.can_use_merit and has_merit_for_promotion(p, cfg):
                     o.tried_merit_promotion = True
+                # 走的是政绩那条路还是金钱那条路，**由卡决定**——
+                # 双条件台阶（省级->主席）钱和政绩一起花，但"我声明走哪条路"
+                # 仍然看你打的是政绩升职还是贿赂升职，这决定了你怕谁：
+                # 走政绩怕攻击（只暂缓、零惩罚），走金钱怕举报（赔钱记警告）。
                 would_use_merit = (
                     card.can_use_merit
                     and has_merit_for_promotion(p, cfg)
                     and not o.attacked
-                    and not cfg.needs_both(p.rank)
                 )
                 # 不走政绩就得掏钱 —— 哪怕这会儿兜里还没钱：
                 # 他可能正等着本轮举报/攻击抄来的赃款到账（见 interfered_yet）。
-                may_need_money = cfg.needs_both(p.rank) or (
-                    card.can_use_money and not would_use_merit
-                )
+                may_need_money = card.can_use_money and not would_use_merit
                 # 只有要掏钱的晋升才可能被举报掐掉，所以也只有它需要等：
                 #   targeted       —— 有人举报我，这笔钱可能被查
                 #   interfered_yet —— 我想花的是本轮举报/攻击抄来的钱，还没到账
@@ -1170,11 +1188,11 @@ def resolve_round(
         if o.attacked and o.report_effective and elig_money_pre and elig_merit_pre:
             o.promotion_blocked_by_attack_report = True
 
-    # ---- 5. 没收 + 严重警告 --------------------------------------------------
+    # ---- 5. 没收 + 降职警告 --------------------------------------------------
     # 查实的后果不再是"一次被抓就打回基层"那种断崖，而是一张分期账单：
     #   * 本轮贪污所得全部没收
     #   * 拿钱买的官作废，而且**钱照样没了**——礼送出去了，事没办成
-    #   * 记一次严重警告，工龄清零
+    #   * 记一次降职警告，工龄清零
     #   * 警告攒够 WARNINGS_BEFORE_DEMOTION 次才降一级，然后警告清空
     # 先把所有没收金额算完再统一扣，这样"甲举报乙、乙同时举报甲"能同时结算，
     # 不会因为先后顺序让某一方多拿或少拿。
@@ -1235,7 +1253,7 @@ def resolve_round(
             left = cfg.warnings_before_demotion - p.warnings
             report_msgs.append(
                 f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
-                f"记严重警告一次（再记 {left} 次就要降级）。"
+                f"记降职警告一次（再记 {left} 次就要降级）。"
             )
 
     # 分赃：没收的赃款里只有 report_reward_ratio 归举报人，其余充公；
@@ -1358,7 +1376,7 @@ def resolve_round(
         if o.promotion is not PromotionKind.NONE:
             p.tenure = 0
         elif o.report_effective:
-            p.tenure = 0  # 任何一次严重警告都把工龄清零（降级与否都一样）
+            p.tenure = 0  # 任何一次降职警告都把工龄清零（降级与否都一样）
         else:
             p.tenure += 1
             tenure_ceiling = (
