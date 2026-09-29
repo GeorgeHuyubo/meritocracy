@@ -2092,10 +2092,50 @@ class TestIdleTargetPenalty(unittest.TestCase):
         self.assertEqual(out.outcomes[1].attack_merit_loss, 0)
         self.assertEqual(me.merit, tc + 5)  # 政绩保留
 
+    def test_the_message_does_not_claim_zero_merit_when_he_has_plenty(self):
+        """豁免戴帽子 ≠ 他政绩是 0，而且穿小鞋那一下明明命中了。
+
+        真实对局里出现过：老张打了政绩升职、政绩 16、升职确实被拦下了，
+        公报却说"他本轮既无功劳也无政绩，白打一场"——三处都不对。
+        """
+        tc = REAL_CFG.merit_cost(0)
+        tgt, o, _ = self._hit(
+            target_merit=tc + 1,
+            target_picks=[Action(Card.PROMOTE_MERIT), Action(Card.CORRUPT, value=18)],
+        )
+        self.assertEqual(o.attack_merit_loss, 0)      # 豁免了帽子
+        self.assertEqual(tgt.merit, tc + 1)           # 政绩一点没掉
+        self.assertTrue(o.merit_promotion_blocked)    # 但穿小鞋命中了
+
+    def test_the_whiff_line_is_suppressed_when_the_block_landed(self):
+        """穿小鞋命中时不能再播"白打一场"——"暂缓升职"那句已经说明白了。"""
+        tc = REAL_CFG.merit_cost(0)
+        me = player(1, rank=0, merit=tc + 1, money=30)
+        out = resolve(
+            [me, player(2, rank=0)],
+            {1: [Action(Card.PROMOTE_MERIT), Action(Card.CORRUPT, value=18)],
+             2: [Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        said = " ".join(out.public_messages)
+        self.assertIn("暂缓升职", said)
+        self.assertNotIn("白打一场", said)
+        self.assertNotIn("无政绩", said)
+
     def test_a_clean_zero_merit_target_is_a_total_whiff(self):
         tgt, o, _ = self._hit(target_merit=0)
         self.assertEqual(o.attack_merit_loss, 0)
         self.assertEqual(tgt.merit, 0)
+
+    def test_only_a_genuinely_zero_target_says_zero_merit(self):
+        """"他政绩本来就是 0"这句只能在政绩真的是 0 时出现。"""
+        zero = player(1, rank=0, merit=0, money=30)
+        out = resolve(
+            [zero, player(2, rank=0)],
+            {1: [Action(Card.CORRUPT, value=18)], 2: [Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        self.assertIn("无政绩", " ".join(out.public_messages))
 
     def test_a_producer_is_robbed_instead_of_fined(self):
         """干了活就走抢功那条路，不该再叠一份"没干活"的处罚。"""

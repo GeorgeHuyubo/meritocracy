@@ -1044,27 +1044,36 @@ def resolve_round(
                 if penalty > 0:
                     target.merit -= penalty
                     o_target.attack_merit_loss += penalty
+
+                # penalty == 0 有三种完全不同的原因，不能都说成"他政绩本来就是 0"：
+                #   a) 他在忙着凭政绩升职 -> 豁免帽子，但穿小鞋那一下是命中的
+                #   b) 他政绩真的是 0     -> 这一刀什么也没捞着
+                #   c) 其余               -> 没在攒政绩，没功劳可抢
+                if penalty > 0:
+                    note = f"给他记了一笔，扣掉 {penalty} 点政绩。"
+                    public = f"他本轮无功可抢，被扣掉 {penalty} 点政绩。"
+                elif did_honest_work:
+                    note = "他这轮在忙着凭政绩升职，扣不了帽子——但你把他的升职按住了。"
+                    public = None  # "暂缓升职"那句已经说明白了，别再补一句"白打"
+                elif target.merit <= 0:
+                    note = "他政绩本来就是 0，这一刀彻底落空。"
+                    public = "但他本轮既无功劳也无政绩，白打一场。"
+                else:
+                    note = "他这轮没在攒政绩，没功劳可抢。"
+                    public = "但他本轮没什么功劳可抢。"
+
                 for aid in attacker_ids:
                     outcome.outcomes[aid].private_notes.append(
-                        f"{names[target_id]} 本轮没在攒政绩，没功劳可抢；"
-                        + (f"给他记了一笔，扣掉 {penalty} 点政绩。" if penalty
-                           else "他政绩本来就是 0，这一刀彻底落空。")
+                        f"{names[target_id]} 本轮没在攒政绩；{note}"
                     )
-                if cfg.attack_announces_attacker:
-                    who = cfg.wealth_broadcast_name_joiner.join(
-                        names[aid] for aid in attacker_ids
-                    )
-                    attack_msgs.append(
-                        f"{who} 拿 {names[target_id]} 开刀，"
-                        + (f"他本轮无功可抢，被扣掉 {penalty} 点政绩。" if penalty
-                           else "但他本轮既无功劳也无政绩，白打一场。")
-                    )
-                else:
-                    attack_msgs.append(
-                        f"{names[target_id]} 遭到政治攻击，"
-                        + (f"本轮无功可抢，被扣掉 {penalty} 点政绩。" if penalty
-                           else "但没什么可损失的。")
-                    )
+                if public is not None:
+                    if cfg.attack_announces_attacker:
+                        who = cfg.wealth_broadcast_name_joiner.join(
+                            names[aid] for aid in attacker_ids
+                        )
+                        attack_msgs.append(f"{who} 拿 {names[target_id]} 开刀，{public}")
+                    else:
+                        attack_msgs.append(f"{names[target_id]} 遭到政治攻击，{public}")
                 continue
             pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
             pool = min(pool, target.merit)
