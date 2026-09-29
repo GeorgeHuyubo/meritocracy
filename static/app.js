@@ -308,10 +308,10 @@ function renderAction() {
         const cut = cfgCache ? fracText(cfgCache.report_reward_ratio) : "一部分";
         const wmax = cfgCache ? cfgCache.warnings_before_demotion : 2;
         effect =
-          `① 举报他<b>贪污受贿</b> → 赃款没收，${cut} 归我<br>` +
+          `① 举报他<b>贪污受贿</b> → 赃款没收<br>` +
           `② 举报他<b>贿赂升职</b> → 官没了，钱也要不回来<br>` +
-          `<span class="warn2">两样都记一次降职警告（满 ${wmax} 次降一级）；` +
-          `他这轮清白就白打 · 匿名，他不知道是我</span>`;
+          `<b>抄到的钱 ${cut} 归我</b>，两样都记一次降职警告（满 ${wmax} 次降一级）<br>` +
+          `<span class="warn2">他这轮清白就白打 · 匿名，他不知道是我</span>`;
       } else if (c === "ATTACK") {
         // 关键是说清楚"抢来的政绩归我"——这是这张牌和纯破坏的根本区别，
         // 光写"抢走他的产出"看不出自己能拿到什么。
@@ -849,9 +849,10 @@ function rulesHtml(c) {
   <li><b>以权谋私</b>：钱为主（比中饱私囊少），顺带一点政绩 ——
       这点政绩<b>一定少于埋头工作</b>，只是顺手之作。钱同样算贪污。</li>
   <li><b>匿名举报（暗箭）</b>—— 专治走金钱路线的人，两种情况能抓：
-      <br>① 他这轮<b>贪污受贿</b> → 赃款全部没收（${frac(c.report_reward_ratio)} 归你，其余充公），存款不动
-      <br>② 他这轮<b>贿赂升职</b> → 官升不成，而且<b>行贿的钱也要不回来</b>（这笔也归你一半）
-      <br>两种都会给他记<b>一次降职警告</b>、工龄清零；
+      <br>① 他这轮<b>贪污受贿</b> → 本轮赃款全部没收（存款不动）
+      <br>② 他这轮<b>贿赂升职</b> → 官升不成，而且<b>行贿的钱也要不回来</b>
+      <br>两种抄到的钱都是<b>${frac(c.report_reward_ratio)} 归你、其余充公</b>；
+        两种都给他记<b>一次降职警告</b>、工龄清零；
       警告攒满 <b>${c.warnings_before_demotion}</b> 次就降一级，然后警告清空重新记。
       <br>他这一轮要是清白的，这张牌就<b>白打</b>。
       <b>匿名</b> —— 他不知道是谁举报的。</li>
