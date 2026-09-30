@@ -12,9 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ai  # noqa: E402
+import rules  # noqa: E402
 from config import DEFAULT_CONFIG  # noqa: E402
 from game import Game  # noqa: E402
-from models import Card, DealtCard  # noqa: E402
+from models import Card, DealtCard, Origin  # noqa: E402
 
 CFG = DEFAULT_CONFIG
 
@@ -117,6 +118,104 @@ class TestAgentOnlySeesPublicInfo(unittest.TestCase):
             if game.is_over:
                 break
             game.advance_round()
+
+
+class TestTheAiUnderstandsOrigins(unittest.TestCase):
+    """出身是公开信息，AI 必须把它算进去。
+
+    不算的话会原样重演上一轮那个 bug：AI 用错门槛 -> 算错"他还差多远"
+    -> 终局那道"有人下一步就夺冠"的刹车一次都不踩，对手当轮登顶。
+    官二代的政绩门槛打了八折，正是这类。
+    """
+
+    def _agent(self):
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0))
+        return pool.get(1)
+
+    def test_it_uses_the_discounted_threshold_for_a_patronage_opponent(self):
+        agent = self._agent()
+        tc = CFG.merit_cost(0)
+        cut = rules.merit_cost_at(0, "OFFICIAL", CFG)
+        self.assertLess(cut, tc)
+        plain = agent._progress(0, 0, cut, None)
+        vip = agent._progress(0, 0, cut, "OFFICIAL")
+        self.assertEqual(vip, 1.0, "官二代这点政绩已经够线了，AI 该看出来")
+        self.assertLess(plain, 1.0)
+
+    def test_a_patronage_opponent_reads_as_more_threatening(self):
+        """同样的政绩，官二代离晋升更近，威胁值就该更高。"""
+        agent = self._agent()
+        merit = CFG.merit_cost(1) * 0.9
+        plain = agent._threat(1, agent._progress(1, 0, merit, None))
+        vip = agent._threat(1, agent._progress(1, 0, merit, "OFFICIAL"))
+        self.assertGreater(vip, plain)
+
+    def test_about_to_win_accounts_for_the_discount(self):
+        """终局刹车：官二代够线时门槛更低，不能拿原价去比。"""
+        agent = self._agent()
+        top = CFG.president_rank - 1
+        cut = rules.merit_cost_at(top, "OFFICIAL", CFG)
+        self.assertLess(cut, CFG.merit_cost(top))
+        model = ai.OpponentModel()
+        model.money_est = CFG.money_cost(top) * 10  # 钱那侧管够，只看政绩
+        vip = {"id": 2, "rank": top, "merit": cut, "origin": "OFFICIAL"}
+        plain = {"id": 3, "rank": top, "merit": cut, "origin": None}
+        self.assertTrue(agent._about_to_win(vip, model), "官二代已经够线了")
+        self.assertFalse(agent._about_to_win(plain, model))
+
+    def test_attacking_a_peasant_is_worth_less(self):
+        """贫农免疫穿小鞋，所以"挡住他晋升"那份价值不该算进去。"""
+        agent = self._agent()
+        tc = CFG.merit_cost(1)
+        public = {
+            "players": [
+                {"id": 1, "name": "我", "rank": 1, "merit": 0, "tenure": 0, "origin": None},
+                {"id": 2, "name": "贫农", "rank": 1, "merit": tc, "tenure": 0,
+                 "origin": "PEASANT"},
+                {"id": 3, "name": "普通", "rank": 1, "merit": tc, "tenure": 0,
+                 "origin": None},
+            ],
+            "round": 3, "last_result": None, "picks_per_round": CFG.picks_per_round,
+            "max_rounds": CFG.max_rounds,
+        }
+        private = {"rank": 1, "merit": 0, "money": 0, "origin": None}
+        agent.observe(public)
+        opp = {o["id"]: o for o in public["players"]}
+        peasant = agent._score_attack(public, private, opp[2])[0]
+        plain = agent._score_attack(public, private, opp[3])[0]
+        self.assertLess(peasant, plain, "打贫农和打普通人一样值钱 = 没认出免疫")
+
+    def test_an_accountant_fears_corruption_less(self):
+        """做账能保住一半，所以会计对"被抓"的估损该比别人小。"""
+        agent = self._agent()
+        self.assertLess(agent._exposed_share("ACCOUNTANT"), 1.0)
+        self.assertEqual(agent._exposed_share(None), 1.0)
+        self.assertEqual(agent._exposed_share("RICH"), 1.0)
+
+    def test_a_grinder_values_work_more(self):
+        agent = self._agent()
+        self.assertGreater(
+            agent._own_work_merit(0, 0, "GRINDER"), agent._own_work_merit(0, 0, None)
+        )
+        self.assertGreater(
+            agent._own_work_merit(10, 2, "GRINDER"), agent._own_work_merit(10, 2, None)
+        )
+
+    def test_the_master_switch_makes_the_ai_blind_to_origins_too(self):
+        """关掉总开关时技能不生效，AI 的估值也得跟着回到原样，
+        否则平衡对照组测出来的是"规则关了但 AI 还按开着算"。"""
+        import dataclasses
+
+        off = dataclasses.replace(CFG, origins_enabled=False)
+        pool = ai.AgentPool(cfg=off, rng=random.Random(0))
+        agent = pool.get(1)
+        self.assertEqual(
+            agent._progress(0, 0, 10, "OFFICIAL"), agent._progress(0, 0, 10, None)
+        )
+        self.assertEqual(agent._exposed_share("ACCOUNTANT"), 1.0)
+        self.assertEqual(
+            agent._own_work_merit(0, 0, "GRINDER"), agent._own_work_merit(0, 0, None)
+        )
 
 
 if __name__ == "__main__":

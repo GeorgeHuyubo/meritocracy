@@ -420,27 +420,47 @@ def apply_origin_start_bonuses(
     return granted
 
 
-def merit_cost_for(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> int | None:
-    """这个玩家升下一级要多少政绩。已经到顶返回 None。
+def merit_cost_at(
+    rank: int, origin_id: str | None, cfg: Config = DEFAULT_CONFIG
+) -> int | None:
+    """某个官职 + 某个出身，升下一级要多少政绩。已经到顶返回 None。
 
     和 `cfg.merit_cost(rank)` 的区别是它认得出身：官二代「提携」按
     `ORIGIN_PATRONAGE_MERIT_RATIO` 打折。**所有读政绩门槛的地方都要走这里**，
     漏一处就会出现"UI 说要 12，结算要 15"这类对不上的账。
+
+    取 (rank, origin_id) 而不是 PlayerState，是因为 AI 评估对手时手上只有
+    公开 payload（一个 dict），没有 PlayerState。两边共用同一份实现，
+    才不会出现"AI 以为他还差很远、其实他下一轮就登顶"那类 bug。
     """
-    base = cfg.merit_cost(player.rank)
+    base = cfg.merit_cost(rank)
     if base is None:
         return None
-    origin = cfg.origin(player.origin.value if player.origin else None)
+    origin = cfg.origin(origin_id)
     if origin and origin["id"] == "OFFICIAL":
         # 向上取整：打折不能把门槛抹成 0，也不该出现小数
         return math.ceil(Fraction(base) * cfg.origin_patronage_merit_ratio)
     return base
 
 
+def money_cost_at(
+    rank: int, origin_id: str | None, cfg: Config = DEFAULT_CONFIG
+) -> int | None:
+    """同上，金钱那一侧。目前没有出身会改它，留着是为了对称——
+    将来加"金钱版提携"就不用再过一遍所有调用点。"""
+    return cfg.money_cost(rank)
+
+
+def merit_cost_for(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> int | None:
+    return merit_cost_at(
+        player.rank, player.origin.value if player.origin else None, cfg
+    )
+
+
 def money_cost_for(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> int | None:
-    """这个玩家升下一级要多少钱。目前没有出身改金钱门槛，留着是为了对称——
-    有了它，将来加"金钱版提携"就不用再satisfy一遍所有调用点。"""
-    return cfg.money_cost(player.rank)
+    return money_cost_at(
+        player.rank, player.origin.value if player.origin else None, cfg
+    )
 
 
 def has_money_for_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> bool:

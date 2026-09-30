@@ -706,6 +706,7 @@ class Game:
             "rank": player.rank,
             "rank_name": self.cfg.rank_name(player.rank),
             "tenure": player.tenure,
+            "origin": player.origin.value if player.origin else None,
             "hand": [d.view() for d in self.hands.get(player_id, [])],
             "picks": [
                 {"action": a.card.value, "target": a.target_id, "value": a.value}
