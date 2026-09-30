@@ -155,7 +155,18 @@ class Hub:
         """
         game = room.game
         moved = False
-        if game.phase is Phase.ACTION_SELECTION:
+        if game.phase is Phase.ORIGIN_SELECT:
+            for pid in game.ai_player_ids():
+                if game.players[pid].origin is not None:
+                    continue
+                try:
+                    game.choose_origin(pid, ai.choose_origin(game, pid, room.pool))
+                    moved = True
+                except GameError as exc:
+                    print(f"[AI] 房间 {room.code} 玩家 {pid} 挑出身失败：{exc}")
+                    game.force_origins()
+                    moved = True
+        elif game.phase is Phase.ACTION_SELECTION:
             for pid in game.ai_player_ids():
                 sel = game.selections.get(pid)
                 if sel is None or sel.locked:
@@ -188,9 +199,16 @@ class Hub:
     async def maybe_advance(self, room: Room) -> None:
         """所有人锁定 -> 揭示事件 -> 结算；所有人确认 -> 下一轮。"""
         game = room.game
+        before = game.phase
         if self.drive_ai(room):
             self.save(room)
             await self.broadcast(room)
+
+        # AI 挑完出身可能直接把阶段推进到出牌了，但那一趟它们还没出牌，
+        # 得再跑一次 drive_ai，否则全场卡在"等 AI 锁定"
+        if before is Phase.ORIGIN_SELECT and game.phase is not before:
+            await self.maybe_advance(room)
+            return
 
         if game.phase is Phase.ACTION_SELECTION and game.all_locked():
             if room.reveal_task is None or room.reveal_task.done():
@@ -297,7 +315,22 @@ class Hub:
 
         elif kind == "start":
             async with room.lock:
-                game.start_game(requester_id=player_id)
+                # 线上才走"挑出身"那一步；模拟器和测试直接开局
+                game.start_game(requester_id=player_id, draft_origins=True)
+                self.save(room)
+            await self.broadcast(room)
+            await self.maybe_advance(room)
+
+        elif kind == "choose_origin":
+            async with room.lock:
+                game.choose_origin(player_id, msg.get("origin"))
+                self.save(room)
+            await self.broadcast(room)
+            await self.maybe_advance(room)
+
+        elif kind == "force_origins":
+            async with room.lock:
+                game.force_origins(requester_id=player_id)
                 self.save(room)
             await self.broadcast(room)
             await self.maybe_advance(room)
@@ -446,6 +479,9 @@ async def api_config() -> JSONResponse:
                 for e in cfg.event_definitions
                 if e["weight"] > 0
             ],
+            "origins": [dict(o) for o in cfg.origin_definitions]
+            if cfg.origins_enabled else [],
+            "origin_choices_offered": cfg.origin_choices_offered,
         }
     )
 

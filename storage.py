@@ -100,8 +100,18 @@ class GameStore:
                 r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")
             }
             for name, decl in columns:
-                if name not in have:
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                if name in have:
+                    continue
+                try:
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {decl}"
+                    )
+                except sqlite3.OperationalError as exc:
+                    # "先查再加"之间别的进程可能已经加上了。两个服务器共用
+                    # 同一个库时这是常态（本机就同时跑着 8000 和 8088），
+                    # 撞上了就说明列已经在了，不是错误。
+                    if "duplicate column" not in str(exc).lower():
+                        raise
 
     def close(self) -> None:
         self.conn.close()

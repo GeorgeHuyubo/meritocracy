@@ -23,6 +23,8 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP_DIR))
 
+from config import DEFAULT_CONFIG as CFG  # noqa: E402
+
 try:
     import websockets
     import fastapi  # noqa: F401
@@ -163,9 +165,33 @@ class TestServerEndToEnd(unittest.TestCase):
             self.assertTrue(a.private["is_host"])
             self.assertFalse(b.private["is_host"])
 
-            # ---- 开局 ----
+            # ---- 开局：先挑出身 ----
             await a.send(type="start")
             await asyncio.gather(a.drain(), b.drain(), c.drain())
+            self.assertEqual(a.public["phase"], "ORIGIN_SELECT")
+            for client in (a, b, c):
+                offered = client.private["origin_choices"]
+                self.assertEqual(len(offered), CFG.origin_choices_offered)
+                # 候选要带全文案，前端不用再查一遍表
+                for o in offered:
+                    self.assertTrue(o["name"] and o["skill"] and o["description"])
+                # 自己的候选是自己的事，但出身本身公开——这时候还没人定下来
+                self.assertIsNone(
+                    next(
+                        x for x in client.public["players"]
+                        if x["id"] == client.player_id
+                    )["origin"]
+                )
+            for client in (a, b, c):
+                await client.send(
+                    type="choose_origin", origin=client.private["origin_choices"][0]["id"]
+                )
+            await asyncio.gather(a.drain(), b.drain(), c.drain())
+
+            # 选完之后出身对所有人可见
+            for entry in b.public["players"]:
+                self.assertIn(entry["origin"], {o["id"] for o in b.public["origins"]})
+
             self.assertEqual(a.public["phase"], "ACTION_SELECTION")
             self.assertIsNone(a.public["current_event"], "锁定之前绝不能看到事件")
             self.assertEqual(len(a.private["hand"]), a.public["hand_size"])
@@ -268,6 +294,7 @@ class TestServerEndToEnd(unittest.TestCase):
 
             await a.send(type="start")
             await asyncio.gather(a.drain(), b.drain())
+            await self._pick_origins(a, b)
             self.assertEqual(a.public["phase"], "ACTION_SELECTION")
 
             # 客人不是房主，结束不了
@@ -290,11 +317,25 @@ class TestServerEndToEnd(unittest.TestCase):
             self.assertIsNotNone(b.private)
             self.assertTrue(a.private["is_host"])
 
+            # 重开之后出身要清干净——上一局的技能带进下一局是 bug，
+            # warnings 就这么漏过一次
+            for entry in a.public["players"]:
+                self.assertIsNone(entry["origin"])
+
             # 可以直接再开一局
             await a.send(type="start")
             await asyncio.gather(a.drain(), b.drain())
+            await self._pick_origins(a, b)
             self.assertEqual(a.public["phase"], "ACTION_SELECTION")
             self.assertEqual(a.public["round"], 1)
+
+    async def _pick_origins(self, *clients):
+        """走完"挑出身"那一步：每人取第一个候选。"""
+        for client in clients:
+            await client.send(
+                type="choose_origin", origin=client.private["origin_choices"][0]["id"]
+            )
+        await asyncio.gather(*(c.drain() for c in clients))
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ class Phase(str, Enum):
     """服务器权威状态机。客户端不允许自己推断阶段。"""
 
     LOBBY = "LOBBY"
+    ORIGIN_SELECT = "ORIGIN_SELECT"  # 开局挑出身，每人三选一
     ACTION_SELECTION = "ACTION_SELECTION"
     REVEAL_EVENT = "REVEAL_EVENT"
     RESOLUTION = "RESOLUTION"

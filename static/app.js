@@ -116,6 +116,7 @@ function render() {
 
 const SCREEN_OF = {
   LOBBY: "screen-lobby",
+  ORIGIN_SELECT: "screen-origin",
   ACTION_SELECTION: "screen-action",
   REVEAL_EVENT: "screen-reveal",
   RESOLUTION: "screen-reveal",
@@ -163,6 +164,7 @@ function renderInner() {
   showScreen(SCREEN_OF[pub.phase] || "screen-join");
   switch (pub.phase) {
     case "LOBBY":            renderLobby();  break;
+    case "ORIGIN_SELECT":    renderOrigin(); break;
     case "ACTION_SELECTION": renderAction(); break;
     case "REVEAL_EVENT":
     case "RESOLUTION":       renderReveal(); break;
@@ -516,6 +518,50 @@ function myPanelHtml() {
     }</div>`;
 }
 
+/* 出身 id -> 定义。公开信息，服务器每次都带过来，前端不硬编码任何数值。 */
+function originInfo(id) {
+  if (!id || !pub.origins) return null;
+  return pub.origins.find((o) => o.id === id) || null;
+}
+
+function originBadge(id) {
+  const o = originInfo(id);
+  if (!o) return "";
+  return `<span class="origin" title="${esc(o.skill)}：${esc(o.description)}">${esc(
+    o.name
+  )}</span>`;
+}
+
+function renderOrigin() {
+  const mine = priv.origin;
+  const box = $("originChoices");
+  if (mine) {
+    const o = originInfo(mine);
+    box.innerHTML = `<div class="origincard picked"><div class="oname">${esc(
+      o.name
+    )}</div><div class="oskill">${esc(o.skill)}</div><div class="odesc">${esc(
+      o.description
+    )}</div></div>`;
+  } else {
+    box.innerHTML = (priv.origin_choices || [])
+      .map(
+        (o) =>
+          `<button class="origincard" data-origin="${esc(o.id)}">` +
+          `<div class="oname">${esc(o.name)}</div>` +
+          `<div class="oskill">${esc(o.skill)}</div>` +
+          `<div class="odesc">${esc(o.description)}</div></button>`
+      )
+      .join("");
+  }
+  const waiting = (pub.origin_pending || [])
+    .map((id) => (pub.players.find((p) => p.id === id) || {}).name)
+    .filter(Boolean);
+  $("originWait").textContent = waiting.length
+    ? `还在等：${waiting.join("、")}`
+    : "都选好了，马上开局…";
+  $("forceOriginsBtn").classList.toggle("hidden", !priv.is_host || !waiting.length);
+}
+
 function boardHtml(showLock, final) {
   const rows = pub.players
     .map((p) => {
@@ -529,7 +575,7 @@ function boardHtml(showLock, final) {
         : "";
       return `<tr${me}><td><span class="dot ${p.connected ? "" : "off"}"></span>${esc(
         p.name
-      )}${win}${warn}</td><td>${p.rank_name}</td><td class="num">${p.merit}</td><td class="num">${
+      )}${win}${warn}${originBadge(p.origin)}</td><td>${p.rank_name}</td><td class="num">${p.merit}</td><td class="num">${
         p.tenure
       }</td>${lock}</tr>`;
     })
@@ -805,6 +851,20 @@ function rulesHtml(c) {
     .map((e) => `<li><b>${esc(e.name)}</b>：${esc(e.description)}</li>`)
     .join("");
 
+  const origins = (c.origins || [])
+    .map(
+      (o) =>
+        `<li><b>${esc(o.name)}</b> · <span class="oskill">${esc(o.skill)}</span>：` +
+        `${esc(o.description)}</li>`
+    )
+    .join("");
+  const originsBlock = origins
+    ? `<h4>出身</h4>
+<p class="rsub">开局每人随机发 ${c.origin_choices_offered} 个候选、挑一个，
+<b>可能和别人撞</b>。出身整局不变，而且对所有人<b>公开</b>——记分板上写着。</p>
+<ul class="rlist">${origins}</ul>`
+    : "";
+
   const rankKeyCn = { money: "金钱", rank: "官职", merit: "政绩" };
   const tiebreak = (c.final_ranking_keys || []).map((k) => rankKeyCn[k] || k).join(" > ");
 
@@ -900,6 +960,8 @@ function rulesHtml(c) {
 由你打哪张卡决定 —— 打政绩升职就只怕攻击（被拦下只是暂缓，<b>一分钱不损失</b>），
 打贿赂升职就只怕举报。</p>
 
+${originsBlock}
+
 <h4>全局事件（所有人锁定后才揭晓）</h4>
 <ul class="rlist">${events}</ul>
 <p class="rsub">反腐风暴只查办本轮贪污额排前 ${frac(c.storm_fraction)} 的人（向上取整）。</p>
@@ -969,6 +1031,13 @@ $("lobbyList").addEventListener("click", (e) => {
 
 $("startBtn").onclick = () => send({ type: "start" });
 $("forceBtn").onclick = () => send({ type: "force" });
+$("forceOriginsBtn").onclick = () => send({ type: "force_origins" });
+// 事件委托挂在容器上（和手牌、大厅列表一个写法）：内容每次重画，
+// 监听器只挂一次，不会越积越多
+$("originChoices").addEventListener("click", (e) => {
+  const card = e.target.closest("[data-origin]");
+  if (card) send({ type: "choose_origin", origin: card.dataset.origin });
+});
 $("readyBtn").onclick = () => send({ type: "ready" });
 function askReset() {
   const playing = pub && pub.phase !== "LOBBY" && pub.phase !== "GAME_OVER";

@@ -13,6 +13,7 @@ const file = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const payloads = file.screens;
 const apiConfig = file.config;
 const expectedEffects = file.card_effects;
+const expectedOrigins = file.origins;
 
 // --- 最小 DOM 桩：只实现 app.js 真正用到的那几个方法 ---
 function makeEl(id) {
@@ -148,6 +149,37 @@ for (const box of boxes) {
   }
 }
 if (boxes.length && failed === 0) console.log("  ✓ 规则速查");
+
+// 出身的名字和技能说明只在 config.py 里定义一处，前端不许自己写一份。
+// GRAFT 的 /2 vs /4 就是这么漂移的：JS 里抄了个数字，改配置时没人记得改它。
+if (expectedOrigins && expectedOrigins.length) {
+  const text = [...document.querySelectorAll(".rulesbox")]
+    .map((b) => b.innerHTML.replace(/<[^>]*>/g, " "))
+    .join(" ");
+  for (const o of expectedOrigins) {
+    for (const [what, str] of [["名字", o.name], ["技能名", o.skill],
+                               ["说明", o.description]]) {
+      if (!text.includes(str)) {
+        console.log(`  ❌ 规则里缺出身${what}：${str}`);
+        failed++;
+      }
+    }
+  }
+  // 挑出身那一屏的候选卡也要带全文案
+  const draft = payloads.find((p) => p.label === "挑出身");
+  if (draft) {
+    globalThis.__ui.setState(draft.public, draft.private, draft.my_id);
+    globalThis.__ui.render();
+    const box = document.getElementById("originChoices").innerHTML
+      .replace(/<[^>]*>/g, " ");
+    for (const o of draft.private.origin_choices) {
+      if (!box.includes(o.name) || !box.includes(o.skill)) {
+        console.log(`  ❌ 挑出身界面没写全：${o.name} / ${o.skill}`);
+        failed++;
+      }
+    }
+  }
+}
 
 console.error = origError;
 process.exit(failed ? 1 : 0);

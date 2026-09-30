@@ -51,6 +51,8 @@ class Game:
     salary_paid: dict[int, int] = field(default_factory=dict)
     # 开局的出身红利（富二代的老钱），记下来给流水账用
     origin_bonus: dict[int, int] = field(default_factory=dict)
+    # 挑出身阶段每人手上的候选 {玩家id: [出身id, ...]}
+    origin_choices: dict[int, list[str]] = field(default_factory=dict)
 
     current_event: GameEvent | None = None
     last_outcome: RoundOutcome | None = None
@@ -163,6 +165,7 @@ class Game:
             p.origin = None
 
         self.origin_bonus = {}
+        self.origin_choices = {}
         self.phase = Phase.LOBBY
         self.round_number = 0
         self.hands = {}
@@ -180,7 +183,15 @@ class Game:
         self.archive.clear()
         self.log("房主结束了上一局，大家回到大厅。")
 
-    def start_game(self, requester_id: int | None = None) -> None:
+    def start_game(
+        self, requester_id: int | None = None, draft_origins: bool = False
+    ) -> None:
+        """开局。
+
+        `draft_origins=True` 时先进"挑出身"阶段，每人发几个候选自己选一个；
+        默认关着，这样模拟器、平衡工具和测试里想直接指定出身（或者根本不用
+        出身）都不用绕路。线上由 server 打开。
+        """
         if self.phase is not Phase.LOBBY:
             raise GameError("游戏已经开始了。")
         if requester_id is not None and requester_id != self.host_id:
@@ -188,12 +199,55 @@ class Game:
         if len(self.players) < self.cfg.min_players:
             raise GameError(f"至少需要 {self.cfg.min_players} 名玩家。")
         self.log("游戏开始！")
+        if draft_origins and self.cfg.origin_ids():
+            self._begin_origin_select()
+            return
+        self._begin_first_round()
+
+    def _begin_origin_select(self) -> None:
+        """给每人发一手出身候选。**放回抽样**，所以几个人可能撞同一个。"""
+        pool = self.cfg.origin_ids()
+        n = min(self.cfg.origin_choices_offered, len(pool))
+        self.origin_choices = {
+            pid: self.rng.sample(pool, n) for pid in sorted(self.players)
+        }
+        self.phase = Phase.ORIGIN_SELECT
+        self.log("各人亮出身。")
+
+    def choose_origin(self, player_id: int, origin_id: str) -> None:
+        if self.phase is not Phase.ORIGIN_SELECT:
+            raise GameError("现在不是挑出身的时候。")
+        player = self.players.get(player_id)
+        if player is None:
+            raise GameError("你不在这局游戏里。")
+        if player.origin is not None:
+            raise GameError("你已经定下出身了。")
+        if origin_id not in self.origin_choices.get(player_id, []):
+            raise GameError("这个出身不在你能选的范围里。")
+        player.origin = Origin(origin_id)
+        info = self.cfg.origin(origin_id)
+        self.log(f"{player.name} 出身{info['name']}（{info['skill']}）。")
+        if all(p.origin is not None for p in self.players.values()):
+            self._begin_first_round()
+
+    def force_origins(self, requester_id: int | None = None) -> None:
+        """房主强推：还没选的随机给一个。掉线/挂机时用，照 force_lock_all 的规矩。"""
+        if requester_id is not None and requester_id != self.host_id:
+            raise GameError("只有房主可以强制推进。")
+        if self.phase is not Phase.ORIGIN_SELECT:
+            raise GameError("现在不是挑出身的时候。")
+        for pid in sorted(self.players):
+            if self.players[pid].origin is None:
+                self.choose_origin(pid, self.rng.choice(self.origin_choices[pid]))
+
+    def _begin_first_round(self) -> None:
         for pid, amount in rules.apply_origin_start_bonuses(
             self.ordered_players(), self.cfg
         ).items():
             # 金额不播（钱是暗的），只说他有这门家底——出身本来就是公开的
             self.log(f"{self.players[pid].name} 家里有底子，出手比别人宽裕。")
             self.origin_bonus[pid] = amount
+        self.origin_choices = {}
         self.begin_round()
 
     def begin_round(self) -> None:
@@ -651,6 +705,14 @@ class Game:
             "game_id": self.game_id,
             "phase": self.phase.value,
             "round": self.round_number,
+            # 六张出身的名字/技能/说明。出身是公开信息，前端要拿它渲染徽章，
+            # 数值和文案都只在 config 里定义一处
+            "origins": [dict(o) for o in self.cfg.origin_definitions]
+            if self.cfg.origins_enabled else [],
+            # 谁还没挑出身（挑出身阶段用，和 locked_players 一个意思）
+            "origin_pending": sorted(
+                pid for pid, pl in self.players.items() if pl.origin is None
+            ) if self.phase is Phase.ORIGIN_SELECT else [],
             "max_rounds": self.cfg.max_rounds,
             "host_id": self.host_id,
             "min_players": self.cfg.min_players,
@@ -707,6 +769,11 @@ class Game:
             "rank_name": self.cfg.rank_name(player.rank),
             "tenure": player.tenure,
             "origin": player.origin.value if player.origin else None,
+            # 挑出身阶段自己手上的候选（带上文案，前端不用再查一遍表）
+            "origin_choices": [
+                dict(self.cfg.origin(oid) or {})
+                for oid in self.origin_choices.get(player_id, [])
+            ],
             "hand": [d.view() for d in self.hands.get(player_id, [])],
             "picks": [
                 {"action": a.card.value, "target": a.target_id, "value": a.value}
@@ -887,6 +954,9 @@ class Game:
             "salary_paid": {str(pid): v for pid, v in self.salary_paid.items()},
             "redraw_spent": {str(pid): v for pid, v in self.redraw_spent.items()},
             "redraw_count": {str(pid): v for pid, v in self.redraw_count.items()},
+            # 挑出身阶段的候选。不存的话，选到一半重启页面候选就没了
+            "origin_choices": {str(pid): list(v) for pid, v in self.origin_choices.items()},
+            "origin_bonus": {str(pid): v for pid, v in self.origin_bonus.items()},
         }
 
     @classmethod
@@ -941,10 +1011,13 @@ class Game:
             int(pid): list(rows) for pid, rows in (data.get("ledger") or {}).items()
         }
         game.archive = list(data.get("archive") or [])
-        for attr in ("salary_paid", "redraw_spent", "redraw_count"):
+        for attr in ("salary_paid", "redraw_spent", "redraw_count", "origin_bonus"):
             setattr(game, attr, {
                 int(pid): int(v) for pid, v in (data.get(attr) or {}).items()
             })
+        game.origin_choices = {
+            int(pid): list(v) for pid, v in (data.get("origin_choices") or {}).items()
+        }
         game.stats = {
             int(pid): dict(st) for pid, st in (data.get("stats") or {}).items()
         }

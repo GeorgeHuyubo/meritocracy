@@ -76,7 +76,13 @@ def build_payloads() -> list[dict]:
 
     snap("大厅")
     snap("未加入（旁观）", None)
-    game.start_game()
+
+    # 挑出身：三张候选摊开、已经选定、以及"别人还没选"三种样子都要能画
+    game.start_game(draft_origins=True)
+    snap("挑出身")
+    game.choose_origin(1, game.origin_choices[1][0])
+    snap("挑出身（自己已选，等别人）")
+    game.force_origins()
     snap("行动选择")
 
     # 选了两张牌 -> 结算顺序面板要能渲染（含晋升卡那几条提示分支）
@@ -129,7 +135,9 @@ class TestUIRenders(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
                                          encoding="utf-8") as fh:
             json.dump({"config": api_config_payload(), "screens": payloads,
-                       "card_effects": expected_card_effects()},
+                       "card_effects": expected_card_effects(),
+                       # 出身文案只在 config.py 定义一处，前端不许自己写一份
+                       "origins": [dict(o) for o in CFG.origin_definitions]},
                       fh, ensure_ascii=False)
             path = fh.name
         try:

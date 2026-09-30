@@ -361,3 +361,39 @@ details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   z-index: 50;
 }
 #toast.show { opacity: 1; }
+
+/* ---- 出身 ---- */
+.origins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0;
+}
+.origincard {
+  flex: 1 1 200px;
+  min-width: 180px;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid #3a3f4b;
+  border-radius: 10px;
+  background: #23262e;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.origincard:hover { border-color: #6b8afd; background: #272b35; }
+.origincard.picked { cursor: default; border-color: #6b8afd; }
+.origincard .oname { font-weight: 700; font-size: 1.05em; }
+.origincard .oskill { color: #ffc98a; margin: 2px 0 6px; font-size: .92em; }
+.origincard .odesc { color: #a8adba; font-size: .88em; line-height: 1.45; }
+/* 记分板上的出身徽章 */
+.origin {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: #343947;
+  color: #b9c0d0;
+  font-size: .78em;
+  white-space: nowrap;
+}

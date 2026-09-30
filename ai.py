@@ -1073,6 +1073,17 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
     return False
 
 
+def choose_origin(game, player_id: int, pool: AgentPool) -> str:
+    """AI 挑出身。**v1 就是随机挑**。
+
+    故意不做聪明的：平衡数据全部来自"强制随机分配"的对局，AI 会不会挑好
+    身份不影响那些数字。等六张牌的强弱定下来了再回头教它挑，
+    否则会陷入"AI 偏爱强身份 -> 强身份看起来更强"的循环论证。
+    """
+    agent = pool.get(player_id)
+    return agent.rng.choice(game.private_state(player_id)["origin_choices"])["id"]
+
+
 def choose(game, player_id: int, pool: AgentPool) -> list[dict]:
     """用 game 的公开/私密 payload 驱动 AI —— 和浏览器拿到的完全一样。
 
