@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai
 from config import Config, DEFAULT_CONFIG
 from game import Game
-from models import Card, DemotionKind, PlayerState, PromotionKind
+from models import Card, DemotionKind, Origin, PlayerState, PromotionKind
 
 Strategy = Callable[..., tuple[Card, int | None]]
 
@@ -1277,6 +1277,128 @@ def analyse_ablation(
     return out
 
 
+def analyse_origins(
+    n_players: int, games: int, cfg: Config, rng: random.Random
+) -> dict[str, Any]:
+    """出身卡的强弱。
+
+    **强制随机分配，不让 AI 挑。** 让人或 AI 挑身份的话，弱身份被选得少，
+    它的胜率反而好看（选择偏差）。所以这里照 `_ablation_once` 那套：
+    指定座位、逐局轮换，谁拿什么完全由座位决定。
+
+    出四组数，**按这个顺序看**：
+      1. 触发率 —— 技能一局实际生效几次。触发率接近 0 的，
+         它的胜率差一定是噪声，不要去解读
+      2. 单身份对照 —— 1 席拿身份 X、其余 5 席无出身，差值就是它值多少个点
+      3. 混战 —— 6 人各一个身份，看胜率份额
+      4. 权力曲线 —— 平均夺冠轮次。富二代前重、贫农后重，这个数直接看得出来
+    """
+    origin_ids = cfg.origin_ids()
+    out: dict[str, Any] = {"games": games, "solo": {}, "melee": {}, "fires": {}}
+    if not origin_ids:
+        return out
+
+    def play_once(assign: dict[int, str | None]) -> tuple[set[int], int, dict[int, int]]:
+        game = Game(game_id="origins", cfg=cfg, rng=rng)
+        for i in range(n_players):
+            game.add_player(f"P{i + 1}")
+        for pid, oid in assign.items():
+            if oid:
+                game.players[pid].origin = Origin(oid)
+        pool = ai.AgentPool(cfg=cfg, rng=rng)
+        fires = {pid: 0 for pid in assign}
+        game.start_game()
+        while not game.is_over:
+            ranks_before = {p.id: p.rank for p in game.players.values()}
+            for pid in sorted(game.players):
+                game.select_actions(pid, ai.choose(game, pid, pool))
+                game.lock_action(pid)
+            game.reveal_event()
+            res = game.resolve()
+            for pid, o in res.outcomes.items():
+                fires[pid] += _origin_fired(
+                    assign.get(pid), o, game.players[pid], ranks_before[pid]
+                )
+            if not game.is_over:
+                game.advance_round()
+        return set(game.winners), game.round_number, fires
+
+    # ---- 1+2. 单身份对照：1 席拿 X，其余无出身，逐局轮换座位 ----
+    for oid in origin_ids:
+        wins = {"with": 0.0, "without": 0.0}
+        seats = {"with": 0, "without": 0}
+        fired = won_round = won_games = 0
+        for g in range(games):
+            pids = list(range(1, n_players + 1))
+            lucky = pids[g % n_players]
+            assign = {pid: (oid if pid == lucky else None) for pid in pids}
+            winners, rounds, fires = play_once(assign)
+            fired += fires[lucky]
+            for pid in pids:
+                key = "with" if pid == lucky else "without"
+                seats[key] += 1
+                if pid in winners:
+                    wins[key] += 1.0 / len(winners)
+            if lucky in winners:
+                won_round += rounds
+                won_games += 1
+        n_w, n_o = max(1, seats["with"]), max(1, seats["without"])
+        p_w, p_o = wins["with"] / n_w, wins["without"] / n_o
+        se = math.sqrt(p_w * (1 - p_w) / n_w + p_o * (1 - p_o) / n_o)
+        out["solo"][oid] = {
+            "win_pct": round(p_w * 100, 2),
+            "others_pct": round(p_o * 100, 2),
+            "delta": round((p_w - p_o) * 100, 2),
+            "ci_half_width": round(1.96 * se * 100, 2),
+            "fires_per_game": round(fired / max(1, games), 2),
+            "avg_win_round": round(won_round / won_games, 2) if won_games else None,
+        }
+
+    # ---- 3. 混战：6 人各一个身份，随机排列 ----
+    melee_wins = {oid: 0.0 for oid in origin_ids}
+    melee_seats = {oid: 0 for oid in origin_ids}
+    for _ in range(games):
+        order = origin_ids[:]
+        rng.shuffle(order)
+        assign = {i + 1: order[i % len(order)] for i in range(n_players)}
+        winners, _, _ = play_once(assign)
+        for pid, oid in assign.items():
+            melee_seats[oid] += 1
+            if pid in winners:
+                melee_wins[oid] += 1.0 / len(winners)
+    out["melee"] = {
+        oid: round(100 * melee_wins[oid] / max(1, melee_seats[oid]), 2)
+        for oid in origin_ids
+    }
+    return out
+
+
+def _origin_fired(origin_id, outcome, player, rank_before) -> int:
+    """这一轮这个人的出身技能到底生效了没有。
+
+    先看这个再看胜率：技能压根没触发的话，胜率差一定是噪声。
+    比如红二代「开后门」要求同时够两级，很可能整局都摸不到那个条件。
+    """
+    if not origin_id:
+        return 0
+    if origin_id == "RICH":
+        # 老钱是开局一次性的，不在逐轮结算里体现，所以这张的"触发率"
+        # 没有意义（恒为 1 次/局）。打印时会显示成 "—"，不要读成"没触发"。
+        return 0
+    if origin_id == "ACCOUNTANT":
+        return 1 if outcome.laundered and outcome.report_effective else 0
+    if origin_id == "RED":
+        return 1 if outcome.origin_double_promoted else 0
+    if origin_id == "PEASANT":
+        # 挨了打、而且这一轮确实在走政绩升职 —— 换成别人就被拦下了
+        return 1 if (outcome.attacked and outcome.promotion.value == "MERIT") else 0
+    if origin_id == "GRINDER":
+        return 1 if outcome.merit_gained else 0
+    if origin_id == "OFFICIAL":
+        return 1 if outcome.promotion_merit_cost else 0
+    return 0
+
+
 def analyse_funnel(
     n_players: int, games: int, cfg: Config, rng: random.Random
 ) -> dict[str, Any]:
@@ -1459,7 +1581,7 @@ def main(argv: list[str] | None = None) -> int:
         "--section",
         choices=("all", "leader", "rank", "actions", "choices", "reports", "triangle",
                  "ablation", "funnel", "strategy",
-                 "postmortem", "events", "full"),
+                 "postmortem", "events", "origins", "full"),
         default="all",
     )
     ap.add_argument(
@@ -1544,6 +1666,11 @@ def main(argv: list[str] | None = None) -> int:
             args.players, args.games, cfg, random.Random(args.seed)
         )
 
+    if args.section == "origins":
+        out["origins"] = analyse_origins(
+            args.players, args.games, cfg, random.Random(args.seed)
+        )
+
     if FULL or args.section == "strategy":
         tg = args.tournament_games or max(2000, args.games // 4)
         if args.agents == "smart":
@@ -1579,9 +1706,9 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 56)
     # --agents 只管前三节。消融/漏斗/三角这些自带对局循环，一律用思考型 AI，
     # 不然表头写着 random，读的人会以为消融结果和 AI 的改动无关。
-    if args.agents != "smart" and {"ablation", "funnel", "triangle"} & set(out):
+    if args.agents != "smart" and {"ablation", "funnel", "triangle", "origins"} & set(out):
         which = "、".join(
-            n for n in ("ablation", "funnel", "triangle") if n in out
+            n for n in ("ablation", "funnel", "triangle", "origins") if n in out
         )
         print(f"  注：{which} 这几节固定用思考型 AI 对局，不受 --agents 影响")
 
@@ -1772,6 +1899,44 @@ def main(argv: list[str] | None = None) -> int:
                       f"   夺冠 {two['win_pct'].get(r, 0):>6.2f}%")
         ok2 = two["avg_place"].get("fisherman", 9) < two["avg_place"].get("duelist", 0)
         print(f"    判据「渔翁得利」:   {'✔ 成立' if ok2 else '✘ 不成立'}")
+
+    if "origins" in out:
+        d = out["origins"]
+        h("出身卡：六张各值多少")
+        print(f"  {d['games']} 局。**强制随机分配、逐局轮换座位**——")
+        print("  让 AI 自己挑的话，弱身份被选得少、胜率反而好看（选择偏差）。\n")
+        if not d["solo"]:
+            print("  出身没开（origins_enabled=false）。")
+        else:
+            print("  单身份对照：1 席拿这个出身，其余 5 席无出身")
+            print(f"    {'出身':<20}{'触发/局':>9}{'他的胜率':>10}{'旁人':>8}"
+                  f"{'差值':>8}{'95%区间':>18}{'夺冠轮次':>10}")
+            for oid, r in d["solo"].items():
+                info = cfg.origin(oid) or {"name": oid}
+                lo = r["delta"] - r["ci_half_width"]
+                hi = r["delta"] + r["ci_half_width"]
+                wr = f"{r['avg_win_round']:.1f}" if r["avg_win_round"] else "—"
+                # 老钱是开局一次性的，逐轮结算里看不到，触发率对它没意义
+                fr = "—" if oid == "RICH" else f"{r['fires_per_game']}"
+                print(f"    {info['name']:<20}{fr:>9}"
+                      f"{r['win_pct']:>9.2f}%{r['others_pct']:>7.2f}%"
+                      f"{r['delta']:>+8.2f}   [{lo:+.2f}, {hi:+.2f}]{wr:>10}")
+            fires = [
+                r["fires_per_game"] for oid, r in d["solo"].items() if oid != "RICH"
+            ]
+            if min(fires) < 0.1:
+                print("\n    注：触发率接近 0 的那几张，胜率差一定是噪声，别去解读它。")
+
+            print("\n  混战：6 人各一个出身，随机排列（公平线"
+                  f" {100 / max(1, len(d['melee'])):.2f}%）")
+            for oid, pct in sorted(d["melee"].items(), key=lambda kv: -kv[1]):
+                info = cfg.origin(oid) or {"name": oid}
+                print(f"    {info['name']:<20}{pct:>8.2f}%")
+
+            deltas = [r["delta"] for r in d["solo"].values()]
+            spread = max(deltas) - min(deltas)
+            print(f"\n  最强 vs 最弱差 {spread:.2f} 个点"
+                  f"（判据 < 3）：{'✔' if spread < 3 else '✘'}")
 
     if "postmortem" in out:
         d = out["postmortem"]

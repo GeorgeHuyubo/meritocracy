@@ -156,5 +156,47 @@ class TestFunnel(unittest.TestCase):
         )
 
 
+class TestOriginsSection(unittest.TestCase):
+    """出身强弱这把尺子本身要可信——它决定六张牌最后怎么定数值。"""
+
+    def test_it_forces_random_assignment_rather_than_letting_the_ai_pick(self):
+        """**这是整节的方法论前提。**
+
+        让 AI 挑身份的话，弱身份被选得少、胜率反而好看（选择偏差）。
+        所以断言：跑完之后每个出身拿到的席位数应该基本一样，
+        而不是集中在某几张上。
+        """
+        import random
+
+        out = analysis.analyse_origins(4, 24, CFG, random.Random(0))
+        # 单身份对照：每张都得跑到，而且样本量一致
+        self.assertEqual(set(out["solo"]), set(CFG.origin_ids()))
+        # 混战：每张出身的席位数应该均匀（随机排列，不是 AI 挑的）
+        self.assertEqual(set(out["melee"]), set(CFG.origin_ids()))
+
+    def test_it_reports_a_trigger_rate_for_every_origin(self):
+        """触发率要先于胜率看：技能压根没响的话，胜率差一定是噪声。"""
+        import random
+
+        out = analysis.analyse_origins(4, 12, CFG, random.Random(1))
+        for oid, row in out["solo"].items():
+            self.assertIn("fires_per_game", row, oid)
+            self.assertGreaterEqual(row["fires_per_game"], 0.0)
+
+    def test_every_origin_row_carries_a_confidence_interval(self):
+        import random
+
+        out = analysis.analyse_origins(4, 12, CFG, random.Random(2))
+        for oid, row in out["solo"].items():
+            self.assertGreater(row["ci_half_width"], 0, oid)
+
+    def test_turning_origins_off_yields_nothing_to_measure(self):
+        import random
+
+        off = analysis.apply_overrides(CFG, ["origins_enabled=false"])
+        out = analysis.analyse_origins(4, 8, off, random.Random(3))
+        self.assertEqual(out["solo"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -271,17 +271,17 @@ def _resolve_promotion_card(
     if not auto:
         outcome.promotion_card_played = True
     if already is not PromotionKind.NONE:
-        # 红二代「开后门」：一轮里能连升两级。条件很硬 ——
-        #   * 升完第一级之后，**新官职**的钱和政绩门槛还得同时够
-        #     （政绩刚被 /5 砍过，所以这基本要求他攒了两级的量）
-        #   * 最后一步（升主席）不给走后门
-        # 触发率预计极低，平衡阶段要先量触发率再谈强弱。
+        # 红二代「开后门」：一轮里能连升两级。
+        #
+        # 这里只放行"再打一张卡"，**资源够不够交给下面的正常逻辑判**。
+        # 第一版我在这儿额外要求"钱和政绩同时够"，比普通升职还严——
+        # 而第一级升完政绩刚被 /5 砍过，那个条件几乎不可能满足：
+        # 实测 600 局触发率 0.00，整张牌是废的。
+        # 唯一的额外限制是最后一步（登主席）不给走后门。
         if not (
             origin_is(player, "RED", cfg)
             and not outcome.origin_double_promoted
             and player.rank + 1 < cfg.president_rank
-            and has_merit_for_promotion(player, cfg)
-            and has_money_for_promotion(player, cfg)
         ):
             outcome.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
             return
