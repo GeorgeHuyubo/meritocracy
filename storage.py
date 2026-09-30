@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS players (
     tenure    INTEGER NOT NULL,
     is_ai     INTEGER NOT NULL DEFAULT 0,
     warnings  INTEGER NOT NULL DEFAULT 0,
+    origin    TEXT,
     PRIMARY KEY (game_id, player_id)
 );
 
@@ -89,7 +90,10 @@ class GameStore:
         wanted = {
             "games": [("progress", "TEXT NOT NULL DEFAULT '{}'")],
             # redraw_available 已废弃，旧库里留着不管
-            "players": [("warnings", "INTEGER NOT NULL DEFAULT 0")],
+            "players": [
+                ("warnings", "INTEGER NOT NULL DEFAULT 0"),
+                ("origin", "TEXT"),
+            ],
         }
         for table, columns in wanted.items():
             have = {
@@ -153,10 +157,12 @@ class GameStore:
             self.conn.execute("DELETE FROM players WHERE game_id = ?", (gid,))
             self.conn.executemany(
                 "INSERT INTO players (game_id, player_id, name, token, money, merit, rank,"
-                " tenure, is_ai, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " tenure, is_ai, warnings, origin)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (gid, p["id"], p["name"], p["token"], p["money"], p["merit"], p["rank"],
-                     p["tenure"], 1 if p.get("is_ai") else 0, p.get("warnings", 0))
+                     p["tenure"], 1 if p.get("is_ai") else 0, p.get("warnings", 0),
+                     p.get("origin"))
                     for p in snap["players"]
                 ],
             )
@@ -241,6 +247,7 @@ class GameStore:
                 "tenure": r["tenure"],
                 "is_ai": bool(r["is_ai"]),
                 "warnings": r["warnings"],
+                "origin": r["origin"],
             }
             for r in self.conn.execute(
                 "SELECT * FROM players WHERE game_id = ? ORDER BY player_id", (gid,)

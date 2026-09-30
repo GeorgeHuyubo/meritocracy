@@ -226,14 +226,14 @@ def _apply_promotion(
     """执行晋升，并把消耗明细记下来给 UI 用。"""
     merit_before, money_before = player.merit, player.money
     if kind is PromotionKind.BOTH:
-        outcome.promotion_money_cost = cfg.money_cost(player.rank) or 0
-        outcome.promotion_merit_cost = cfg.merit_cost(player.rank) or 0
+        outcome.promotion_money_cost = money_cost_for(player, cfg) or 0
+        outcome.promotion_merit_cost = merit_cost_for(player, cfg) or 0
         apply_both_promotion(player, cfg)
     elif kind is PromotionKind.MERIT:
-        outcome.promotion_merit_cost = cfg.merit_cost(player.rank) or 0
+        outcome.promotion_merit_cost = merit_cost_for(player, cfg) or 0
         apply_merit_promotion(player, cfg)
     elif kind is PromotionKind.MONEY:
-        outcome.promotion_money_cost = cfg.money_cost(player.rank) or 0
+        outcome.promotion_money_cost = money_cost_for(player, cfg) or 0
         apply_money_promotion(player, cfg)
     else:
         return
@@ -271,15 +271,32 @@ def _resolve_promotion_card(
     if not auto:
         outcome.promotion_card_played = True
     if already is not PromotionKind.NONE:
-        outcome.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
-        return
-    if cfg.money_cost(player.rank) is None:  # 已经到顶
+        # 红二代「开后门」：一轮里能连升两级。条件很硬 ——
+        #   * 升完第一级之后，**新官职**的钱和政绩门槛还得同时够
+        #     （政绩刚被 /5 砍过，所以这基本要求他攒了两级的量）
+        #   * 最后一步（升主席）不给走后门
+        # 触发率预计极低，平衡阶段要先量触发率再谈强弱。
+        if not (
+            origin_is(player, "RED", cfg)
+            and not outcome.origin_double_promoted
+            and player.rank + 1 < cfg.president_rank
+            and has_merit_for_promotion(player, cfg)
+            and has_money_for_promotion(player, cfg)
+        ):
+            outcome.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
+            return
+        outcome.origin_double_promoted = True
+    if money_cost_for(player, cfg) is None:  # 已经到顶
         return
 
     merit_ok = card.can_use_merit and has_merit_for_promotion(player, cfg)
     money_ok = card.can_use_money and has_money_for_promotion(player, cfg)
 
-    if outcome.attacked and merit_ok:
+    # 贫农「政治正确」：成分过硬，放黑料挡不住他。
+    # 注意只免疫"挡晋升"这一项——抢功和戴帽子照打，不然这张就太全能了。
+    blocked_by_attack = outcome.attacked and not origin_is(player, "PEASANT", cfg)
+
+    if blocked_by_attack and merit_ok:
         # 暂缓升职：这一轮走不了政绩这条路，但政绩一点不掉。
         # （清零那套太重——一刀能削 43 点，而且攻击者一分不拿，纯利他。
         #   现在攻击的收益全部来自抢功，破坏这块降到最小。）
@@ -369,13 +386,70 @@ def overflow_after_promotion(
     return math.ceil(Fraction(remaining, divisor if divisor is not None else cfg.overflow_divisor))
 
 
+def _laundered(amount: int, player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> int:
+    """会计「做账」：这笔脏钱里有多少当场做成了合法收入。
+
+    洗白的部分**只挡没收**，不改 corrupt_amount ——
+    因为 corrupt_amount 还管着分赃池和查实判定，减它会连举报人的分成一起砍掉。
+    实际怎么用见 5. 没收那一步。
+    """
+    if amount <= 0 or not origin_is(player, "ACCOUNTANT", cfg):
+        return 0
+    return int(Fraction(amount) * cfg.origin_accountant_launder_ratio)
+
+
+def origin_is(player: PlayerState, origin_id: str, cfg: Config = DEFAULT_CONFIG) -> bool:
+    """这个玩家是不是某个出身。走 cfg.origin 所以总开关一关就全员失效。"""
+    o = cfg.origin(player.origin.value if player.origin else None)
+    return bool(o and o["id"] == origin_id)
+
+
+def apply_origin_start_bonuses(
+    players: Sequence[PlayerState], cfg: Config = DEFAULT_CONFIG
+) -> dict[int, int]:
+    """开局一次性的出身红利。返回 {玩家id: 白拿了多少钱}，方便公报和流水账。
+
+    目前只有富二代「老钱」。放在第一轮发牌**之前**，所以这笔钱当轮就能花。
+    """
+    granted: dict[int, int] = {}
+    for p in players:
+        origin = cfg.origin(p.origin.value if p.origin else None)
+        if origin and origin["id"] == "RICH" and cfg.origin_old_money_start:
+            p.money += cfg.origin_old_money_start
+            granted[p.id] = cfg.origin_old_money_start
+    return granted
+
+
+def merit_cost_for(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> int | None:
+    """这个玩家升下一级要多少政绩。已经到顶返回 None。
+
+    和 `cfg.merit_cost(rank)` 的区别是它认得出身：官二代「提携」按
+    `ORIGIN_PATRONAGE_MERIT_RATIO` 打折。**所有读政绩门槛的地方都要走这里**，
+    漏一处就会出现"UI 说要 12，结算要 15"这类对不上的账。
+    """
+    base = cfg.merit_cost(player.rank)
+    if base is None:
+        return None
+    origin = cfg.origin(player.origin.value if player.origin else None)
+    if origin and origin["id"] == "OFFICIAL":
+        # 向上取整：打折不能把门槛抹成 0，也不该出现小数
+        return math.ceil(Fraction(base) * cfg.origin_patronage_merit_ratio)
+    return base
+
+
+def money_cost_for(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> int | None:
+    """这个玩家升下一级要多少钱。目前没有出身改金钱门槛，留着是为了对称——
+    有了它，将来加"金钱版提携"就不用再satisfy一遍所有调用点。"""
+    return cfg.money_cost(player.rank)
+
+
 def has_money_for_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> bool:
-    cost = cfg.money_cost(player.rank)
+    cost = money_cost_for(player, cfg)
     return cost is not None and player.money >= cost
 
 
 def has_merit_for_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> bool:
-    cost = cfg.merit_cost(player.rank)
+    cost = merit_cost_for(player, cfg)
     return cost is not None and player.merit >= cost
 
 
@@ -416,8 +490,8 @@ def apply_promotion_costs(
     等于白拿一级，贿赂升职会严格优于政绩升职。
     金钱的除数默认是 1（不衰减），所以这条对钱没有实际影响。
     """
-    money_left = player.money - (cfg.money_cost(player.rank) or 0 if pay_money else 0)
-    merit_left = player.merit - (cfg.merit_cost(player.rank) or 0 if pay_merit else 0)
+    money_left = player.money - (money_cost_for(player, cfg) or 0 if pay_money else 0)
+    merit_left = player.merit - (merit_cost_for(player, cfg) or 0 if pay_merit else 0)
 
     # 金钱：只有真的花掉才衰减（没花就原样留着）
     player.money = (
@@ -436,7 +510,7 @@ def apply_promotion_costs(
 
 def apply_both_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> None:
     """双条件晋升：金钱和政绩各按各的成本扣，各自做衰减。"""
-    mc, tc = cfg.money_cost(player.rank), cfg.merit_cost(player.rank)
+    mc, tc = money_cost_for(player, cfg), merit_cost_for(player, cfg)
     assert mc is not None and tc is not None
     assert player.money >= mc and player.merit >= tc
     apply_promotion_costs(player, cfg, pay_money=True, pay_merit=True)
@@ -444,14 +518,14 @@ def apply_both_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> N
 
 def apply_money_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> None:
     """金钱晋升：扣掉金钱门槛；政绩没花掉，但一样要做 /5 衰减。"""
-    cost = cfg.money_cost(player.rank)
+    cost = money_cost_for(player, cfg)
     assert cost is not None and player.money >= cost
     apply_promotion_costs(player, cfg, pay_money=True)
 
 
 def apply_merit_promotion(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> None:
     """政绩晋升：merit = ceil((merit - cost) / MERIT_OVERFLOW_DIVISOR)。"""
-    cost = cfg.merit_cost(player.rank)
+    cost = merit_cost_for(player, cfg)
     assert cost is not None and player.merit >= cost
     apply_promotion_costs(player, cfg, pay_merit=True)
 
@@ -770,6 +844,8 @@ def resolve_round(
                 corrupted_yet = True
             if card is Card.WORK:
                 base = act.value if act.value > 0 else roll_work_base(rng, cfg)
+                if origin_is(p, "GRINDER", cfg):
+                    base += cfg.origin_grinder_work_bonus  # 卷王：加在倍率之前
                 gained = work_merit(base, p.rank, event, cfg)
                 o.base_values.append(base)
                 o.merit_gained += gained
@@ -780,6 +856,7 @@ def resolve_round(
                 o.base_values.append(base)
                 o.money_gained += gained
                 o.corrupt_amount += gained
+                o.laundered += _laundered(gained, p, cfg)
                 p.money += gained
             elif card is Card.GRAFT:
                 base = act.value if act.value > 0 else roll_graft_base(rng, cfg)
@@ -788,6 +865,7 @@ def resolve_round(
                 o.base_values.append(base)
                 o.money_gained += cash
                 o.corrupt_amount += cash  # 这笔钱照样算贪污
+                o.laundered += _laundered(cash, p, cfg)
                 o.merit_gained += bonus
                 p.money += cash
                 p.merit += bonus
@@ -822,7 +900,7 @@ def resolve_round(
                     if has_money_for_promotion(p, cfg):
                         # 礼已经备好了：查实的话钱照样没了，官却升不成
                         o.pending_bribe = max(
-                            o.pending_bribe, cfg.money_cost(p.rank) or 0
+                            o.pending_bribe, money_cost_for(p, cfg) or 0
                         )
                     deferred_promotions.append((p, card))
                     continue
@@ -1229,7 +1307,18 @@ def resolve_round(
         if not o.report_effective or not cfg.report_reward_enabled:
             continue
         # 本轮贪的全部吐出来（存款不动——那是以前"重大贪腐抄家"的活）
-        confiscated[p.id] = min(o.corrupt_amount, p.money)
+        seize = o.corrupt_amount
+        if o.laundered:
+            # 会计「做账」：洗白的那部分抄不走。但**分赃池不减半** ——
+            # 洗白只能吃掉"充公"那一份，举报人该拿的一分不少：
+            #     普通人： 贪 40 -> 没收 40 -> 举报人 20 + 充公 20
+            #     会计：   贪 40 -> 没收 20 -> 举报人 20 + 充公  0
+            # 不这么写的话，抓会计的回本比抓别人少，就没人愿意抓他了。
+            reporter_cut = math.floor(
+                Fraction(o.corrupt_amount) * cfg.report_reward_ratio
+            )
+            seize = max(reporter_cut, o.corrupt_amount - o.laundered)
+        confiscated[p.id] = min(seize, p.money)
 
     for p in ordered:
         o = outcome.outcomes[p.id]
@@ -1290,14 +1379,23 @@ def resolve_round(
                 f"记降职警告一次（再记 {left} 次就要降级）。"
             )
 
-    # 分赃：没收的赃款里只有 report_reward_ratio 归举报人，其余充公；
-    # 多人举报再平分，向下取整，零头也充公。
+    # 分赃：举报人拿 report_reward_ratio，其余充公；多人举报再平分，
+    # 向下取整，零头也充公。
     # 举报本身已经能降级 + 没收 + 冻结晋升了，拿钱这块要收着点。
+    #
+    # 比例按**毛贪污额**算，不是按实际没收额 —— 这两个数只有碰上会计
+    # 「做账」时才会不一样，而那张牌的设计就是"洗白只吃充公那份，
+    # 举报人一分不少"。按没收额算的话会计反而会让举报他的人少拿一半。
+    # 当然实际给出去的不能超过真抄到的钱。
     for victim_id, taken in confiscated.items():
         actors = report_actors.get(victim_id, [])
         if taken <= 0 or not actors:
             continue
-        payout = math.floor(Fraction(taken) * cfg.report_reward_ratio)
+        o_victim = outcome.outcomes[victim_id]
+        # 毛额 = 本轮脏收入 + 查获的行贿。行贿那笔没有"洗白"一说，
+        # 它是原样并进分赃池的，所以两边都要算上。
+        gross = o_victim.corrupt_amount + o_victim.bribe_lost
+        payout = min(taken, math.floor(Fraction(gross) * cfg.report_reward_ratio))
         share = payout // len(actors) if cfg.report_reward_split_evenly else payout
         if share <= 0:
             continue

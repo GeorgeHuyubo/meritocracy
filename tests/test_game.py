@@ -348,6 +348,9 @@ class TestPrivacy(unittest.TestCase):
         "id", "name", "rank", "rank_name", "merit", "tenure", "connected", "is_ai",
         # 严重警告是公开的：官场上谁挨过处分，大家都知道
         "warnings",
+        # 出身也是公开的。主要是为了 AI：官二代的晋升门槛和别人不一样，
+        # 不知道就会算错"他还差多远"，终局刹车会失灵。
+        "origin",
     }
 
     def test_public_player_entries_have_no_secret_fields(self):

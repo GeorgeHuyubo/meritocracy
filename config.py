@@ -493,6 +493,88 @@ WEALTH_BROADCAST_NAME_JOINER: str = " 和 "
 EVENT_STORM_FRACTION: Fraction = Fraction(1, 3)
 
 # --------------------------------------------------------------------------
+# 出身
+# --------------------------------------------------------------------------
+
+# 出身是**公开信息**，写在记分板上。
+#
+# 公开这条主要是为了 AI：官二代的晋升门槛和别人不一样，AI 不知道就会算错
+# "他还差多远"，终局那道"有人下一步就夺冠"的刹车会失灵——这个 bug 刚踩过一次。
+# 而且出身本来就是官场上人人都知道的事。
+#
+# 结构：三个"二代" + 贫农 + 两个小镇做题家。前四张靠投胎，后两张没背景、
+# 只能靠一门手艺。
+
+ORIGINS_ENABLED: bool = True  # 总开关。关掉 = 所有人都没有出身，用于平衡对照
+ORIGIN_CHOICES_OFFERED: int = 3  # 每人随机发几个候选。**放回抽样**，所以允许重复
+
+# ---- 各技能的数值旋钮 ----
+
+# 富二代「老钱」：开局白送多少钱。
+# 15 是基层的金钱门槛，所以 10 约等于开局送 2/3 级。这张牌**前重后轻**：
+# 到省级门槛 37 的时候，这 10 块就不值钱了。
+ORIGIN_OLD_MONEY_START: int = 10
+
+# 官二代「提携」：政绩门槛打几折。4/5 把 15/27/43 压成 12/22/35。
+# 只打政绩那一侧，金钱门槛不动——两边都打折就太强了。
+ORIGIN_PATRONAGE_MERIT_RATIO: Fraction = Fraction(4, 5)
+
+# 小镇做题家·技术员「卷王」：WORK 的基础点数加几点（在官职倍率之前）。
+# WORK 期望是 6，+2 等于 +33%。这张故意做成纯数值零机制，当**基准锚**——
+# 其他五张的强弱都拿它来比。
+ORIGIN_GRINDER_WORK_BONUS: int = 2
+
+# 小镇做题家·会计「做账」：脏钱里有多大比例记成合法收入。
+#
+# 关键约束：**分赃池不减半**。洗白的那部分只从"充公"那份里扣，举报人一分不少拿：
+#     现在：     贪 40 -> 没收 40 -> 举报人 20 + 充公 20
+#     会计做账： 贪 40 -> 没收 20 -> 举报人 20 + 充公  0
+# 这样举报他和举报别人回本一样，不会出现"没人愿意抓会计"那种副作用。
+# 1/2 和 REPORT_REWARD_RATIO 的 1/2 正好互补，充公那份刚好被吃干净。
+ORIGIN_ACCOUNTANT_LAUNDER_RATIO: Fraction = Fraction(1, 2)
+
+ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "id": "RICH",
+        "name": "富二代",
+        "skill": "老钱",
+        "description": f"开局白拿 {ORIGIN_OLD_MONEY_START} 金钱。",
+    },
+    {
+        "id": "OFFICIAL",
+        "name": "官二代",
+        "skill": "提携",
+        "description": "每一级的政绩门槛都打八折，升得比别人省力。",
+    },
+    {
+        "id": "RED",
+        "name": "红二代",
+        "skill": "开后门",
+        "description": "政绩和金钱同时够两级时，一轮打两张晋升卡能连升两级"
+                       "（升到国家主席那一步除外）。",
+    },
+    {
+        "id": "PEASANT",
+        "name": "贫农",
+        "skill": "政治正确",
+        "description": "成分过硬，别人放黑料挡不住你——政治攻击不能让你的政绩升职暂缓。",
+    },
+    {
+        "id": "GRINDER",
+        "name": "小镇做题家·技术员",
+        "skill": "卷王",
+        "description": f"没背景就靠干活：埋头工作的点数 +{ORIGIN_GRINDER_WORK_BONUS}。",
+    },
+    {
+        "id": "ACCOUNTANT",
+        "name": "小镇做题家·会计",
+        "skill": "做账",
+        "description": "捞来的钱有一半能做成合法收入，被举报也抄不走"
+                       "（举报人该分的那份一分不少，少的是充公那部分）。",
+    },
+]
+
+# --------------------------------------------------------------------------
 # 对局
 # --------------------------------------------------------------------------
 
@@ -601,6 +683,16 @@ class Config:
         default_factory=lambda: list(WEALTH_BROADCAST_LINES_MULTI)
     )
     wealth_broadcast_name_joiner: str = WEALTH_BROADCAST_NAME_JOINER
+
+    origins_enabled: bool = ORIGINS_ENABLED
+    origin_choices_offered: int = ORIGIN_CHOICES_OFFERED
+    origin_old_money_start: int = ORIGIN_OLD_MONEY_START
+    origin_patronage_merit_ratio: Fraction = ORIGIN_PATRONAGE_MERIT_RATIO
+    origin_grinder_work_bonus: int = ORIGIN_GRINDER_WORK_BONUS
+    origin_accountant_launder_ratio: Fraction = ORIGIN_ACCOUNTANT_LAUNDER_RATIO
+    origin_definitions: list[dict[str, Any]] = field(
+        default_factory=lambda: [dict(o) for o in ORIGIN_DEFINITIONS]
+    )
     event_storm_fraction: Fraction = EVENT_STORM_FRACTION
 
     max_rounds: int = MAX_ROUNDS
@@ -659,6 +751,18 @@ class Config:
         if rank >= self.president_rank:
             return None
         return self.promotion_merit_costs[rank]
+
+    def origin(self, origin_id: str | None) -> dict[str, Any] | None:
+        """按 id 取出身定义。总开关关掉时一律当作没有出身。"""
+        if not origin_id or not self.origins_enabled:
+            return None
+        for o in self.origin_definitions:
+            if o["id"] == origin_id:
+                return o
+        return None
+
+    def origin_ids(self) -> list[str]:
+        return [o["id"] for o in self.origin_definitions] if self.origins_enabled else []
 
 
 DEFAULT_CONFIG = Config()

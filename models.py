@@ -52,6 +52,21 @@ class Card(str, Enum):
         return self in (Card.PROMOTE_MONEY, Card.PROMOTE_ANY)
 
 
+class Origin(str, Enum):
+    """出身。**公开信息**——写在记分板上，人人看得见。
+
+    值和 config.ORIGIN_DEFINITIONS 里的 id 一一对应；名字、技能名、说明文案
+    都在 config 里，这里只保留枚举本身，免得数值和文案散到两个地方。
+    """
+
+    RICH = "RICH"  # 富二代 · 老钱
+    OFFICIAL = "OFFICIAL"  # 官二代 · 提携
+    RED = "RED"  # 红二代 · 开后门
+    PEASANT = "PEASANT"  # 贫农 · 政治正确
+    GRINDER = "GRINDER"  # 小镇做题家·技术员 · 卷王
+    ACCOUNTANT = "ACCOUNTANT"  # 小镇做题家·会计 · 做账
+
+
 class Phase(str, Enum):
     """服务器权威状态机。客户端不允许自己推断阶段。"""
 
@@ -94,6 +109,8 @@ class PlayerState:
     # 累计的严重警告。攒够 WARNINGS_BEFORE_DEMOTION 次就降一级、清空重来。
     # 这是公开信息：官场上谁挨过处分，大家都知道。
     warnings: int = 0
+    # 出身。公开信息，进 public_view。None = 这局没开出身，或者还没选。
+    origin: Origin | None = None
     token: str = ""
     connected: bool = False
     is_ai: bool = False  # 由服务器上的思考型 AI 代打
@@ -107,6 +124,7 @@ class PlayerState:
             rank=self.rank,
             tenure=self.tenure,
             warnings=self.warnings,
+            origin=self.origin,
             token=self.token,
             connected=self.connected,
             is_ai=self.is_ai,
@@ -122,6 +140,7 @@ class PlayerState:
             "merit": self.merit,
             "tenure": self.tenure,
             "warnings": self.warnings,
+            "origin": self.origin.value if self.origin else None,
             "connected": self.connected,
             "is_ai": self.is_ai,
         }
@@ -244,6 +263,11 @@ class PlayerRoundOutcome:
     tenure_after: int = 0
     money_after: int = 0
     merit_after: int = 0
+
+    # 会计「做账」当场洗白成合法收入的金额。只挡没收，不影响分赃池。
+    laundered: int = 0
+    # 红二代「开后门」这一轮已经连升过一次了（防止一轮升三级）
+    origin_double_promoted: bool = False
 
     # 私密提示（只发给本人），例如"你的举报无效"
     private_notes: list[str] = field(default_factory=list)

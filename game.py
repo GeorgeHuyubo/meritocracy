@@ -19,6 +19,7 @@ from models import (
     Card,
     DealtCard,
     GameEvent,
+    Origin,
     Phase,
     PlayerState,
     RoundOutcome,
@@ -48,6 +49,8 @@ class Game:
     redraw_count: dict[int, int] = field(default_factory=dict)
     # 本轮开局发出去的工资（进流水账）
     salary_paid: dict[int, int] = field(default_factory=dict)
+    # 开局的出身红利（富二代的老钱），记下来给流水账用
+    origin_bonus: dict[int, int] = field(default_factory=dict)
 
     current_event: GameEvent | None = None
     last_outcome: RoundOutcome | None = None
@@ -156,7 +159,10 @@ class Game:
             p.rank = self.cfg.base_rank
             p.tenure = 0
             p.warnings = 0
+            # 出身也要清：上一局的技能带进下一局是 bug，warnings 就这么漏过一次
+            p.origin = None
 
+        self.origin_bonus = {}
         self.phase = Phase.LOBBY
         self.round_number = 0
         self.hands = {}
@@ -182,6 +188,12 @@ class Game:
         if len(self.players) < self.cfg.min_players:
             raise GameError(f"至少需要 {self.cfg.min_players} 名玩家。")
         self.log("游戏开始！")
+        for pid, amount in rules.apply_origin_start_bonuses(
+            self.ordered_players(), self.cfg
+        ).items():
+            # 金额不播（钱是暗的），只说他有这门家底——出身本来就是公开的
+            self.log(f"{self.players[pid].name} 家里有底子，出手比别人宽裕。")
+            self.origin_bonus[pid] = amount
         self.begin_round()
 
     def begin_round(self) -> None:
@@ -728,7 +740,8 @@ class Game:
         """
         cfg = self.cfg
         rank = player.rank
-        mc, tc = cfg.money_cost(rank), cfg.merit_cost(rank)
+        # 走 rules 那两个认得出身的门槛函数，不然官二代看到的 UI 会和结算对不上
+        mc, tc = rules.money_cost_for(player, cfg), rules.merit_cost_for(player, cfg)
 
         def span(dist):
             """牌面的最小/最大点数。UI 上写区间比写期望值实在。"""
@@ -796,8 +809,8 @@ class Game:
         }
 
     def _next_promotion_info(self, player: PlayerState) -> dict[str, Any] | None:
-        money_cost = self.cfg.money_cost(player.rank)
-        merit_cost = self.cfg.merit_cost(player.rank)
+        money_cost = rules.money_cost_for(player, self.cfg)
+        merit_cost = rules.merit_cost_for(player, self.cfg)
         if money_cost is None or merit_cost is None:
             return None
         needs_both = self.cfg.needs_both(player.rank)
@@ -842,6 +855,7 @@ class Game:
                     "rank": p.rank,
                     "tenure": p.tenure,
                     "warnings": p.warnings,
+                    "origin": p.origin.value if p.origin else None,
                     "token": p.token,
                     "is_ai": p.is_ai,
                 }
@@ -894,6 +908,7 @@ class Game:
                 rank=int(row["rank"]),
                 tenure=int(row["tenure"]),
                 warnings=int(row.get("warnings") or 0),
+                origin=Origin(row["origin"]) if row.get("origin") else None,
                 token=row["token"],
                 connected=bool(row.get("is_ai")),  # AI 永远在线
                 is_ai=bool(row.get("is_ai")),
