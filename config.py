@@ -454,48 +454,36 @@ EVENT_DEFINITIONS: list[dict[str, Any]] = [
 # 财富广播
 # --------------------------------------------------------------------------
 
-# (最小金额, 最大金额或 None, 单人模板, 多人模板)
-# 财富广播的档位：(下限, 上限, 单人说法, 多人说法)，每档给多条，随机挑一条播。
+# 坊间传闻的文案池。**不再按金额分档** —— 随机挑一条，和金额完全无关。
 #
-# 档位分界按实测的"每轮贪得最多的人净落袋"分位数定：
-#   25% 16 / 中位 25 / 75% 38 / 90% 55
-# 老分界是 1-2 / 3-4 / 5-7 / 8+，那是贪污期望还只有 10 的时候定的；
-# 现在期望 18、到省级能到 50，99% 的播报都落在顶档，永远是"住上洋房了"。
+# 原来是四档（1-15 / 16-27 / 28-44 / 45+），每档几条。问题是文案本身在泄露金额：
+# 听到"住上洋房了"就知道对方至少 45。AI 直接拿档位反推区间，真人却要背一张
+# 档位表才能用，不对等。现在听的人只知道"这轮他挣得最多"，挣了多少无从判断。
 #
-# 每档多备几条也是为了这个：同一句话每轮重复，玩家就不看了。
-WEALTH_BROADCAST_TIERS: list[tuple[int, int | None, list[str], list[str]]] = [
-    (1, 15, [
-        "{names} 最近气色不错。",
-        "{names} 请客的次数明显多了。",
-        "{names} 给家里换了台大冰箱。",
-    ], [
-        "{names} 最近气色都不错。",
-        "{names} 最近请客都勤了。",
-    ]),
-    (16, 27, [
-        "{names} 换了辆新车。",
-        "{names} 手上那块表像是新的。",
-        "{names} 家里孩子转去私立学校了。",
-    ], [
-        "{names} 最近都换了车。",
-        "{names} 手上的表都换新了。",
-    ]),
-    (28, 44, [
-        "{names} 开上豪车了。",
-        "{names} 在市里又添了一套房。",
-        "{names} 爱人辞职不上班了。",
-    ], [
-        "{names} 最近都开上豪车了。",
-        "{names} 都在市里添置了房产。",
-    ]),
-    (45, None, [
-        "{names} 住上洋房了。",
-        "{names} 把孩子送出国念书了。",
-        "{names} 老家盖起三层小楼，门口还蹲了对石狮子。",
-    ], [
-        "{names} 最近都住上洋房了。",
-        "{names} 都把孩子送出国了。",
-    ]),
+# 只留明确发财的说法。原来第一档那几条（"最近气色不错"之类）删掉了 ——
+# 那是给小额准备的，脱离档位之后就只剩含糊。
+WEALTH_BROADCAST_LINES: list[str] = [
+    "{names} 换了辆新车。",
+    "{names} 开上豪车了。",
+    "{names} 在市里又添了一套房。",
+    "{names} 住上洋房了。",
+    "{names} 老家盖起三层小楼，门口还蹲了对石狮子。",
+    "{names} 把孩子送出国念书了。",
+    "{names} 家里孩子转去私立学校了。",
+    "{names} 爱人辞职不上班了。",
+    "{names} 手上那块表像是新的。",
+]
+
+# 多人并列榜首时用的说法。开局前几轮所有人官职一样又没人贪污，
+# 六个人收入完全相同，就会出现"甲、乙、丙、丁、戊和己 都住上洋房了"——
+# 这是要的荒诞效果，不是 bug。
+WEALTH_BROADCAST_LINES_MULTI: list[str] = [
+    "{names} 最近都换了车。",
+    "{names} 最近都开上豪车了。",
+    "{names} 都在市里添置了房产。",
+    "{names} 最近都住上洋房了。",
+    "{names} 都把孩子送出国了。",
+    "{names} 手上的表都换新了。",
 ]
 WEALTH_BROADCAST_NAME_JOINER: str = " 和 "
 
@@ -606,10 +594,11 @@ class Config:
     event_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(e) for e in EVENT_DEFINITIONS]
     )
-    wealth_broadcast_tiers: list[
-        tuple[int, int | None, list[str], list[str]]
-    ] = field(
-        default_factory=lambda: list(WEALTH_BROADCAST_TIERS)
+    wealth_broadcast_lines: list[str] = field(
+        default_factory=lambda: list(WEALTH_BROADCAST_LINES)
+    )
+    wealth_broadcast_lines_multi: list[str] = field(
+        default_factory=lambda: list(WEALTH_BROADCAST_LINES_MULTI)
     )
     wealth_broadcast_name_joiner: str = WEALTH_BROADCAST_NAME_JOINER
     event_storm_fraction: Fraction = EVENT_STORM_FRACTION

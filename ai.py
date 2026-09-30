@@ -5,11 +5,12 @@
 * 它**只吃 `game.public_state()` 和自己的 `game.private_state(pid)`**，
   也就是浏览器里那个玩家能看到的一模一样的 JSON。作弊在结构上就不可能。
 * 它维护一份对每个对手**金钱的估计**。金钱是隐藏的，但可以从公开信息推断：
-    - 财富广播点名了谁，以及那一档的金额区间（档位见 config.WEALTH_BROADCAST_TIERS）
+    - 坊间传闻点名了谁（只说"这轮他到手的钱最多"，不报金额）。
+      工资是公开可算的，所以这条给出一个**硬下界**：
+      被点名的人，脏钱至少 = 全场最高工资 - 他自己的工资
     - 某人政绩没涨 => 他本轮没打 WORK => 有可能在贪
     - 政绩涨了也**不能**判他清白：一轮打两张牌，可以工作+贪污，
       而以权谋私本身就同时给政绩和钱，看起来和埋头干活一模一样
-    - 完全没有财富广播 => 本轮**没有任何人**贪污，所有人的钱都没变
     - "四处打点"晋升 => 他的钱至少够门槛，晋升后被 /5 砍掉
     - 被举报打回基层 => 他的钱清零
 * 政绩是**公开**的，所以它知道谁快要靠政绩晋升了。
@@ -177,7 +178,16 @@ class SmartAgent:
     # 观察：把公开 payload 变成对隐藏金钱的估计
     # ------------------------------------------------------------------
 
-    def observe(self, public: dict[str, Any]) -> None:
+    def observe(
+        self, public: dict[str, Any], private: dict[str, Any] | None = None
+    ) -> None:
+        """把公开结算翻译成对每个对手的估计。
+
+        `private` 是自己的私密 payload，可以不给。给了的话多一条很强的信息：
+        **我对自己这轮挣了多少是完全知情的**，而传闻排的是总收入，
+        所以"别人被点名"就等于"他的收入 >= 我的收入"——
+        这条下界通常比"他的收入 >= 全场最高工资"紧得多。
+        """
         players = {p["id"]: p for p in public["players"]}
         for pid in players:
             if pid != self.id:
@@ -194,10 +204,43 @@ class SmartAgent:
         if facts.get(self.id, {}).get("attacked"):
             self._times_attacked += 1
         top_ids = set(result.get("wealth_top_ids") or [])
-        tier = result.get("wealth_tier")
-        anyone_corrupted = bool(top_ids)
-        tier_low, tier_high = (
-            rules.wealth_tier_range(tier, self.cfg) if tier is not None else (0, None)
+        # 全场最高工资。传闻排的是"总收入 = 工资 + 净落袋的脏钱"，
+        # 而工资人人算得出来，所以这个数是下面两条边界的基准。
+        top_salary = max(
+            (self.cfg.salary(f["rank_before"]) for f in facts.values()), default=0
+        )
+        # 我自己这轮到手多少？完全知情，作为"可证实的最高收入"的候选之一。
+        my_income = 0
+        mine = (private or {}).get("private_result") or {}
+        if mine:
+            my_income = int(mine.get("salary", 0)) + max(
+                0,
+                int(mine.get("corrupt_amount", 0))
+                - int(mine.get("money_confiscated", 0))
+                - int(mine.get("hush_money_paid", 0)),
+            )
+        # 能证实的最高收入：每个人至少拿到自己那份工资，而我自己的是精确值
+        known_income = max(top_salary, my_income)
+
+        # 榜首这轮脏钱有多少？先估出来，因为它同时是**所有其他人的上界**（见下）。
+        top_dirty = max(
+            (
+                self._dirty_prior(f, players.get(pid), self._prev_players.get(pid))[1]
+                for pid, f in facts.items()
+                if pid in top_ids and players.get(pid) and self._prev_players.get(pid)
+            ),
+            default=0.0,
+        )
+        top_dirty = max(
+            top_dirty,
+            max(
+                (
+                    float(known_income - self.cfg.salary(f["rank_before"]))
+                    for pid, f in facts.items()
+                    if pid in top_ids
+                ),
+                default=0.0,
+            ),
         )
 
         for pid, model in self.models.items():
@@ -220,34 +263,37 @@ class SmartAgent:
                 model.quiet_rounds += 1
 
             # --- 他这轮贪了多少？ ---
-            gained = 0.0
+            evidence, gained = self._dirty_prior(fact, cur, prev)
+
+            # 再看坊间传闻。文案不再报金额（以前分四档，等于把区间念出来），
+            # 所以点名本身只说明"他这轮到手的钱全场最多"。
+            # 但**工资是公开可算的**，于是能挤出两条边界。
+            my_salary = self.cfg.salary(rank_before)
             if pid in top_ids:
-                # 被点名 = 他就是本轮的贪污榜首，金额落在这个档位里
-                gained = float(tier_low if tier_high is None else (tier_low + tier_high) / 2)
-                if tier_high is None:
-                    gained = max(gained, self._expected_corrupt(rank_before))
-                model.last_seen_corrupting = result["round"]
-                model.corrupt_evidence += 1.0
-            elif not anyone_corrupted:
-                gained = 0.0  # 没有广播 => 全场无人贪污，这是确定信息
-            elif worked:
-                # 「政绩涨了」**不等于**「没捞钱」——每轮能打 2 张牌，
-                # 完全可以 工作 + 贪污；而以权谋私更是一张牌同时给政绩和钱，
-                # 打出来看上去和埋头工作一模一样，钱却照样算赃款。
-                # 以前这里直接记 0，于是闷声发财的领先者被系统性低估：
-                # 复盘 F7KF 第 7 轮，老张实际有 45 块（门槛 37），AI 只估到 26，
-                # 「他下一步就夺冠」那道刹车因此一次都没踩。
-                p_dirty = 0.45 if int(self.cfg.picks_per_round) > 1 else 0.0
-                gained = p_dirty * self._expected_graft_money(rank_before)
-                model.corrupt_evidence += p_dirty
+                # 下界：他的总收入 >= 任何我能证实的收入，取最大的那个
+                #   —— 每个人至少有自己那份工资，而**我自己这轮挣了多少我最清楚**。
+                #    => 他的脏钱 >= 那个数 - 他自己的工资
+                # 光看工资的话，官最大的那个被点名说明不了什么；
+                # 但只要我自己这轮捞了一笔而他还是压过我，他就一定也捞了。
+                floor_dirty = float(max(0, known_income - my_salary))
+                if floor_dirty > 0:
+                    gained = max(gained, floor_dirty, self._expected_corrupt(rank_before))
+                    evidence = 1.0
+                    model.last_seen_corrupting = result["round"]
             else:
-                # 他没打 WORK，可能在贪、在举报、在攻击。贪的话也一定不超过榜首。
-                p_corrupt = 0.45
-                cap = tier_high if tier_high is not None else self._expected_corrupt(rank_before)
-                gained = p_corrupt * min(self._expected_corrupt(rank_before), float(cap))
-                model.corrupt_evidence += p_corrupt
+                # 上界：他没被点名，所以 他的工资+脏钱 <= 榜首的工资+脏钱
+                #    => 他的脏钱 <= 榜首脏钱 + (榜首工资 - 他的工资)
+                # 老代码里这条上界是拿档位上限做的（cap = tier_high），
+                # 档位去掉之后差点跟着丢了。它很重要：没有上界，
+                # 一个闷头不动的人也会被每轮加一份先验，估计越飘越高。
+                cap = top_dirty + float(max(top_salary, my_salary) - my_salary)
+                if gained > cap:
+                    evidence *= cap / gained if gained else 0.0
+                    gained = max(0.0, cap)
+
+            model.corrupt_evidence += evidence
             model.money_est += gained + self.cfg.salary(rank_before)  # 工资是公开可算的
-            self.est_corrupt_attempts += 1.0 if pid in top_ids else (gained > 0) * 0.45
+            self.est_corrupt_attempts += evidence
             # 查实的证据现在看"记没记警告"，不能再看降级：
             # 攒够两次才降一级，只数降级会把举报压力低估一半。
             if fact.get("warnings_issued", 0) > 0 or fact["demotion"] != "NONE":
@@ -265,6 +311,26 @@ class SmartAgent:
                 model.money_est = max(0.0, model.money_est)
 
         self._prev_players = players
+
+    def _dirty_prior(self, fact, cur, prev) -> tuple[float, float]:
+        """光看公开信息，他这轮捞钱的概率和金额先验 -> (证据量, 估计金额)。
+
+        「政绩涨了」**不等于**「没捞钱」——每轮能打 2 张牌，完全可以工作 + 贪污；
+        而以权谋私更是一张牌同时给政绩和钱，打出来看上去和埋头工作一模一样。
+        以前这里对"政绩涨了"的人直接记 0，于是闷声发财的领先者被系统性低估：
+        复盘 F7KF 第 7 轮，老张实际有 45 块（门槛 37），AI 只估到 26，
+        「他下一步就夺冠」那道刹车因此一次都没踩。
+        """
+        rank_before = fact["rank_before"]
+        if fact["promotion"] == "MERIT":
+            worked = True  # 政绩晋升会把池子清空，涨幅看不出来，但必然在积累政绩
+        else:
+            worked = (cur["merit"] - prev["merit"] + fact["attack_merit_loss"]) > 0
+        if worked:
+            p_dirty = 0.45 if int(self.cfg.picks_per_round) > 1 else 0.0
+            return p_dirty, p_dirty * self._expected_graft_money(rank_before)
+        # 他没打 WORK，可能在贪、在举报、在攻击
+        return 0.45, 0.45 * self._expected_corrupt(rank_before)
 
     # ------------------------------------------------------------------
     # 小工具
@@ -427,7 +493,7 @@ class SmartAgent:
         不能逐张挑最高分就完事——「WORK + 政绩升职」是个组合技，
         单独看每张牌会漏掉协同。所以先给干扰牌定好目标，再**成对**评估经济牌。
         """
-        self.observe(public)
+        self.observe(public, private)
 
         dealt = [
             (Card(d["card"]) if isinstance(d, dict) else Card(d),
@@ -977,7 +1043,7 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
     agent = pool.get(player_id)
     public = game.public_state()
     private = game.private_state(player_id)
-    agent.observe(public)
+    agent.observe(public, private)
 
     if any(Card(d["card"]).needs_target for d in private["hand"]):
         return False  # 手上已经有举报或攻击了

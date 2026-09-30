@@ -387,7 +387,6 @@ class RoundOutcome:
     wealth_broadcast: list[str] = field(default_factory=list)
     # 财富广播点名的玩家，以及对应的档位下标（档位区间本来就写在广播词里）
     wealth_top_ids: list[int] = field(default_factory=list)
-    wealth_tier: int | None = None
     presidents: list[int] = field(default_factory=list)  # 本轮达到国家主席的玩家
 
     def public_view(self) -> dict[str, Any]:
@@ -397,7 +396,6 @@ class RoundOutcome:
             "messages": list(self.public_messages),
             "wealth_broadcast": list(self.wealth_broadcast),
             "wealth_top_ids": list(self.wealth_top_ids),
-            "wealth_tier": self.wealth_tier,
             "player_facts": [o.public_facts() for _, o in sorted(self.outcomes.items())],
             "presidents": list(self.presidents),
         }

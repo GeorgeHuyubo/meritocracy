@@ -548,42 +548,37 @@ def storm_targets(
 
 
 def wealth_broadcast_detail(
-    corrupt_by_name: Iterable[tuple[str, int]],
+    income_by_name: Iterable[tuple[str, int]],
     cfg: Config = DEFAULT_CONFIG,
     rng=None,
-) -> tuple[list[str], list[str], int | None]:
-    """返回 (广播文案, 榜首玩家名, 档位下标)。
+) -> tuple[list[str], list[str]]:
+    """返回 (广播文案, 榜首玩家名)。
 
-    只广播本轮贪污金额最高的玩家，且绝不显示具体金额。
-    没人贪污 -> 空。多人并列最高 -> 合并成一条消息全部点名。
-    档位下标是公开信息：广播词本身就已经暗示了金额区间。
+    只广播**本轮到手的钱最多**的玩家，文案随机挑，和金额完全无关。
+    多人并列最高 -> 合并成一条消息全部点名。
+
+    以前按金额分四档，每档几条文案。那等于文案本身在报金额：听到"住上洋房了"
+    就知道对方至少 45。AI 能拿档位反推区间，真人却得背一张档位表才能用。
+    现在听的人只知道"这轮他挣得最多"，多少无从判断。
     """
-    entries = [(name, amount) for name, amount in corrupt_by_name if amount > 0]
+    entries = [(name, amount) for name, amount in income_by_name if amount > 0]
     if not entries:
-        return [], [], None
+        return [], []
     top = max(amount for _, amount in entries)
     names = [name for name, amount in entries if amount == top]
 
-    for tier, (low, high, singles, multis) in enumerate(cfg.wealth_broadcast_tiers):
-        if top >= low and (high is None or top <= high):
-            joined = _join_names(names, cfg)
-            pool = singles if len(names) == 1 else multis
-            # 同一句每轮重复玩家就不看了，所以每档备了几条随机挑
-            tpl = rng.choice(pool) if (rng is not None and pool) else pool[0]
-            return [tpl.format(names=joined)], names, tier
-    return [], [], None
+    pool = cfg.wealth_broadcast_lines if len(names) == 1 else cfg.wealth_broadcast_lines_multi
+    if not pool:
+        return [], []
+    # 同一句每轮重复玩家就不看了，所以备了好几条随机挑
+    tpl = rng.choice(pool) if rng is not None else pool[0]
+    return [tpl.format(names=_join_names(names, cfg))], names
 
 
 def wealth_broadcast(
-    corrupt_by_name: Iterable[tuple[str, int]], cfg: Config = DEFAULT_CONFIG
+    income_by_name: Iterable[tuple[str, int]], cfg: Config = DEFAULT_CONFIG
 ) -> list[str]:
-    return wealth_broadcast_detail(corrupt_by_name, cfg)[0]
-
-
-def wealth_tier_range(tier: int, cfg: Config = DEFAULT_CONFIG) -> tuple[int, int | None]:
-    """档位下标 -> (最小金额, 最大金额或 None)。AI 用它把广播词翻译成区间。"""
-    low, high, _, _ = cfg.wealth_broadcast_tiers[tier]
-    return low, high
+    return wealth_broadcast_detail(income_by_name, cfg)[0]
 
 
 # --------------------------------------------------------------------------
@@ -650,6 +645,7 @@ def resolve_round(
     rng,
     round_number: int = 1,
     cfg: Config = DEFAULT_CONFIG,
+    salaries: dict[int, int] | None = None,
 ) -> RoundOutcome:
     """就地结算一轮。`players` 会被修改。
 
@@ -657,7 +653,10 @@ def resolve_round(
     结算严格照着这个顺序走（长度 <= PICKS_PER_ROUND）。缺失或空列表 = 本轮没有出牌。
 
     工资不在这里发——它在回合**开始**时就到账了（见 pay_salaries），
-    这样本轮的工资当轮就能拿去换牌。
+    这样本轮的工资当轮就能拿去换牌。`salaries` 只是把那一笔的金额传进来，
+    因为坊间传闻要按"本轮总共到手多少钱"排榜首，工资算在里面。
+    不传就按 `cfg.salary(回合开始时的官职)` 现算（两者必然相等，
+    但传进来的那份是真正发出去的，以它为准）。
 
     结算顺序：
       1. 锁定干扰目标（只记谁打谁）
@@ -1454,15 +1453,24 @@ def resolve_round(
         o.money_after = p.money
         o.merit_after = p.merit
 
-    # ---- 财富广播 --------------------------------------------------------
-    # 用"落袋"的净额，不是毛收入：当场被没收/抄家的人不该还被传"住上洋房"
-    msgs, top_names, tier = wealth_broadcast_detail(
-        ((names[pid], o.net_corrupt_gain) for pid, o in outcome.outcomes.items()),
+    # ---- 坊间传闻 --------------------------------------------------------
+    # 排的是「本轮总共到手多少钱」= 合法工资 + 净落袋的脏钱。
+    #   * 脏钱用"落袋"的净额而不是毛收入：当场被没收的人不该还被传住上洋房
+    #   * 工资也算进来，所以清白的高官照样可能上榜 —— 这是有意的，
+    #     它让"他是升了官还是受了贿"变得分不清，给真正贪的人打掩护
+    salaries = salaries or {}
+    msgs, top_names = wealth_broadcast_detail(
+        (
+            (
+                names[pid],
+                salaries.get(pid, cfg.salary(o.rank_before)) + o.net_corrupt_gain,
+            )
+            for pid, o in outcome.outcomes.items()
+        ),
         cfg, rng,
     )
     outcome.wealth_broadcast = msgs
     outcome.wealth_top_ids = [pid for pid in sorted(names) if names[pid] in top_names]
-    outcome.wealth_tier = tier
 
     outcome.public_messages = attack_msgs + report_msgs + promo_msgs
     outcome.presidents = [p.id for p in ordered if p.rank >= cfg.president_rank]

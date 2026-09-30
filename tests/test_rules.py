@@ -98,7 +98,7 @@ def player(pid: int, **kw) -> PlayerState:
     return PlayerState(id=pid, name=f"玩家{pid}", **base)
 
 
-def resolve(players, actions, event=CALM, script=None, cfg=CFG, rnd=1):
+def resolve(players, actions, event=CALM, script=None, cfg=CFG, rnd=1, salaries=None):
     """测试里写 {pid: Action(...)} 更省事，这里自动包成 resolve_round 要的列表。"""
     normalized = {
         pid: (a if isinstance(a, list) else [a]) for pid, a in actions.items()
@@ -110,6 +110,7 @@ def resolve(players, actions, event=CALM, script=None, cfg=CFG, rnd=1):
         rng=ScriptedRng(script or []),
         round_number=rnd,
         cfg=cfg,
+        salaries=salaries,
     )
 
 
@@ -1275,39 +1276,35 @@ class TestWealthBroadcast(unittest.TestCase):
         msgs = rules.wealth_broadcast([("玩家1", 20)], CFG)
         self.assertNotIn("20", msgs[0])
 
-    def test_tiers_track_the_configured_bounds(self):
-        """档位不写死具体句子——每档有好几条随机挑，只断言"落在哪一档"。"""
-        for tier, (low, high, singles, _multis) in enumerate(CFG.wealth_broadcast_tiers):
-            for amount in filter(None, (low, high)):
-                _, _, got = rules.wealth_broadcast_detail([("A", amount)], CFG)
-                self.assertEqual(got, tier, f"{amount} 应该落在第 {tier} 档")
-            _, _, got = rules.wealth_broadcast_detail([("A", (high or low + 50))], CFG)
-            self.assertEqual(got, tier)
+    def test_the_wording_carries_no_information_about_the_amount(self):
+        """这是改掉分档制的**全部理由**：文案不能再暗示金额。
 
-    def test_the_top_tier_is_actually_reachable_and_not_everything(self):
-        """老分界（顶档 8+）在现在的经济下 99% 的播报都落顶档，永远是同一句。"""
-        tiers = CFG.wealth_broadcast_tiers
-        top_low = tiers[-1][0]
-        # 一笔普通的基层贪污不该直接顶格
-        typical = sum(v * n for v, n in CFG.corrupt_card_distribution) / sum(
-            n for _, n in CFG.corrupt_card_distribution
-        )
-        self.assertLess(typical, top_low, "一笔普通贪污就顶格，说明分界太低")
-
-    def test_each_tier_offers_more_than_one_line(self):
-        """同一句每轮重复玩家就不看了。"""
-        for low, _high, singles, multis in CFG.wealth_broadcast_tiers:
-            self.assertGreater(len(singles), 1, f"{low} 档单人说法只有一条")
-            self.assertGreaterEqual(len(multis), 1, f"{low} 档缺多人说法")
-
-    def test_variants_actually_vary(self):
+        老版本按 1-15 / 16-27 / 28-44 / 45+ 分四档，听到"住上洋房了"
+        就知道对方至少 45——AI 直接拿档位反推区间，真人却得背档位表。
+        判据写成两条对偶：小额挑得出大话，大额也挑得出小话。
+        """
         import random as _r
 
-        seen = {
-            rules.wealth_broadcast_detail([("A", 50)], CFG, _r.Random(i))[0][0]
-            for i in range(30)
-        }
-        self.assertGreater(len(seen), 1, "随机挑了半天还是同一句")
+        def lines(amount):
+            return {
+                rules.wealth_broadcast_detail([("A", amount)], CFG, _r.Random(i))[0][0]
+                for i in range(200)
+            }
+
+        small, large = lines(1), lines(9999)
+        self.assertEqual(small, large, "不同金额能挑到的句子不一样 = 文案在泄露金额")
+        self.assertGreater(len(small), 1, "随机挑了半天还是同一句")
+
+    def test_every_pool_has_several_lines(self):
+        """同一句每轮重复玩家就不看了。"""
+        self.assertGreater(len(CFG.wealth_broadcast_lines), 1)
+        self.assertGreater(len(CFG.wealth_broadcast_lines_multi), 1)
+
+    def test_no_line_mentions_a_number(self):
+        for tpl in CFG.wealth_broadcast_lines + CFG.wealth_broadcast_lines_multi:
+            self.assertFalse(
+                any(ch.isdigit() for ch in tpl.replace("{names}", "")), tpl
+            )
 
     def test_ties_are_all_broadcast(self):
         msgs = rules.wealth_broadcast([("玩家1", 6), ("玩家2", 2), ("玩家3", 6)], CFG)
@@ -1408,7 +1405,11 @@ class TestSalary(unittest.TestCase):
         self.assertLess(pays[0], pays[-1])
 
     def test_salary_is_clean_money(self):
-        """工资不算贪污：举报查不到，也不会让你上财富广播。"""
+        """工资不算贪污：举报查不到。
+
+        但它**算**进坊间传闻的收入口径——官大的人光靠工资也能上榜。
+        这是有意的：让"他是升了官还是受了贿"分不清，给真正贪的人打掩护。
+        """
         earner = player(1, rank=3)
         reporter = player(2)
         rules.pay_salaries([earner, reporter], REAL_CFG)  # 回合开头先发工资
@@ -1417,11 +1418,13 @@ class TestSalary(unittest.TestCase):
             {1: [Action(Card.WORK)], 2: [Action(Card.REPORT, 1)]},
             script=[work_roll(10)],
             cfg=REAL_CFG,
+            salaries={1: REAL_CFG.salary(3), 2: REAL_CFG.salary(0)},
         )
         self.assertEqual(out.outcomes[1].corrupt_amount, 0)
         self.assertFalse(out.outcomes[1].report_effective)  # 查无实据
-        self.assertEqual(out.wealth_broadcast, [])
         self.assertEqual(earner.money, REAL_CFG.salary(3))
+        # 一分钱没贪，照样是本轮榜首（省级工资 6 > 基层 1）
+        self.assertEqual(out.wealth_top_ids, [1])
 
 
 class TestPresidentNeedsBoth(unittest.TestCase):

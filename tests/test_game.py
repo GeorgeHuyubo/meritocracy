@@ -506,13 +506,16 @@ class TestPrivacy(unittest.TestCase):
             sorted(named),
             sorted(game.players[pid].name for pid in public["wealth_top_ids"]),
         )
-        # 档位只是广播词里已经暗示的区间，不能出现具体金额
-        if public["wealth_tier"] is not None:
-            top = max(o.corrupt_amount for o in outcome.outcomes.values())
-            low, high = rules.wealth_tier_range(public["wealth_tier"], CFG)
-            self.assertGreaterEqual(top, low)
-            if high is not None:
-                self.assertLessEqual(top, high)
+        # 点名的必须真的是本轮到手最多的（工资 + 净落袋的脏钱）
+        income = {
+            pid: game.salary_paid.get(pid, 0) + o.net_corrupt_gain
+            for pid, o in outcome.outcomes.items()
+        }
+        best = max(income.values())
+        self.assertEqual(
+            sorted(public["wealth_top_ids"]),
+            sorted(pid for pid, v in income.items() if v == best),
+        )
 
     def test_wealth_broadcast_hides_amounts(self):
         game = make_game(2)

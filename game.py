@@ -360,6 +360,7 @@ class Game:
             rng=self.rng,
             round_number=self.round_number,
             cfg=self.cfg,
+            salaries=dict(self.salary_paid),
         )
         for pid, pay in self.salary_paid.items():
             if pid in outcome.outcomes:
