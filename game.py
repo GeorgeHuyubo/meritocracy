@@ -755,6 +755,7 @@ class Game:
         if player is None:
             raise GameError("你不在这局游戏里。")
         sel = self.selections.get(player_id, Selection())
+        origin_id = player.origin.value if player.origin else None
         private_result = None
         if self.last_outcome is not None:
             o = self.last_outcome.outcomes.get(player_id)
@@ -769,6 +770,17 @@ class Game:
             "rank_name": self.cfg.rank_name(player.rank),
             "tenure": player.tenure,
             "origin": player.origin.value if player.origin else None,
+            # 这个玩家**自己的**晋升门槛阶梯。出身会改门槛（官二代的政绩打折），
+            # 前端的规则表要是直接用 /api/config 里那份通用的，他看到的
+            # "还差多少"就和结算对不上——UI 说要 15、实际只要 10。
+            "promotion_money_costs": [
+                rules.money_cost_at(r, origin_id, self.cfg)
+                for r in range(self.cfg.president_rank)
+            ],
+            "promotion_merit_costs": [
+                rules.merit_cost_at(r, origin_id, self.cfg)
+                for r in range(self.cfg.president_rank)
+            ],
             # 挑出身阶段自己手上的候选（带上文案，前端不用再查一遍表）
             "origin_choices": [
                 dict(self.cfg.origin(oid) or {})

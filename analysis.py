@@ -1304,17 +1304,25 @@ def analyse_origins(
     streams = {
         oid: random.Random(base + 1000 * i) for i, oid in enumerate(origin_ids)
     }
+    brains = {
+        oid: random.Random(base + 1000 * i + 7) for i, oid in enumerate(origin_ids)
+    }
 
     def play_once(
-        assign: dict[int, str | None], stream: random.Random
+        assign: dict[int, str | None], stream: random.Random, brain: random.Random
     ) -> tuple[set[int], int, dict[int, int]]:
+        # **发牌和 AI 用两条独立的流。** 共用一条的话，任何让 AI 多抽或少抽
+        # 一个随机数的代码改动（哪怕只是打分差一点、平局判定走了另一支）
+        # 都会把后面所有的发牌整个错位 —— 等于每次改代码都重洗一副牌。
+        # 踩过：只改了官二代的折扣，红二代的数字从 +4.80 跳到 +8.10。
+        # 分开之后，同一个种子发的牌永远一样，差异才真的来自规则本身。
         game = Game(game_id="origins", cfg=cfg, rng=stream)
         for i in range(n_players):
             game.add_player(f"P{i + 1}")
         for pid, oid in assign.items():
             if oid:
                 game.players[pid].origin = Origin(oid)
-        pool = ai.AgentPool(cfg=cfg, rng=stream)
+        pool = ai.AgentPool(cfg=cfg, rng=brain)
         fires = {pid: 0 for pid in assign}
         game.start_game()
         while not game.is_over:
@@ -1341,7 +1349,7 @@ def analyse_origins(
             pids = list(range(1, n_players + 1))
             lucky = pids[g % n_players]
             assign = {pid: (oid if pid == lucky else None) for pid in pids}
-            winners, rounds, fires = play_once(assign, streams[oid])
+            winners, rounds, fires = play_once(assign, streams[oid], brains[oid])
             fired += fires[lucky]
             for pid in pids:
                 key = "with" if pid == lucky else "without"
@@ -1367,11 +1375,12 @@ def analyse_origins(
     melee_wins = {oid: 0.0 for oid in origin_ids}
     melee_seats = {oid: 0 for oid in origin_ids}
     melee_rng = random.Random(base - 1)
+    melee_brain = random.Random(base - 2)
     for _ in range(games):
         order = origin_ids[:]
         melee_rng.shuffle(order)
         assign = {i + 1: order[i % len(order)] for i in range(n_players)}
-        winners, _, _ = play_once(assign, melee_rng)
+        winners, _, _ = play_once(assign, melee_rng, melee_brain)
         for pid, oid in assign.items():
             melee_seats[oid] += 1
             if pid in winners:

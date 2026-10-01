@@ -814,10 +814,14 @@ function rulesHtml(c) {
     return String(Math.round(v * 100) / 100);
   };
 
-  // 升职条件：把玩家当前所在的那一级高亮，并直接算出"还差多少"
-  const steps = c.promotion_money_costs
+  // 升职条件：把玩家当前所在的那一级高亮，并直接算出"还差多少"。
+  // **优先用 priv 里那份**——出身会改门槛（官二代的政绩打折），
+  // 用 /api/config 里那份通用的，他看到的数就和结算对不上。
+  const moneyCosts = (priv && priv.promotion_money_costs) || c.promotion_money_costs;
+  const meritCosts = (priv && priv.promotion_merit_costs) || c.promotion_merit_costs;
+  const steps = moneyCosts
     .map((money, i) => {
-      const merit = c.promotion_merit_costs[i];
+      const merit = meritCosts[i];
       const both = (c.promotion_requires_both || [])[i];
       const here = rank === i;
       let need = both ? "<b>两样都要</b>" : "二选一";

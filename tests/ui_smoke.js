@@ -150,6 +150,23 @@ for (const box of boxes) {
 }
 if (boxes.length && failed === 0) console.log("  ✓ 规则速查");
 
+// 出身会改晋升门槛（官二代的政绩打折）。规则表要是用 /api/config 里那份
+// 通用的，他会看到"还差 15"而结算只要 10 —— UI 和引擎对不上。
+const vip = payloads.find((p) => p.expect_merit_costs);
+if (vip) {
+  globalThis.__ui.setState(vip.public, vip.private, vip.my_id);
+  globalThis.__ui.render();
+  const table = [...document.querySelectorAll(".rulesbox")]
+    .map((b) => b.innerHTML.replace(/<[^>]*>/g, " "))
+    .join(" ");
+  for (const n of vip.expect_merit_costs) {
+    if (!new RegExp(`(^|\\s)${n}(\\s|$)`).test(table)) {
+      console.log(`  ❌ 官二代的规则表里找不到打折后的政绩门槛 ${n}`);
+      failed++;
+    }
+  }
+}
+
 // 出身的名字和技能说明只在 config.py 里定义一处，前端不许自己写一份。
 // GRAFT 的 /2 vs /4 就是这么漂移的：JS 里抄了个数字，改配置时没人记得改它。
 if (expectedOrigins && expectedOrigins.length) {

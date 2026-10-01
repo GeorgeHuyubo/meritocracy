@@ -515,9 +515,14 @@ ORIGIN_CHOICES_OFFERED: int = 3  # 每人随机发几个候选。**放回抽样*
 # 到省级门槛 37 的时候，这 10 块就不值钱了。
 ORIGIN_OLD_MONEY_START: int = 10
 
-# 官二代「提携」：政绩门槛打几折。4/5 把 15/27/43 压成 12/22/35。
+# 官二代「提携」：政绩门槛打几折。2/3 把 15/27/43 压成 10/18/29。
 # 只打政绩那一侧，金钱门槛不动——两边都打折就太强了。
-ORIGIN_PATRONAGE_MERIT_RATIO: Fraction = Fraction(4, 5)
+#
+# 4/5（12/22/35）那一版测出来 +2.82 [+1.31, +4.34]，和技术员打平、垫底。
+# 更要命的是**存在感**：技术员每局响 5.1 次、每张工作牌面上都写着 +8，
+# 官二代响 1.21 次，还是个要自己去对门槛表才看得出来的折扣。
+# 加深到 2/3 之后基层少一张工作牌、省级少两张多，够明显了。
+ORIGIN_PATRONAGE_MERIT_RATIO: Fraction = Fraction(2, 3)
 
 # 小镇做题家·技术员「卷王」：WORK 的基础点数加几点（在官职倍率之前）。
 # WORK 期望是 6，+2 等于 +33%。这张故意做成纯数值零机制，当**基准锚**——
@@ -544,7 +549,9 @@ ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
         "id": "OFFICIAL",
         "name": "官二代",
         "skill": "提携",
-        "description": "每一级的政绩门槛都打八折，升得比别人省力。",
+        "description": "有人提拔：每一级的政绩门槛只要别人的 2/3"
+                       f"（{PROMOTION_MERIT_COSTS[0]} 点的那一级，他只要 "
+                       f"{-(-PROMOTION_MERIT_COSTS[0] * 2 // 3)} 点）。",
     },
     {
         "id": "RED",

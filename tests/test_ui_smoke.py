@@ -22,8 +22,10 @@ APP_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP_DIR))
 
 import ai  # noqa: E402
+import rules  # noqa: E402
 from config import DEFAULT_CONFIG  # noqa: E402
 from game import Game  # noqa: E402
+from models import Origin  # noqa: E402
 
 CFG = DEFAULT_CONFIG
 NODE = shutil.which("node")
@@ -122,6 +124,24 @@ def build_payloads() -> list[dict]:
         if not game.is_over:
             game.advance_round()
     snap("游戏结束（全揭示）")
+
+    # 官二代的晋升门槛和别人不一样，规则表必须按**他自己的**那份画。
+    # 用 /api/config 里那份通用的，他会看到"还差 15"而结算只要 10。
+    vip = Game(game_id="uivip", cfg=CFG, rng=random.Random(9))
+    for i in range(3):
+        vip.add_player(f"Q{i + 1}")
+    vip.players[1].origin = Origin.OFFICIAL
+    vip.start_game()
+    out.append({
+        "label": "行动选择（官二代，门槛打折）",
+        "public": vip.public_state(),
+        "private": vip.private_state(1),
+        "my_id": 1,
+        # 引擎算出来的那份，JS 要逐个对上
+        "expect_merit_costs": [
+            rules.merit_cost_at(r, "OFFICIAL", CFG) for r in range(CFG.president_rank)
+        ],
+    })
     return out
 
 
