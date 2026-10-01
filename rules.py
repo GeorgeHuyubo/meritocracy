@@ -506,14 +506,10 @@ def apply_promotion_costs(
         if pay_money
         else max(0, money_left)
     )
-    # 政绩：开关打开时，不管这一级是怎么升上去的都要衰减。
-    # 红二代「开后门」是这条的唯一例外：家里有人，不用从头再来。
-    decays = (pay_merit or cfg.promotion_always_decays_merit) and not origin_is(
-        player, "RED", cfg
-    )
+    # 政绩：开关打开时，不管这一级是怎么升上去的都要衰减
     player.merit = (
         overflow_after_promotion(merit_left, cfg, cfg.merit_overflow_divisor)
-        if decays
+        if (pay_merit or cfg.promotion_always_decays_merit)
         else max(0, merit_left)
     )
     player.rank += 1
@@ -1356,13 +1352,21 @@ def resolve_round(
         p.warnings += issued
         p.tenure = 0  # 任何一次警告都把工龄清零
 
+        # 红二代「硬保」：警告照记、工龄照清、赃款照抄，**但官职动不了**。
+        # 上头有人，查归查，位子保得住。
+        shielded = origin_is(p, "RED", cfg)
         demoted = False
+        saved = False
         while p.warnings >= cfg.warnings_before_demotion:
             p.warnings -= cfg.warnings_before_demotion
+            if shielded:
+                saved = True
+                continue
             apply_demotion(p, DemotionKind.MINOR, cfg)
             demoted = True
         # 已经在基层的人降无可降：官职没动，就别播"由基层降为基层"
         hit_the_floor = demoted and p.rank == before
+        o.origin_shielded_demotion = saved
         o.warnings_after = p.warnings
         o.demotion = DemotionKind.MINOR if demoted else DemotionKind.NONE
 
@@ -1373,7 +1377,12 @@ def resolve_round(
         if bribe:
             bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
         detail = "，".join(bits)
-        if demoted and hit_the_floor:
+        if saved:
+            report_msgs.append(
+                f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
+                f"警告记满——上头有人打了招呼，{cfg.rank_name(p.rank)}的位子纹丝不动。"
+            )
+        elif demoted and hit_the_floor:
             report_msgs.append(
                 f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
                 f"警告记满——但已经在{cfg.rank_name(p.rank)}，再降无可降。"

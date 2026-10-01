@@ -549,9 +549,9 @@ ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "RED",
         "name": "红二代",
-        "skill": "开后门",
-        "description": "升职之后政绩不打折——别人升一级政绩要除以 "
-                       f"{MERIT_OVERFLOW_DIVISOR}，他家底原封不动留着。",
+        "skill": "硬保",
+        "description": f"上头有人：降职警告照记、赃款照抄，但官职动不了——"
+                       f"攒满 {WARNINGS_BEFORE_DEMOTION} 次也降不下来。",
     },
     {
         "id": "PEASANT",

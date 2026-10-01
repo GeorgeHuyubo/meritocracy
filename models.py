@@ -267,6 +267,8 @@ class PlayerRoundOutcome:
 
     # 会计「做账」当场洗白成合法收入的金额。只挡没收，不影响分赃池。
     laundered: int = 0
+    # 红二代「硬保」这一轮替他挡掉了一次降职
+    origin_shielded_demotion: bool = False
 
     # 私密提示（只发给本人），例如"你的举报无效"
     private_notes: list[str] = field(default_factory=list)

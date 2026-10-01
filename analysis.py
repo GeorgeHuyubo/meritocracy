@@ -1297,15 +1297,24 @@ def analyse_origins(
     out: dict[str, Any] = {"games": games, "solo": {}, "melee": {}, "fires": {}}
     if not origin_ids:
         return out
+    # 每张出身用自己的 rng 流，而不是六张共用一条。共用的话改其中一张
+    # 会把排在它后面那几张抽到的局全换掉，于是"我只动了红二代，怎么富二代
+    # 也差了 4 个点"——那是流位移，不是效应。踩过一次。
+    base = rng.randrange(1 << 30)
+    streams = {
+        oid: random.Random(base + 1000 * i) for i, oid in enumerate(origin_ids)
+    }
 
-    def play_once(assign: dict[int, str | None]) -> tuple[set[int], int, dict[int, int]]:
-        game = Game(game_id="origins", cfg=cfg, rng=rng)
+    def play_once(
+        assign: dict[int, str | None], stream: random.Random
+    ) -> tuple[set[int], int, dict[int, int]]:
+        game = Game(game_id="origins", cfg=cfg, rng=stream)
         for i in range(n_players):
             game.add_player(f"P{i + 1}")
         for pid, oid in assign.items():
             if oid:
                 game.players[pid].origin = Origin(oid)
-        pool = ai.AgentPool(cfg=cfg, rng=rng)
+        pool = ai.AgentPool(cfg=cfg, rng=stream)
         fires = {pid: 0 for pid in assign}
         game.start_game()
         while not game.is_over:
@@ -1332,7 +1341,7 @@ def analyse_origins(
             pids = list(range(1, n_players + 1))
             lucky = pids[g % n_players]
             assign = {pid: (oid if pid == lucky else None) for pid in pids}
-            winners, rounds, fires = play_once(assign)
+            winners, rounds, fires = play_once(assign, streams[oid])
             fired += fires[lucky]
             for pid in pids:
                 key = "with" if pid == lucky else "without"
@@ -1357,11 +1366,12 @@ def analyse_origins(
     # ---- 3. 混战：6 人各一个身份，随机排列 ----
     melee_wins = {oid: 0.0 for oid in origin_ids}
     melee_seats = {oid: 0 for oid in origin_ids}
+    melee_rng = random.Random(base - 1)
     for _ in range(games):
         order = origin_ids[:]
-        rng.shuffle(order)
+        melee_rng.shuffle(order)
         assign = {i + 1: order[i % len(order)] for i in range(n_players)}
-        winners, _, _ = play_once(assign)
+        winners, _, _ = play_once(assign, melee_rng)
         for pid, oid in assign.items():
             melee_seats[oid] += 1
             if pid in winners:
@@ -1388,10 +1398,7 @@ def _origin_fired(origin_id, outcome, player, rank_before) -> int:
     if origin_id == "ACCOUNTANT":
         return 1 if outcome.laundered and outcome.report_effective else 0
     if origin_id == "RED":
-        # 升了职、而且本来该被砍的政绩保住了
-        return 1 if (
-            outcome.promotion.value != "NONE" and outcome.merit_before_promotion
-        ) else 0
+        return 1 if outcome.origin_shielded_demotion else 0
     if origin_id == "PEASANT":
         # 挨了打、而且这一轮确实在走政绩升职 —— 换成别人就被拦下了
         return 1 if (outcome.attacked and outcome.promotion.value == "MERIT") else 0

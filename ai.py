@@ -53,26 +53,20 @@ def _early_promotion_rank(cfg, rank, money, merit, cards, origin=None):
     def shrink(left, divisor):
         return 0 if left <= 0 else -(-left // divisor)
 
-    # 红二代「开后门」：升职之后政绩不打折。AI 不认这一条就会低估他
-    red = (cfg.origin(origin) or {}).get("id") == "RED"
-
-    def cut_merit(left):
-        return max(0, left) if red else shrink(left, cfg.merit_overflow_divisor)
-
     def merit_after(left):
         """政绩的衰减：开关打开时，怎么升上去的都要 /5。"""
         if cfg.promotion_always_decays_merit:
-            return cut_merit(left)
+            return shrink(left, cfg.merit_overflow_divisor)
         return max(0, left)
 
     if cfg.needs_both(rank):
         if merit >= tc and money >= mc:
             return (rank + 1,
                     shrink(money - mc, cfg.money_overflow_divisor),
-                    cut_merit(merit - tc))
+                    shrink(merit - tc, cfg.merit_overflow_divisor))
         return None
     if merit_card and merit >= tc:
-        return rank + 1, money, cut_merit(merit - tc)
+        return rank + 1, money, shrink(merit - tc, cfg.merit_overflow_divisor)
     if money_card and money >= mc:
         # 贿赂上位也会把政绩打掉，AI 不算这一笔就会高估"花钱升职"
         return rank + 1, shrink(money - mc, cfg.money_overflow_divisor), merit_after(merit)
@@ -983,9 +977,11 @@ class SmartAgent:
         about_to_promote = merit_ready or (mc_t is not None and model.money_est >= mc_t)
         if about_to_promote:
             setback += (1.0 + self.w.promotion_bonus) * threat
-        # 离降级越近，这一次警告越值钱
-        wmax = max(1, cfg.warnings_before_demotion)
-        setback += (opp.get("warnings", 0) + 1) / wmax * threat * 0.5
+        # 离降级越近，这一次警告越值钱。
+        # 红二代「硬保」例外：他降不下来，警告攒到天上也没用，这一项归零。
+        if (cfg.origin(t_origin) or {}).get("id") != "RED":
+            wmax = max(1, cfg.warnings_before_demotion)
+            setback += (opp.get("warnings", 0) + 1) / wmax * threat * 0.5
 
         # 把人按住基本是公共品，赃款才是我的；但他越接近登顶，这份好处越是我自己的
         setback *= self._share(public, threat)

@@ -2728,61 +2728,89 @@ class TestOrigins(unittest.TestCase):
             out.outcomes[1].corrupt_amount, out.outcomes[2].corrupt_amount
         )
 
-    # ---- 红二代 · 开后门 ----
+    # ---- 红二代 · 硬保 ----
 
-    def _promote(self, origin, card=Card.PROMOTE_MERIT, **kw):
-        """让他升一级，返回升完之后还剩多少政绩。"""
-        tc = REAL_CFG.merit_cost(0)
-        p = PlayerState(id=1, name="红", rank=0, merit=tc + 20, origin=origin, **kw)
-        out = resolve(
-            [p, PlayerState(id=2, name="陪跑")], {1: [Action(card)]}, cfg=REAL_CFG
-        )
-        return p, out.outcomes[1]
+    def _caught_twice(self, origin):
+        """连吃两次查实（刚好攒满降职线），看官职动没动。"""
+        wmax = REAL_CFG.warnings_before_demotion
+        victim = PlayerState(id=1, name="红", rank=2, origin=origin)
+        reporter = PlayerState(id=2, name="举报人")
+        last = None
+        for _ in range(wmax):
+            last = resolve(
+                [victim, reporter],
+                {1: [Action(Card.CORRUPT, value=40)], 2: [Action(Card.REPORT, 1)]},
+                cfg=REAL_CFG,
+            )
+        return victim, last.outcomes[1]
 
-    def test_red_keeps_his_merit_after_promoting(self):
-        """别人升一级政绩要 /5，红二代原封不动留着。"""
-        red, _ = self._promote(Origin.RED)
-        plain, _ = self._promote(None)
-        self.assertEqual(red.rank, 1)
-        self.assertEqual(plain.rank, 1)
-        self.assertEqual(red.merit, 20, "门槛那份照扣，剩下的不该再打折")
-        self.assertLess(plain.merit, red.merit)
+    def test_red_never_gets_demoted(self):
+        red, o = self._caught_twice(Origin.RED)
+        plain, po = self._caught_twice(None)
+        self.assertEqual(red.rank, 2, "硬保了还被降职")
+        self.assertEqual(plain.rank, 1, "对照组该降一级")
+        self.assertTrue(o.origin_shielded_demotion)
+        self.assertEqual(o.demotion, DemotionKind.NONE)
+        self.assertEqual(po.demotion, DemotionKind.MINOR)
 
-    def test_red_keeps_merit_when_bribing_his_way_up_too(self):
-        """贿赂升职一分政绩没花，照样要被 /5——这条对红二代也不成立。"""
-        mc = REAL_CFG.money_cost(0)
-        red, _ = self._promote(Origin.RED, card=Card.PROMOTE_MONEY, money=mc)
-        plain, _ = self._promote(None, card=Card.PROMOTE_MONEY, money=mc)
-        tc = REAL_CFG.merit_cost(0)
-        self.assertEqual(red.merit, tc + 20, "一分政绩没花，就该一分不少")
-        self.assertLess(plain.merit, red.merit)
+    def test_red_still_gets_everything_else(self):
+        """硬保只保官职：警告照记、工龄照清、赃款照抄、举报照样查实。"""
+        red, o = self._caught_twice(Origin.RED)
+        self.assertTrue(o.report_effective)
+        self.assertGreater(o.warnings_issued, 0)
+        self.assertGreater(o.money_confiscated, 0)
+        self.assertEqual(red.tenure, 0)
+        self.assertEqual(red.money, 0)
 
-    def test_red_still_pays_the_threshold(self):
-        """不打折不等于不花钱：门槛那一份照扣。"""
-        red, o = self._promote(Origin.RED)
-        self.assertEqual(o.promotion_merit_cost, REAL_CFG.merit_cost(0))
-        self.assertEqual(o.promotion_merit_decay, 0, "红二代不该有衰减这一笔")
+    def test_the_reporter_is_paid_the_same_for_catching_a_red(self):
+        """保的是他的官，不是别人的赏钱。"""
+        wmax = REAL_CFG.warnings_before_demotion
 
-    def test_red_cannot_still_double_promote(self):
-        """「开后门」现在是不衰减，不是一轮升两级——别把两个版本叠在一起。"""
-        p = PlayerState(id=1, name="红", rank=0, money=999, merit=999, origin=Origin.RED)
-        resolve(
-            [p, PlayerState(id=2, name="陪跑")],
-            {1: [Action(Card.PROMOTE_ANY), Action(Card.PROMOTE_ANY)]},
-            cfg=REAL_CFG,
-        )
-        self.assertEqual(p.rank, 1, "一轮还是只能升一级")
+        def payout(origin):
+            victim = PlayerState(id=1, name="红", rank=2, origin=origin)
+            reporter = PlayerState(id=2, name="举报人")
+            for _ in range(wmax):
+                resolve(
+                    [victim, reporter],
+                    {1: [Action(Card.CORRUPT, value=40)], 2: [Action(Card.REPORT, 1)]},
+                    cfg=REAL_CFG,
+                )
+            return reporter.money
 
-    def test_the_ai_values_a_red_promotion_higher(self):
-        """AI 不认这条就会低估他（_early_promotion_rank 里那一刀）。"""
+        self.assertEqual(payout(Origin.RED), payout(None))
+
+    def test_the_warning_counter_still_cycles(self):
+        """挡掉降职之后警告要清空，不然 UI 上会出现"再记 -1 次就降级"。"""
+        red, _ = self._caught_twice(Origin.RED)
+        self.assertLess(red.warnings, REAL_CFG.warnings_before_demotion)
+        self.assertGreaterEqual(red.warnings, 0)
+
+    def test_the_ai_stops_counting_warnings_against_a_red(self):
+        """他降不下来，"离降级越近越值钱"那一项对他应该归零。"""
         import ai as ai_mod
 
-        tc = REAL_CFG.merit_cost(0)
-        args = (REAL_CFG, 0, 0, tc + 20, [Card.PROMOTE_MERIT])
-        _, _, red_left = ai_mod._early_promotion_rank(*args, origin="RED")
-        _, _, plain_left = ai_mod._early_promotion_rank(*args, origin=None)
-        self.assertEqual(red_left, 20)
-        self.assertLess(plain_left, red_left)
+        pool = ai_mod.AgentPool(cfg=REAL_CFG, rng=random.Random(0))
+        agent = pool.get(1)
+        wmax = REAL_CFG.warnings_before_demotion
+        public = {
+            "players": [
+                {"id": 1, "name": "我", "rank": 2, "merit": 0, "tenure": 0,
+                 "origin": None, "warnings": 0},
+                {"id": 2, "name": "红", "rank": 2, "merit": 0, "tenure": 0,
+                 "origin": "RED", "warnings": wmax - 1},
+                {"id": 3, "name": "普通", "rank": 2, "merit": 0, "tenure": 0,
+                 "origin": None, "warnings": wmax - 1},
+            ],
+            "round": 5, "last_result": None,
+            "picks_per_round": REAL_CFG.picks_per_round,
+            "max_rounds": REAL_CFG.max_rounds,
+        }
+        private = {"rank": 2, "merit": 0, "money": 0, "origin": None}
+        agent.observe(public)
+        opp = {o["id"]: o for o in public["players"]}
+        red = agent._score_report(public, private, opp[2])[0]
+        plain = agent._score_report(public, private, opp[3])[0]
+        self.assertLess(red, plain, "两人都差一次降级，举报红二代不该一样值钱")
 
 
 if __name__ == "__main__":
