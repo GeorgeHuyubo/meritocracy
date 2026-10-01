@@ -1830,6 +1830,83 @@ class TestPlayerChosenOrder(unittest.TestCase):
         # 县级 x1.5：15 x 1.5 = 22，而不是基层的 15
         self.assertEqual(out.outcomes[1].corrupt_amount, 22)
 
+    def test_buying_rank_first_does_not_dodge_the_storm(self):
+        """把晋升卡排到贪污**前面**曾经能完全躲开反腐风暴。
+
+        规则速查里白纸黑字写着"把晋升卡排到贪污前面也躲不掉"，但引擎做不到：
+        打牌那一刻还没贪、也没人举报过他，官就当场升了；等风暴按全场贪污额
+        点名时，晋升早已兑现。这等于「贿赂升职 <- 举报」这条克制关系废了一半。
+        """
+        storm = rules.event_by_id("ANTI_CORRUPTION", REAL_CFG)
+        mc = REAL_CFG.money_cost(0)
+        for label, order in (
+            ("买官在前", [Action(Card.PROMOTE_MONEY), Action(Card.CORRUPT, value=15)]),
+            ("买官在后", [Action(Card.CORRUPT, value=15), Action(Card.PROMOTE_MONEY)]),
+        ):
+            p = player(1, rank=0, money=mc)
+            out = resolve([p, player(2)], {1: order}, event=storm, cfg=REAL_CFG)
+            o = out.outcomes[1]
+            self.assertTrue(o.report_effective, label)
+            self.assertEqual(o.promotion, PromotionKind.NONE, f"{label}：官不该升成")
+            self.assertEqual(p.rank, 0, f"{label}：官职该退回去")
+            self.assertEqual(p.money, 0, f"{label}：钱也要不回来")
+
+    def test_the_reporter_is_paid_the_same_whichever_order_he_used(self):
+        """撤回之后举报人分到的钱不能因为对方的出牌顺序而变少。"""
+        mc = REAL_CFG.money_cost(0)
+
+        def payout(order):
+            p = player(1, rank=0, money=mc)
+            r = player(2)
+            resolve([p, r], {1: order, 2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+            return r.money
+
+        self.assertEqual(
+            payout([Action(Card.PROMOTE_MONEY), Action(Card.CORRUPT, value=15)]),
+            payout([Action(Card.CORRUPT, value=15), Action(Card.PROMOTE_MONEY)]),
+        )
+
+    def test_a_bought_presidency_can_still_be_taken_back(self):
+        """最高风险的一种：当轮买到主席，又当轮被查。"""
+        storm = rules.event_by_id("ANTI_CORRUPTION", REAL_CFG)
+        top = REAL_CFG.president_rank - 1
+        p = player(1, rank=top,
+                   money=REAL_CFG.money_cost(top),
+                   merit=REAL_CFG.merit_cost(top))
+        out = resolve(
+            [p, player(2)],
+            {1: [Action(Card.PROMOTE_MONEY), Action(Card.CORRUPT, value=15)]},
+            event=storm, cfg=REAL_CFG,
+        )
+        self.assertTrue(out.outcomes[1].report_effective)
+        self.assertEqual(p.rank, top, "主席之位该被收回")
+        self.assertEqual(out.presidents, [], "不能当上主席还赢下整局")
+
+    def test_the_promotion_first_combo_still_works_when_nobody_catches_you(self):
+        """修漏洞不能把「先买官、再按新倍率去贪」这个组合技一起毁掉。"""
+        mc = REAL_CFG.money_cost(0)
+        p = player(1, rank=0, money=mc)
+        out = resolve(
+            [p, player(2)],
+            {1: [Action(Card.PROMOTE_MONEY), Action(Card.CORRUPT, value=15)]},
+            cfg=REAL_CFG,
+        )
+        self.assertEqual(p.rank, 1)
+        self.assertEqual(out.outcomes[1].corrupt_amount, 22)  # 县级 x1.5
+        self.assertTrue(out.outcomes[1].promoted_before_production)
+
+    def test_a_merit_promotion_is_never_revoked_by_a_report(self):
+        """克制矩阵：政绩升职只怕政治攻击，举报碰不到它。"""
+        storm = rules.event_by_id("ANTI_CORRUPTION", REAL_CFG)
+        p = player(1, rank=0, merit=REAL_CFG.merit_cost(0))
+        out = resolve(
+            [p, player(2)],
+            {1: [Action(Card.PROMOTE_MERIT), Action(Card.CORRUPT, value=15)]},
+            event=storm, cfg=REAL_CFG,
+        )
+        self.assertTrue(out.outcomes[1].report_effective, "照样被查实")
+        self.assertEqual(p.rank, 1, "但政绩升上去的官动不了")
+
     def test_corrupting_first_stays_at_the_old_rate(self):
         mc = REAL_CFG.money_cost(0)
         p = player(1, rank=0, money=mc, merit=0)

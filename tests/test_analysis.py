@@ -198,5 +198,38 @@ class TestOriginsSection(unittest.TestCase):
         self.assertEqual(out["solo"], {})
 
 
+class TestEverySectionActuallyRuns(unittest.TestCase):
+    """每个 --section 都要能跑完。
+
+    踩过：出身那段打印里写了 `for oid, pct in ...`，模块级有个同名的 pct()
+    函数，被局部变量一遮，**连根本不走这个分支的 --section full 都炸了**
+    （UnboundLocalError）。单元测试全绿，是手动跑平衡时才发现的。
+    """
+
+    def test_no_section_crashes(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        app = Path(__file__).resolve().parent.parent
+        sections = [
+            "leader", "rank", "actions", "choices", "reports", "events",
+            "postmortem", "strategy", "triangle", "funnel", "ablation",
+            "origins", "full",
+        ]
+        for sec in sections:
+            with self.subTest(section=sec):
+                proc = subprocess.run(
+                    [sys.executable, str(app / "analysis.py"),
+                     "--section", sec, "--games", "6", "--players", "3",
+                     "--tournament-games", "6", "--seed", "1"],
+                    capture_output=True, text=True, timeout=180, cwd=str(app),
+                )
+                self.assertEqual(
+                    proc.returncode, 0,
+                    f"--section {sec} 挂了：\n{proc.stderr[-800:]}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

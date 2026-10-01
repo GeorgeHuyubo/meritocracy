@@ -1948,9 +1948,11 @@ def main(argv: list[str] | None = None) -> int:
 
             print("\n  混战：6 人各一个出身，随机排列（公平线"
                   f" {100 / max(1, len(d['melee'])):.2f}%）")
-            for oid, pct in sorted(d["melee"].items(), key=lambda kv: -kv[1]):
+            # 循环变量别叫 pct —— 模块级有个同名函数，在 main() 里被它一遮，
+            # 连不走这个分支的 --section full 都会 UnboundLocalError
+            for oid, share in sorted(d["melee"].items(), key=lambda kv: -kv[1]):
                 info = cfg.origin(oid) or {"name": oid}
-                print(f"    {info['name']:<20}{pct:>8.2f}%")
+                print(f"    {info['name']:<20}{share:>8.2f}%")
 
             deltas = [r["delta"] for r in d["solo"].values()]
             spread = max(deltas) - min(deltas)

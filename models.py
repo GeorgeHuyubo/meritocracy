@@ -269,6 +269,8 @@ class PlayerRoundOutcome:
     laundered: int = 0
     # 红二代「硬保」这一轮替他挡掉了一次降职
     origin_shielded_demotion: bool = False
+    # 这一轮的晋升是**花钱**买的（而不是凭政绩）。查实之后要据此把官撤回来。
+    bought_rank_this_round: bool = False
 
     # 私密提示（只发给本人），例如"你的举报无效"
     private_notes: list[str] = field(default_factory=list)

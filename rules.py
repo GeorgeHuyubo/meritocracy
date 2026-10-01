@@ -903,6 +903,12 @@ def resolve_round(
                 #   interfered_yet —— 我想花的是本轮举报/攻击抄来的钱，还没到账
                 #   corrupted_yet  —— 这一轮刚贪的钱，当轮花不出去
                 # 走政绩的晋升当场结算，玩家自选的出牌顺序完整保留。
+                #
+                # 没被上面三条拦住、但走的仍是金钱路线的，当场升 —— 这是
+                # 「先买官、再用新官职的倍率去贪」那个组合技必须的。但那样一来
+                # 它就绕过了本轮的查实（出牌时谁也不知道反腐风暴会不会落到自己
+                # 头上），所以记个标记，查实了之后在第 5 步把官撤回来。
+                o.bought_rank_this_round = may_need_money
                 if may_need_money and (targeted or interfered_yet or corrupted_yet):
                     if has_money_for_promotion(p, cfg):
                         # 礼已经备好了：查实的话钱照样没了，官却升不成
@@ -1299,6 +1305,37 @@ def resolve_round(
             o.merit_promotion_blocked = True
         if o.attacked and o.report_effective and elig_money_pre and elig_merit_pre:
             o.promotion_blocked_by_attack_report = True
+
+    # ---- 4b. 撤回"当场买来的官" ---------------------------------------------
+    # 走金钱路线的晋升本该被查实掐掉。绝大多数情况在第 2 步就延后了，但有一种
+    # 漏网：晋升卡排在**贪污前面**时，打牌那一刻还没贪、也没人举报过他，
+    # 于是官当场就升了，等反腐风暴按全场贪污额点名时已经来不及。
+    # 实测过：贿赂升职 -> 贪污，被风暴查实照样升成县级干部，
+    # 而规则速查里写着"把晋升卡排到贪污前面也躲不掉"。
+    #
+    # 不能改成"这种情况也延后"——那会毁掉「先买官、再按新官职倍率去贪」
+    # 这个有意设计的组合技（test_promotion_first_also_boosts_corruption 守着）。
+    # 所以官照升，查实了再撤回，撤完的状态和"一开始就被冻结"完全一致：
+    # 钱退回来再按"行贿打水漂"走一遍正常流程，于是举报人该分的那份也不会少。
+    for p in ordered:
+        o = outcome.outcomes[p.id]
+        if not (o.report_effective and o.bought_rank_this_round):
+            continue
+        if o.promotion is PromotionKind.NONE:
+            continue
+        p.rank -= 1
+        p.merit += o.promotion_merit_decay  # 升职那一刀的 /5 衰减还原
+        p.money += o.promotion_money_cost   # 先退回来……
+        o.pending_bribe = max(o.pending_bribe, o.promotion_money_cost)  # ……再打水漂
+        o.promotion_frozen_by_report = True
+        o.promotion = PromotionKind.NONE
+        o.promotion_money_cost = 0
+        o.promotion_merit_cost = 0
+        o.promotion_merit_decay = 0
+        o.promoted_before_production = False
+        o.private_notes.append(
+            "官是买到手了，可惜当轮就被查了——位子退回去，钱也要不回来。"
+        )
 
     # ---- 5. 没收 + 降职警告 --------------------------------------------------
     # 查实的后果不再是"一次被抓就打回基层"那种断崖，而是一张分期账单：
