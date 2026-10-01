@@ -992,7 +992,8 @@ ${originsBlock}
 
 <h4>怎么算赢</h4>
 <ul class="rlist">
-  <li>升上<b>${esc(c.rank_names[c.president_rank])}</b>立刻获胜。</li>
+  <li>升上<b>${esc(c.rank_names[c.president_rank])}</b>立刻获胜。同一轮多人登顶时比金钱 &gt; 政绩，
+      只有家底最厚的当选，其余退回${esc(c.rank_names[c.president_rank - 1])}。</li>
   <li>打满 ${c.max_rounds} 轮还没人登顶，就比 ${tiebreak}。</li>
 </ul>`;
 }

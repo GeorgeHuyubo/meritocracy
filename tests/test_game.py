@@ -221,7 +221,20 @@ class TestPresidentEndsGameImmediately(unittest.TestCase):
         game.players[1].money += 8
         run_round(game, choices)
         self.assertEqual(game.winners, [2])
-        self.assertIn("同时登顶", game.game_over_reason)
+        names = {pid: game.players[pid].name for pid in (1, 2, 3)}
+        self.assertEqual(
+            game.game_over_reason,
+            f"国家主席最大候选人为：{names[1]}、{names[2]}、{names[3]}，"
+            f"最终还是因为{names[2]} 家底更厚，成功当选国家主席。",
+        )
+        # 主席只有一个：落选的退回省级，钱和政绩不动
+        top = CFG.president_rank
+        self.assertEqual(game.players[2].rank, top)
+        for pid in (1, 3):
+            self.assertEqual(game.players[pid].rank, top - 1)
+        self.assertEqual(game.players[1].money, game.players[3].money + 8)
+        self.assertEqual(game.last_outcome.presidents, [2])
+        self.assertEqual(game.last_outcome.outcomes[1].rank_after, top - 1)
 
     def test_simultaneous_presidents_fall_back_to_merit(self):
         game = make_game(2)
@@ -249,6 +262,25 @@ class TestPresidentEndsGameImmediately(unittest.TestCase):
             choices[pid] = pick((Card.PROMOTE_ANY, None), (Card.PROMOTE_ANY, None))
         run_round(game, choices)
         self.assertEqual(sorted(game.winners), [1, 2])
+        self.assertTrue(all(game.players[pid].rank == CFG.president_rank for pid in (1, 2)))
+
+    def test_partial_tie_demotes_only_the_poorer(self):
+        """三人登顶、两人家底一样厚：两人共同当选，第三个退回省级。"""
+        game = make_game(3)
+        game.start_game()
+        choices = {}
+        for pid in (1, 2, 3):
+            game.players[pid].rank = 3
+            game.players[pid].merit = CFG.promotion_merit_costs[3]
+            game.players[pid].money = CFG.promotion_money_costs[3]
+            game.hands[pid] = hand_of(*([Card.PROMOTE_ANY] * CFG.hand_size))
+            choices[pid] = pick((Card.PROMOTE_ANY, None), (Card.PROMOTE_ANY, None))
+        game.players[1].money += 5
+        game.players[3].money += 5
+        run_round(game, choices)
+        self.assertEqual(sorted(game.winners), [1, 3])
+        self.assertEqual(game.players[2].rank, CFG.president_rank - 1)
+        self.assertIn("共同当选国家主席", game.game_over_reason)
 
     def test_tiebreak_can_be_switched_off(self):
         import dataclasses
@@ -266,6 +298,8 @@ class TestPresidentEndsGameImmediately(unittest.TestCase):
             choices[pid] = pick((Card.PROMOTE_ANY, None), (Card.PROMOTE_ANY, None))
         run_round(game, choices)
         self.assertEqual(sorted(game.winners), [1, 2])
+        # 真平局：两个都是主席，没人被撤
+        self.assertTrue(all(game.players[pid].rank == cfg.president_rank for pid in (1, 2)))
 
 
 class TestFinalSettlement(unittest.TestCase):

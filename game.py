@@ -457,9 +457,23 @@ class Game:
             self.winners = winners
             names = "、".join(self.players[pid].name for pid in self.winners)
             if tied_count > len(self.winners):
-                self.game_over_reason = (
-                    f"{tied_count} 人同时登顶，{names} 家底更厚，笑到最后！"
+                # 主席只有一个位子（真平局除外）：落选的退回省级，钱和政绩不动。
+                # 不然终局结算里会同时挂着好几个"国家主席"。
+                for pid in outcome.presidents:
+                    if pid not in self.winners:
+                        self.players[pid].rank = self.cfg.president_rank - 1
+                        if pid in outcome.outcomes:
+                            outcome.outcomes[pid].rank_after = self.players[pid].rank
+                candidates = "、".join(self.players[pid].name for pid in outcome.presidents)
+                verdict = (
+                    f"{names} 家底更厚，成功当选国家主席"
+                    if len(self.winners) == 1
+                    else f"{names} 家底一样厚，共同当选国家主席"
                 )
+                self.game_over_reason = (
+                    f"国家主席最大候选人为：{candidates}，最终还是因为{verdict}。"
+                )
+                outcome.presidents = list(self.winners)
             else:
                 self.game_over_reason = f"{names} 登上国家主席之位，游戏结束！"
             self.log(self.game_over_reason)
