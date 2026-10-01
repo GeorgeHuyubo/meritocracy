@@ -1388,7 +1388,10 @@ def _origin_fired(origin_id, outcome, player, rank_before) -> int:
     if origin_id == "ACCOUNTANT":
         return 1 if outcome.laundered and outcome.report_effective else 0
     if origin_id == "RED":
-        return 1 if outcome.origin_double_promoted else 0
+        # 升了职、而且本来该被砍的政绩保住了
+        return 1 if (
+            outcome.promotion.value != "NONE" and outcome.merit_before_promotion
+        ) else 0
     if origin_id == "PEASANT":
         # 挨了打、而且这一轮确实在走政绩升职 —— 换成别人就被拦下了
         return 1 if (outcome.attacked and outcome.promotion.value == "MERIT") else 0

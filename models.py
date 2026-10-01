@@ -267,8 +267,6 @@ class PlayerRoundOutcome:
 
     # 会计「做账」当场洗白成合法收入的金额。只挡没收，不影响分赃池。
     laundered: int = 0
-    # 红二代「开后门」这一轮已经连升过一次了（防止一轮升三级）
-    origin_double_promoted: bool = False
 
     # 私密提示（只发给本人），例如"你的举报无效"
     private_notes: list[str] = field(default_factory=list)

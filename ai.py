@@ -53,20 +53,26 @@ def _early_promotion_rank(cfg, rank, money, merit, cards, origin=None):
     def shrink(left, divisor):
         return 0 if left <= 0 else -(-left // divisor)
 
+    # 红二代「开后门」：升职之后政绩不打折。AI 不认这一条就会低估他
+    red = (cfg.origin(origin) or {}).get("id") == "RED"
+
+    def cut_merit(left):
+        return max(0, left) if red else shrink(left, cfg.merit_overflow_divisor)
+
     def merit_after(left):
         """政绩的衰减：开关打开时，怎么升上去的都要 /5。"""
         if cfg.promotion_always_decays_merit:
-            return shrink(left, cfg.merit_overflow_divisor)
+            return cut_merit(left)
         return max(0, left)
 
     if cfg.needs_both(rank):
         if merit >= tc and money >= mc:
             return (rank + 1,
                     shrink(money - mc, cfg.money_overflow_divisor),
-                    shrink(merit - tc, cfg.merit_overflow_divisor))
+                    cut_merit(merit - tc))
         return None
     if merit_card and merit >= tc:
-        return rank + 1, money, shrink(merit - tc, cfg.merit_overflow_divisor)
+        return rank + 1, money, cut_merit(merit - tc)
     if money_card and money >= mc:
         # 贿赂上位也会把政绩打掉，AI 不算这一笔就会高估"花钱升职"
         return rank + 1, shrink(money - mc, cfg.money_overflow_divisor), merit_after(merit)

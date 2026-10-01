@@ -2730,60 +2730,59 @@ class TestOrigins(unittest.TestCase):
 
     # ---- 红二代 · 开后门 ----
 
-    def _double(self, origin):
-        mc = REAL_CFG.money_cost(0) + REAL_CFG.money_cost(1)
-        tc = REAL_CFG.merit_cost(0) + REAL_CFG.merit_cost(1) * 5
-        p = PlayerState(id=1, name="红", rank=0, money=mc, merit=tc, origin=origin)
+    def _promote(self, origin, card=Card.PROMOTE_MERIT, **kw):
+        """让他升一级，返回升完之后还剩多少政绩。"""
+        tc = REAL_CFG.merit_cost(0)
+        p = PlayerState(id=1, name="红", rank=0, merit=tc + 20, origin=origin, **kw)
         out = resolve(
-            [p, PlayerState(id=2, name="陪跑")],
-            {1: [Action(Card.PROMOTE_ANY), Action(Card.PROMOTE_ANY)]},
-            cfg=REAL_CFG,
+            [p, PlayerState(id=2, name="陪跑")], {1: [Action(card)]}, cfg=REAL_CFG
         )
         return p, out.outcomes[1]
 
-    def test_red_can_climb_two_ranks_in_one_round(self):
-        red, _ = self._double(Origin.RED)
-        plain, _ = self._double(None)
-        self.assertEqual(plain.rank, 1, "普通人一轮只能升一级")
-        self.assertEqual(red.rank, 2, "红二代该连升两级")
+    def test_red_keeps_his_merit_after_promoting(self):
+        """别人升一级政绩要 /5，红二代原封不动留着。"""
+        red, _ = self._promote(Origin.RED)
+        plain, _ = self._promote(None)
+        self.assertEqual(red.rank, 1)
+        self.assertEqual(plain.rank, 1)
+        self.assertEqual(red.merit, 20, "门槛那份照扣，剩下的不该再打折")
+        self.assertLess(plain.merit, red.merit)
 
-    def test_red_cannot_back_door_into_the_presidency(self):
-        """最后一步不给走后门。"""
-        top = REAL_CFG.president_rank - 1
-        p = PlayerState(
-            id=1, name="红", rank=top - 1,
-            money=REAL_CFG.money_cost(top - 1) + REAL_CFG.money_cost(top),
-            merit=REAL_CFG.merit_cost(top - 1) + REAL_CFG.merit_cost(top) * 5,
-            origin=Origin.RED,
-        )
-        resolve(
-            [p, PlayerState(id=2, name="陪跑")],
-            {1: [Action(Card.PROMOTE_ANY), Action(Card.PROMOTE_ANY)]},
-            cfg=REAL_CFG,
-        )
-        self.assertEqual(p.rank, top, "不该一路后门到主席")
+    def test_red_keeps_merit_when_bribing_his_way_up_too(self):
+        """贿赂升职一分政绩没花，照样要被 /5——这条对红二代也不成立。"""
+        mc = REAL_CFG.money_cost(0)
+        red, _ = self._promote(Origin.RED, card=Card.PROMOTE_MONEY, money=mc)
+        plain, _ = self._promote(None, card=Card.PROMOTE_MONEY, money=mc)
+        tc = REAL_CFG.merit_cost(0)
+        self.assertEqual(red.merit, tc + 20, "一分政绩没花，就该一分不少")
+        self.assertLess(plain.merit, red.merit)
 
-    def test_red_cannot_climb_three(self):
+    def test_red_still_pays_the_threshold(self):
+        """不打折不等于不花钱：门槛那一份照扣。"""
+        red, o = self._promote(Origin.RED)
+        self.assertEqual(o.promotion_merit_cost, REAL_CFG.merit_cost(0))
+        self.assertEqual(o.promotion_merit_decay, 0, "红二代不该有衰减这一笔")
+
+    def test_red_cannot_still_double_promote(self):
+        """「开后门」现在是不衰减，不是一轮升两级——别把两个版本叠在一起。"""
         p = PlayerState(id=1, name="红", rank=0, money=999, merit=999, origin=Origin.RED)
         resolve(
             [p, PlayerState(id=2, name="陪跑")],
             {1: [Action(Card.PROMOTE_ANY), Action(Card.PROMOTE_ANY)]},
             cfg=REAL_CFG,
         )
-        self.assertEqual(p.rank, 2, "一轮最多两级")
+        self.assertEqual(p.rank, 1, "一轮还是只能升一级")
 
-    def test_red_needs_both_resources_for_the_second_step(self):
-        """光有钱不够——第二级的政绩门槛也得够。"""
-        p = PlayerState(
-            id=1, name="红", rank=0, money=999,
-            merit=REAL_CFG.merit_cost(0), origin=Origin.RED,
-        )
-        resolve(
-            [p, PlayerState(id=2, name="陪跑")],
-            {1: [Action(Card.PROMOTE_MERIT), Action(Card.PROMOTE_MERIT)]},
-            cfg=REAL_CFG,
-        )
-        self.assertEqual(p.rank, 1)
+    def test_the_ai_values_a_red_promotion_higher(self):
+        """AI 不认这条就会低估他（_early_promotion_rank 里那一刀）。"""
+        import ai as ai_mod
+
+        tc = REAL_CFG.merit_cost(0)
+        args = (REAL_CFG, 0, 0, tc + 20, [Card.PROMOTE_MERIT])
+        _, _, red_left = ai_mod._early_promotion_rank(*args, origin="RED")
+        _, _, plain_left = ai_mod._early_promotion_rank(*args, origin=None)
+        self.assertEqual(red_left, 20)
+        self.assertLess(plain_left, red_left)
 
 
 if __name__ == "__main__":

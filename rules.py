@@ -271,21 +271,8 @@ def _resolve_promotion_card(
     if not auto:
         outcome.promotion_card_played = True
     if already is not PromotionKind.NONE:
-        # 红二代「开后门」：一轮里能连升两级。
-        #
-        # 这里只放行"再打一张卡"，**资源够不够交给下面的正常逻辑判**。
-        # 第一版我在这儿额外要求"钱和政绩同时够"，比普通升职还严——
-        # 而第一级升完政绩刚被 /5 砍过，那个条件几乎不可能满足：
-        # 实测 600 局触发率 0.00，整张牌是废的。
-        # 唯一的额外限制是最后一步（登主席）不给走后门。
-        if not (
-            origin_is(player, "RED", cfg)
-            and not outcome.origin_double_promoted
-            and player.rank + 1 < cfg.president_rank
-        ):
-            outcome.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
-            return
-        outcome.origin_double_promoted = True
+        outcome.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
+        return
     if money_cost_for(player, cfg) is None:  # 已经到顶
         return
 
@@ -519,10 +506,14 @@ def apply_promotion_costs(
         if pay_money
         else max(0, money_left)
     )
-    # 政绩：开关打开时，不管这一级是怎么升上去的都要衰减
+    # 政绩：开关打开时，不管这一级是怎么升上去的都要衰减。
+    # 红二代「开后门」是这条的唯一例外：家里有人，不用从头再来。
+    decays = (pay_merit or cfg.promotion_always_decays_merit) and not origin_is(
+        player, "RED", cfg
+    )
     player.merit = (
         overflow_after_promotion(merit_left, cfg, cfg.merit_overflow_divisor)
-        if (pay_merit or cfg.promotion_always_decays_merit)
+        if decays
         else max(0, merit_left)
     )
     player.rank += 1

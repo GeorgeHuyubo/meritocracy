@@ -550,8 +550,8 @@ ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
         "id": "RED",
         "name": "红二代",
         "skill": "开后门",
-        "description": "政绩和金钱同时够两级时，一轮打两张晋升卡能连升两级"
-                       "（升到国家主席那一步除外）。",
+        "description": "升职之后政绩不打折——别人升一级政绩要除以 "
+                       f"{MERIT_OVERFLOW_DIVISOR}，他家底原封不动留着。",
     },
     {
         "id": "PEASANT",
