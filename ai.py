@@ -205,7 +205,8 @@ class SmartAgent:
         if facts.get(self.id, {}).get("attacked"):
             self._times_attacked += 1
         top_ids = set(result.get("wealth_top_ids") or [])
-        # 全场最高工资。传闻排的是"工资 + 贪污款项（毛额，没收和打点都不扣）"，
+        # 全场最高工资。传闻排的是"工资 + 没被查实的贪污款项（毛额，打点不扣；
+        # 被查实的贪污记 0）"，
         # 而工资人人算得出来，所以这个数是下面两条边界的基准。
         top_salary = max(
             (self.cfg.salary(f["rank_before"]) for f in facts.values()), default=0
@@ -214,16 +215,20 @@ class SmartAgent:
         my_income = 0
         mine = (private or {}).get("private_result") or {}
         if mine:
-            my_income = int(mine.get("salary", 0)) + int(mine.get("corrupt_amount", 0))
+            my_income = int(mine.get("salary", 0)) + (
+                0 if mine.get("report_effective") else int(mine.get("corrupt_amount", 0))
+            )
         # 能证实的最高收入：每个人至少拿到自己那份工资，而我自己的是精确值
         known_income = max(top_salary, my_income)
 
         # 榜首这轮脏钱有多少？先估出来，因为它同时是**所有其他人的上界**（见下）。
+        # 被查实的榜首是光凭工资上的榜，他计入传闻的脏钱是 0。
         top_dirty = max(
             (
                 self._dirty_prior(f, players.get(pid), self._prev_players.get(pid))[1]
                 for pid, f in facts.items()
-                if pid in top_ids and players.get(pid) and self._prev_players.get(pid)
+                if pid in top_ids and not self._caught(f)
+                and players.get(pid) and self._prev_players.get(pid)
             ),
             default=0.0,
         )
@@ -265,7 +270,10 @@ class SmartAgent:
             # 所以点名本身只说明"他这轮到手的钱全场最多"。
             # 但**工资是公开可算的**，于是能挤出两条边界。
             my_salary = self.cfg.salary(rank_before)
-            if pid in top_ids:
+            if self._caught(fact):
+                # 被查实的人贪污那项在传闻里记 0：点没点他的名都和脏钱无关，两条边界都不适用
+                pass
+            elif pid in top_ids:
                 # 下界：他的总收入 >= 任何我能证实的收入，取最大的那个
                 #   —— 每个人至少有自己那份工资，而**我自己这轮挣了多少我最清楚**。
                 #    => 他的脏钱 >= 那个数 - 他自己的工资
@@ -282,7 +290,7 @@ class SmartAgent:
                 # 老代码里这条上界是拿档位上限做的（cap = tier_high），
                 # 档位去掉之后差点跟着丢了。它很重要：没有上界，
                 # 一个闷头不动的人也会被每轮加一份先验，估计越飘越高。
-                # 没人被点名 = 全场没人贪污（只有工资不广播），上界直接是 0
+                # 没人被点名 = 没人贪了钱还没被查（只有工资可比时不广播），上界直接是 0
                 cap = (
                     top_dirty + float(max(top_salary, my_salary) - my_salary)
                     if top_ids
@@ -297,11 +305,11 @@ class SmartAgent:
             self.est_corrupt_attempts += evidence
             # 查实的证据现在看"记没记警告"，不能再看降级：
             # 攒够两次才降一级，只数降级会把举报压力低估一半。
-            if fact.get("warnings_issued", 0) > 0 or fact["demotion"] != "NONE":
+            if self._caught(fact):
                 self.observed_demotions += 1
 
             # --- 被举报没收：只没收本轮那一笔，存款不再被抄 ---
-            if fact.get("warnings_issued", 0) > 0 or fact["demotion"] != "NONE":
+            if self._caught(fact):
                 model.money_est = max(0.0, model.money_est - gained)
 
             # --- 晋升对钱的影响 ---
@@ -312,6 +320,11 @@ class SmartAgent:
                 model.money_est = max(0.0, model.money_est)
 
         self._prev_players = players
+
+    @staticmethod
+    def _caught(fact) -> bool:
+        """本轮被举报/事件查实了没有（公开事实：记了警告或者降了级）。"""
+        return fact.get("warnings_issued", 0) > 0 or fact["demotion"] != "NONE"
 
     def _dirty_prior(self, fact, cur, prev) -> tuple[float, float]:
         """光看公开信息，他这轮捞钱的概率和金额先验 -> (证据量, 估计金额)。

@@ -1123,8 +1123,8 @@ class TestReportReward(unittest.TestCase):
     def test_reward_is_not_corruption(self):
         """分到的赃款不算贪污：不上财富广播，也不会让举报人被举报查实。
 
-        场上安排：1 号贪了被 2 号举报抄家，4 号也贪了但没人管——
-        两人贪的毛额一样，广播并列点名，绝不该点分到赃款的 2 号。
+        场上安排：1 号贪了被 2 号举报查实（贪污那项记 0，不上广播），
+        4 号也贪了但没人管——广播该点 4 号，绝不该点分到赃款的 2 号。
         """
         caught = player(1, rank=0, money=20, merit=0)
         reporter = player(2)
@@ -1144,9 +1144,9 @@ class TestReportReward(unittest.TestCase):
         self.assertEqual(out.outcomes[2].corrupt_amount, 0)
         self.assertTrue(out.outcomes[2].reported)
         self.assertFalse(out.outcomes[2].report_effective)  # 他本轮没贪污
-        # 1 号被抄家也照样上广播（按毛额），和 4 号并列
-        self.assertEqual(out.outcomes[1].net_corrupt_gain, 0)
-        self.assertEqual(out.wealth_top_ids, [1, 4])
+        # 1 号被查实 -> 记 0 -> 不上广播；4 号安然无恙 -> 上广播
+        self.assertTrue(out.outcomes[1].report_effective)
+        self.assertEqual(out.wealth_top_ids, [4])
         self.assertNotIn("玩家2", out.wealth_broadcast[0])
 
     def test_mutual_reports_settle_simultaneously(self):
@@ -1325,8 +1325,8 @@ class TestWealthBroadcast(unittest.TestCase):
         self.assertIn("玩家1", out.wealth_broadcast[0])  # 20 > 10
         self.assertNotIn("玩家2", out.wealth_broadcast[0])
 
-    def test_confiscated_money_still_gets_broadcast(self):
-        """传闻按贪污毛额排：钱当场被没收了，坊间照样传他捞了一大笔。"""
+    def test_caught_corruption_is_not_broadcast(self):
+        """被举报查实的人贪污那项记 0。全场只有他贪了 -> 只剩工资可比，不广播。"""
         caught = player(1, rank=0)
         reporter = player(2, rank=0)
         out = resolve(
@@ -1336,11 +1336,12 @@ class TestWealthBroadcast(unittest.TestCase):
         )
         self.assertGreater(out.outcomes[1].corrupt_amount, 0)   # 确实贪了
         self.assertGreater(out.outcomes[1].money_confiscated, 0)  # 但被没收了
-        self.assertEqual(out.outcomes[1].net_corrupt_gain, 0)
-        self.assertEqual(out.wealth_top_ids, [1])
+        self.assertTrue(out.outcomes[1].report_effective)
+        self.assertEqual(out.wealth_broadcast, [])
+        self.assertEqual(out.wealth_top_ids, [])
 
-    def test_storm_victim_is_still_broadcast(self):
-        """榜首被反腐风暴抄了也照样上榜：传闻看的是捞了多少，不是留住多少。"""
+    def test_storm_victim_is_not_broadcast_but_the_survivor_is(self):
+        """榜首被反腐风暴查办了，贪污那项记 0，广播改播躲过一劫的那个。"""
         big = player(1, rank=3)    # 省级，贪一笔就够大案线
         small = player(2, rank=0)  # 基层，风暴只查前 1/3，轮不到他
         out = resolve(
@@ -1351,7 +1352,9 @@ class TestWealthBroadcast(unittest.TestCase):
         )
         self.assertEqual(out.outcomes[1].net_corrupt_gain, 0)
         self.assertGreater(out.outcomes[2].net_corrupt_gain, 0)
-        self.assertEqual(out.wealth_top_ids, [1])  # 省级贪的毛额更大
+        self.assertTrue(out.outcomes[1].report_effective)
+        self.assertFalse(out.outcomes[2].report_effective)
+        self.assertEqual(out.wealth_top_ids, [2])
 
     def test_being_caught_still_depends_on_gross_not_net(self):
         """被不被抓看的是"你贪没贪"（毛收入），不是"你留住多少"。"""

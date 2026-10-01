@@ -279,8 +279,9 @@ class PlayerRoundOutcome:
     def net_corrupt_gain(self) -> int:
         """本轮贪污**真正落进自己口袋**的部分。
 
-        被抓与否、坊间传闻都按毛收入（corrupt_amount）算——那是"你捞了多少"，
-        和"你有没有留住"是两回事。这个净额只用于复盘统计。
+        被抓与否按毛收入（corrupt_amount）算——那是"你捞了多少"，
+        和"你有没有留住"是两回事。坊间传闻也用毛收入（被查实的记 0，见 rules.py）。
+        这个净额只用于复盘统计。
         """
         return max(0, self.corrupt_amount - self.money_confiscated - self.hush_money_paid)
 
