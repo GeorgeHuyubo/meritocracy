@@ -205,7 +205,7 @@ class SmartAgent:
         if facts.get(self.id, {}).get("attacked"):
             self._times_attacked += 1
         top_ids = set(result.get("wealth_top_ids") or [])
-        # 全场最高工资。传闻排的是"总收入 = 工资 + 净落袋的脏钱"，
+        # 全场最高工资。传闻排的是"工资 + 贪污款项（毛额，没收和打点都不扣）"，
         # 而工资人人算得出来，所以这个数是下面两条边界的基准。
         top_salary = max(
             (self.cfg.salary(f["rank_before"]) for f in facts.values()), default=0
@@ -214,12 +214,7 @@ class SmartAgent:
         my_income = 0
         mine = (private or {}).get("private_result") or {}
         if mine:
-            my_income = int(mine.get("salary", 0)) + max(
-                0,
-                int(mine.get("corrupt_amount", 0))
-                - int(mine.get("money_confiscated", 0))
-                - int(mine.get("hush_money_paid", 0)),
-            )
+            my_income = int(mine.get("salary", 0)) + int(mine.get("corrupt_amount", 0))
         # 能证实的最高收入：每个人至少拿到自己那份工资，而我自己的是精确值
         known_income = max(top_salary, my_income)
 
@@ -287,7 +282,12 @@ class SmartAgent:
                 # 老代码里这条上界是拿档位上限做的（cap = tier_high），
                 # 档位去掉之后差点跟着丢了。它很重要：没有上界，
                 # 一个闷头不动的人也会被每轮加一份先验，估计越飘越高。
-                cap = top_dirty + float(max(top_salary, my_salary) - my_salary)
+                # 没人被点名 = 全场没人贪污（只有工资不广播），上界直接是 0
+                cap = (
+                    top_dirty + float(max(top_salary, my_salary) - my_salary)
+                    if top_ids
+                    else 0.0
+                )
                 if gained > cap:
                     evidence *= cap / gained if gained else 0.0
                     gained = max(0.0, cap)

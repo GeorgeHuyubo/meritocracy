@@ -1609,21 +1609,26 @@ def resolve_round(
         o.merit_after = p.merit
 
     # ---- 坊间传闻 --------------------------------------------------------
-    # 排的是「本轮总共到手多少钱」= 合法工资 + 净落袋的脏钱。
-    #   * 脏钱用"落袋"的净额而不是毛收入：当场被没收的人不该还被传住上洋房
+    # 排的是「本轮经手多少钱」= 合法工资 + 贪污款项（毛额）。
+    #   * 贪污按毛额算，被没收的、打点出去的都不扣 —— 传闻传的是他捞了多少，
+    #     不是最后留住多少
     #   * 工资也算进来，所以清白的高官照样可能上榜 —— 这是有意的，
     #     它让"他是升了官还是受了贿"变得分不清，给真正贪的人打掩护
+    #   * 但全场没人贪污（大家都只有工资）就不传 —— 光拿工资不算新闻
     salaries = salaries or {}
-    msgs, top_names = wealth_broadcast_detail(
-        (
+    if any(o.corrupt_amount > 0 for o in outcome.outcomes.values()):
+        msgs, top_names = wealth_broadcast_detail(
             (
-                names[pid],
-                salaries.get(pid, cfg.salary(o.rank_before)) + o.net_corrupt_gain,
-            )
-            for pid, o in outcome.outcomes.items()
-        ),
-        cfg, rng,
-    )
+                (
+                    names[pid],
+                    salaries.get(pid, cfg.salary(o.rank_before)) + o.corrupt_amount,
+                )
+                for pid, o in outcome.outcomes.items()
+            ),
+            cfg, rng,
+        )
+    else:
+        msgs, top_names = [], []
     outcome.wealth_broadcast = msgs
     outcome.wealth_top_ids = [pid for pid in sorted(names) if names[pid] in top_names]
 
