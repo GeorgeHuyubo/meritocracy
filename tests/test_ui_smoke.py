@@ -125,6 +125,28 @@ def build_payloads() -> list[dict]:
             game.advance_round()
     snap("游戏结束（全揭示）")
 
+    # 每个出身各来一屏：面板上那几句断言会被技能推翻（红二代降不下来、
+    # 会计只被抄一半），渲染不能照着通用规则写。
+    for oid in CFG.origin_ids():
+        og = Game(game_id=f"ui{oid}", cfg=CFG, rng=random.Random(5))
+        for i in range(3):
+            og.add_player(f"R{i + 1}")
+        og.players[1].origin = Origin(oid)
+        og.start_game()
+        og.players[1].warnings = CFG.warnings_before_demotion - 1
+        out.append({
+            "label": f"行动选择（{CFG.origin(oid)['name']}）",
+            "public": og.public_state(),
+            "private": og.private_state(1),
+            "my_id": 1,
+            "panel_must_say": (
+                ["降不下来"] if oid == "RED"
+                else ["一半"] if oid == "ACCOUNTANT"
+                else []
+            ),
+            "panel_must_not_say": ["再记"] if oid == "RED" else [],
+        })
+
     # 官二代的晋升门槛和别人不一样，规则表必须按**他自己的**那份画。
     # 用 /api/config 里那份通用的，他会看到"还差 15"而结算只要 10。
     vip = Game(game_id="uivip", cfg=CFG, rng=random.Random(9))
@@ -157,7 +179,18 @@ class TestUIRenders(unittest.TestCase):
             json.dump({"config": api_config_payload(), "screens": payloads,
                        "card_effects": expected_card_effects(),
                        # 出身文案只在 config.py 定义一处，前端不许自己写一份
-                       "origins": [dict(o) for o in CFG.origin_definitions]},
+                       "origins": [dict(o) for o in CFG.origin_definitions],
+                       # 规则速查里"抢官大的人更值"那句的两个数
+                       "work_at_ranks": [
+                           rules.work_merit(
+                               round(
+                                   sum(v * n for v, n in CFG.work_card_distribution)
+                                   / sum(n for _, n in CFG.work_card_distribution)
+                               ),
+                               r, None, CFG,
+                           )
+                           for r in (0, CFG.president_rank - 1)
+                       ]},
                       fh, ensure_ascii=False)
             path = fh.name
         try:

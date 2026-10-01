@@ -482,6 +482,12 @@ async def api_config() -> JSONResponse:
             "origins": [dict(o) for o in cfg.origin_definitions]
             if cfg.origins_enabled else [],
             "origin_choices_offered": cfg.origin_choices_offered,
+            # 一张埋头工作的期望点数（规则速查里"抢官大的人更值"那句要用它
+            # 现算，写死的话改牌库就会失真）
+            "work_expectation": round(
+                sum(v * n for v, n in cfg.work_card_distribution)
+                / sum(n for _, n in cfg.work_card_distribution)
+            ),
         }
     )
 

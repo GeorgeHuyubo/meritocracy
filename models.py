@@ -381,6 +381,10 @@ class PlayerRoundOutcome:
             "bribe_lost": self.bribe_lost,
             "demotion": self.demotion.value,
             "money_confiscated": self.money_confiscated,
+            # 会计「做账」当场洗白、因此没被抄走的那一笔
+            "laundered": self.laundered,
+            # 红二代「硬保」这一轮替他挡掉了一次降职
+            "origin_shielded_demotion": self.origin_shielded_demotion,
             "hush_money_paid": self.hush_money_paid,
             "money_from_reports": self.money_from_reports,
             "promotion": self.promotion.value,

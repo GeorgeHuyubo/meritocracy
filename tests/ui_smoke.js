@@ -150,6 +150,40 @@ for (const box of boxes) {
 }
 if (boxes.length && failed === 0) console.log("  ✓ 规则速查");
 
+// "抢官大的人更值：省级产 X 点、基层产 Y 点" —— 这两个数以前是手写的。
+// 改牌库或官职倍率就会失真，而且没人会想起来改它。
+if (file.work_at_ranks) {
+  const text = [...document.querySelectorAll(".rulesbox")]
+    .map((b) => b.innerHTML.replace(/<[^>]*>/g, " "))
+    .join(" ");
+  for (const n of file.work_at_ranks) {
+    if (!new RegExp(`产 ${n} 点`).test(text)) {
+      console.log(`  ❌ 规则里"一张埋头工作产 ${n} 点"对不上引擎`);
+      failed++;
+    }
+  }
+}
+
+// 面板上有几句断言会被出身推翻：红二代「硬保」降不下来，写"再记 1 次就降级"
+// 是在骗他；会计「做账」被抄只抄一半。
+for (const p of payloads.filter((x) => x.panel_must_say || x.panel_must_not_say)) {
+  globalThis.__ui.setState(p.public, p.private, p.my_id);
+  globalThis.__ui.render();
+  const panel = document.getElementById("myPanel").innerHTML.replace(/<[^>]*>/g, " ");
+  for (const must of p.panel_must_say || []) {
+    if (!panel.includes(must)) {
+      console.log(`  ❌ ${p.label} 的面板里应该写着"${must}"`);
+      failed++;
+    }
+  }
+  for (const nope of p.panel_must_not_say || []) {
+    if (panel.includes(nope)) {
+      console.log(`  ❌ ${p.label} 的面板里不该出现"${nope}"（技能把它推翻了）`);
+      failed++;
+    }
+  }
+}
+
 // 出身会改晋升门槛（官二代的政绩打折）。规则表要是用 /api/config 里那份
 // 通用的，他会看到"还差 15"而结算只要 10 —— UI 和引擎对不上。
 const vip = payloads.find((p) => p.expect_merit_costs);

@@ -465,6 +465,10 @@ function myPanelHtml() {
   const meritOK = np.merit_gap === 0;
   const moneyOK = np.money_gap === 0;
   const both = np.needs_both;
+  // 出身会推翻面板上的几句断言。红二代「硬保」降不下来，面板写
+  // "再记 1 次就降级"是在骗他；会计「做账」被抄只抄一半。
+  const shielded = priv.origin === "RED";
+  const launders = priv.origin === "ACCOUNTANT";
   const canGo = both ? meritOK && moneyOK : meritOK || moneyOK;
   const tag = (ok, gap, what) =>
     ok
@@ -491,8 +495,10 @@ function myPanelHtml() {
           pub.warnings_before_demotion
         }</span>
         ${bar(priv.warnings, pub.warnings_before_demotion, "warn")}
-        <span class="${priv.warnings ? "warnlbl" : "subtle"}">${
-          priv.warnings
+        <span class="${priv.warnings && !shielded ? "warnlbl" : "subtle"}">${
+          shielded
+            ? "上头有人，记满也降不下来"
+            : priv.warnings
             ? `再记 ${pub.warnings_before_demotion - priv.warnings} 次就降级`
             : "记录干净"
         }</span>
@@ -511,7 +517,8 @@ function myPanelHtml() {
       </div>
     </div>
     <div class="hintline">官职倍率 <b>x${(priv.card_preview || {}).rank_multiplier || 1}</b>
-      · 贪钱或拿钱买官被举报查实 = 赃款没收 + 记一次降职警告<br>${
+      · 贪钱或拿钱买官被举报查实 = ${launders ? "赃款没收<b>一半</b>" : "赃款没收"}
+      + 记一次降职警告${shielded ? "（但你降不下来）" : ""}<br>${
       meritOK || moneyOK
         ? "<b class=ok>可以升官了 —— 但必须打出对应的晋升卡</b>"
         : "攒够政绩或金钱，再打出晋升卡才能升。工龄满了会自动升。"
@@ -600,6 +607,8 @@ function privateResultHtml() {
   if (r.money_gained) ledger.push([`贪污进账`, `+${r.money_gained}`, "good"]);
   if (r.money_from_reports) ledger.push([`分得赃款`, `+${r.money_from_reports}`, "good"]);
   if (r.money_confiscated) ledger.push([`赃款被没收`, `−${r.money_confiscated}`, "bad"]);
+  // 做账保住的那部分本来也要被抄。不写出来，玩家根本看不出技能帮了多少
+  if (r.laundered) ledger.push([`做账保住的`, `(+${r.laundered})`, "good"]);
   if (r.hush_money_paid) ledger.push([`上下打点压事`, `−${r.hush_money_paid}`, "bad"]);
   if (r.promotion_money_cost) {
     ledger.push([`晋升花掉`, `−${r.promotion_money_cost}`, "bad"]);
@@ -654,6 +663,12 @@ function privateResultHtml() {
     L.push(`<div class="line bad">行贿的 ${r.bribe_lost} 打了水漂，官也没升成。</div>`);
   if (r.demotion === "MINOR")
     L.push('<div class="line bad">降职警告记满，降一级，警告清空。</div>');
+  // 硬保救下来的那一刻是这张牌唯一的高光，不播就白有了
+  if (r.origin_shielded_demotion)
+    L.push(
+      '<div class="line good">降职警告记满了 —— 上头有人打了招呼，' +
+        "你的位子纹丝不动。</div>"
+    );
   if (r.tenure_reset_by_attack)
     L.push(`<div class="line bad">资历被搅黄，${r.tenure_reset_by_attack} 轮工龄清零</div>`);
   (r.notes || []).forEach((n) => L.push(`<div class="line subtle">${esc(n)}</div>`));
@@ -946,7 +961,12 @@ function rulesHtml(c) {
         按他的官职算（基层 4 / 县级 6 / 市级 8 / 省级 10）。
         这笔是<b>罚款，你拿不到</b>
       <br><b>公开署名</b> —— 公报里点名写着是你干的，他下轮知道该找谁算账。
-      <br><b>抢官大的人更值</b>：省级一张埋头工作产 15 点，基层只产 6 点。</li>
+      <br><b>抢官大的人更值</b>：${(() => {
+        const top = c.rank_names.length - 2;  // 主席不参与对局
+        const at = (r) => Math.floor(c.work_expectation * mult(c.rank_multipliers[r]));
+        return `${esc(c.rank_names[top])}一张埋头工作产 ${at(top)} 点，` +
+               `${esc(c.rank_names[0])}只产 ${at(0)} 点`;
+      })()}。</li>
 
 <h4>升职的克制关系</h4>
 <table class="rtab">

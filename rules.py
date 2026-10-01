@@ -668,7 +668,7 @@ def wealth_broadcast(
 
 
 def final_key(player: PlayerState, cfg: Config = DEFAULT_CONFIG) -> tuple[int, ...]:
-    """终局比大小用的键，顺序由 FINAL_RANKING_KEYS 决定（默认 官职 > 金钱 > 政绩）。"""
+    """终局比大小用的键，顺序由 FINAL_RANKING_KEYS 决定（默认 金钱 > 官职 > 政绩）。"""
     return tuple(getattr(player, k) for k in cfg.final_ranking_keys)
 
 
