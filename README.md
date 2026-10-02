@@ -28,6 +28,7 @@ python3 analysis.py --section full --games 2500 --agents smart   # 完整平衡�
 python3 analysis.py --section triangle               # 鹬蚌相争的目标动态成不成立
 python3 analysis.py --section ablation               # 每张牌的因果价值（带置信区间）
 python3 analysis.py --section funnel                 # 金钱/政绩两条路线的端到端漏斗
+python3 analysis.py --section replay --rounds 8-10   # 复盘库里最新一局：AI 每轮怎么想的
 ```
 
 > 目录本应放在 `/meritocracy`。macOS 的系统完整性保护不允许在根目录下新建目录，
@@ -222,6 +223,28 @@ meritocracy/
 
 批量版本在 `analysis.py --section postmortem`：跑 N 局，把每局最后一名的败因
 归口到「被针对 / 运气 / 自己选的」三类，并打印若干局的具体分析。
+
+## 复盘一局真实对局（AI 当时是怎么想的）
+
+```bash
+python3 analysis.py --section replay --game-id QN78 --rounds 8-10
+python3 analysis.py --section replay --game-id QN78 --override 10:2=REPORT@1,PROMOTE_ANY
+```
+
+`replay.py` 把库里存的一局按原样重演：手牌、事件、每个人的出牌都用库里那份
+（换过牌的按流水账补扣钱），AI 按当时能看到的公开信息重新 observe 再 decide 一遍。
+每轮每个 AI 打印：它眼里的每个对手（政绩/门槛、**估钱 vs 门槛**、威胁值、
+"这一轮就可能登顶"、攻击/举报分、终局拦截把握）、打分最高的几组牌、
+重演会出什么 vs 当时实际出了什么。打分读的是 `decide()` 自己留下的 `last_scores`，
+和真 AI 同一份代码（`score_combos`），不会像手写脚本那样跟着改动漂掉。
+
+`--override 轮:玩家=牌[@目标],...` 换掉某人某一轮的出牌看反事实，重演到那一轮为止。
+`--game-id` 不给就是库里最新一局；`--json` 输出结构化结果；
+重演出来的钱/政绩/官职和库里对不上会逐条列出并按库校正。
+
+**"不一致"不等于有 bug**：服务器 AI 用 `SystemRandom`（决策噪声、打平随机挑目标），
+服务器中途重启过 AI 的对手记忆会清空，AI 代码改过之后旧局本来就对不上。
+同一个 AI seed 重演是逐位复现的（`tests/test_replay.py` 守着）。
 
 ## 举报的完整结算
 

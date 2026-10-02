@@ -1581,6 +1581,97 @@ def h(title: str) -> None:
     print("-" * max(56, len(title)))
 
 
+def _parse_rounds(spec: str | None) -> set[int] | None:
+    """'8-10' / '3,7' / '9' -> {轮次}"""
+    if not spec:
+        return None
+    out: set[int] = set()
+    for part in spec.split(","):
+        lo, _, hi = part.strip().partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+def run_replay(args: argparse.Namespace, cfg: Config) -> int:
+    """--section replay：按库里的手牌/事件/出牌重演一局，打印 AI 每轮怎么想的。"""
+    import replay as rp
+    from storage import GameStore
+
+    if not Path(args.db).exists():
+        print(f"找不到库：{args.db}", file=sys.stderr)
+        return 1
+    store = GameStore(args.db)
+    try:
+        gid = args.game_id or store.latest_game_id()
+        history = store.history(gid) if gid else None
+        if history is None:
+            print(f"库里没有对局 {gid or ''}".rstrip(), file=sys.stderr)
+            return 1
+        result = rp.replay(
+            history, cfg,
+            overrides=dict(rp.parse_override(o) for o in args.override),
+            rounds=_parse_rounds(args.rounds),
+            top=args.top,
+        )
+    except rp.ReplayError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+
+    if args.json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    names = result.names
+
+    def picks_str(picks) -> str:
+        return "、".join(c + (f"@{names.get(t, t)}" if t is not None else "") for c, t in picks) or "（没出牌）"
+
+    print("=" * 56)
+    print(f"复盘 {result.game_id}   重演到第 {result.rounds_played} 轮")
+    print("=" * 56)
+    for d in result.decisions:
+        h(f"第 {d.round} 轮 · {d.name}（AI）  {cfg.rank_name(d.rank)}  钱 {d.money}")
+        for v in d.views:
+            flag = "  <<< 这一轮就可能登顶" if v["about_to_win"] else ""
+            print(f"  看 {v['name']}：{cfg.rank_name(v['rank'])}  政绩 {v['merit']}/{v['merit_cost']}"
+                  f"  估钱 {v['money_est']}/{v['money_cost']}  威胁 {v['threat']}{flag}")
+            cover = (f"  拦截把握 攻击/举报/一起 {v['cover']}" if v["cover"] else "")
+            print(f"      攻击 {v['attack']:+.3f}  举报 {v['report']:+.3f}{cover}")
+        print("  打分最高的组合：")
+        for score, label in d.top:
+            print(f"      {score:+.3f}  {label}")
+        mark = "✓ 一致" if d.matched else "✗ 不一致"
+        print(f"  重演会出：{picks_str(d.predicted)}")
+        print(f"  当时出了：{picks_str(d.actual)}   {mark}")
+
+    hit, total = result.match_rate
+    h("汇总")
+    if total:
+        print(f"AI 决策复现 {hit}/{total}"
+              + ("" if hit == total else
+                 "（不一致不等于有 bug：服务器 AI 的噪声/打平挑目标是随机的，"
+                 "服务器中途重启过 AI 记忆会清空；AI 代码改过之后旧局本来就对不上）"))
+    if result.drifts:
+        print(f"重演结果和库里对不上 {len(result.drifts)} 处（已按库校正）：")
+        for line in result.drifts:
+            print(f"  {line}")
+    f = result.final
+    if result.overridden:
+        h(f"反事实：换掉出牌之后第 {f['round']} 轮的结局")
+    else:
+        h(f"第 {f['round']} 轮结局")
+    print(f"  {f['game_over_reason'] or '游戏继续（' + f['phase'] + '）'}")
+    for line in f["public_messages"]:
+        print(f"  · {line}")
+    for name, st in f["players"].items():
+        print(f"  {name}：{cfg.rank_name(st['rank'])}  晋升 {st['promotion']}"
+              f"  举报查实 {'是' if st['report_effective'] else '否'}"
+              f"  挨攻击 {'是' if st['attacked'] else '否'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Meritocracy 平衡性分析")
     ap.add_argument("--players", type=int, default=6)
@@ -1600,7 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
         "--section",
         choices=("all", "leader", "rank", "actions", "choices", "reports", "triangle",
                  "ablation", "funnel", "strategy",
-                 "postmortem", "events", "origins", "full"),
+                 "postmortem", "events", "origins", "full", "replay"),
         default="all",
     )
     ap.add_argument(
@@ -1612,6 +1703,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--examples", type=int, default=5,
                     help="死因分析要打印几局具体例子")
     ap.add_argument("--json", action="store_true")
+    # ---- --section replay：复盘库里的一局 ----
+    ap.add_argument("--game-id", default=None, help="复盘哪一局（默认库里最新的一局）")
+    ap.add_argument("--db", default=str(Path(__file__).resolve().parent / "meritocracy.db"))
+    ap.add_argument("--rounds", default=None,
+                    help="只详细打印这几轮的 AI 决策，例如 8-10 或 3,7（默认全部）")
+    ap.add_argument("--top", type=int, default=6, help="每个 AI 打印打分最高的几组牌")
+    ap.add_argument(
+        "--override", action="append", default=[], metavar="轮:玩家=牌[@目标],...",
+        help="换掉某人某一轮的出牌看反事实，可重复。例：--override 10:2=REPORT@1,PROMOTE_ANY",
+    )
     ap.add_argument(
         "--set", action="append", default=[], metavar="KEY=VALUE", dest="settings",
         help="临时覆盖 config.py 里的一个字段，可重复。"
@@ -1620,6 +1721,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     cfg = apply_overrides(DEFAULT_CONFIG, args.settings)
+    if args.section == "replay":
+        return run_replay(args, cfg)
     out: dict[str, Any] = {"players": args.players, "games": args.games, "seed": args.seed}
 
     FULL = args.section in ("all", "full")

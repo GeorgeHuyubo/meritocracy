@@ -508,6 +508,22 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         self.assertEqual(a_p, 0.0)
         self.assertEqual(b_p, r_p, "贫农那条政绩路谁也按不住，两张一起也只多不了")
 
+    def test_decide_plays_the_top_of_its_own_scores(self):
+        """decide 和复盘工具共用 score_combos。零噪声时 decide 挑的必须就是 last_scores
+        里第一个最高分——两边要是又各算各的，复盘看到的打分就不是 AI 真用的那份了。"""
+        import dataclasses
+        weights = dataclasses.replace(ai.Weights(), noise=0.0)
+        for seed in range(20):
+            game, ids, _ = self._table(seed, ["ATTACK", "REPORT", "CORRUPT", "WORK", "WORK", "PROMOTE_ANY"])
+            pool = ai.AgentPool(cfg=CFG, weights=weights, rng=random.Random(seed))
+            picks = ai.choose(game, ids[0], pool)
+            scores = pool.get(ids[0]).last_scores
+            best = max(sc for sc, _ in scores)
+            first_best = next(cards for sc, cards in scores if sc == best)
+            self.assertEqual(
+                sorted(pk["action"] for pk in picks), sorted(c.value for c in first_best)
+            )
+
     def test_mid_game_cash_is_not_discounted(self):
         """这一折只能在终局生效。要是 payload 里少了 max_rounds 之类的字段，
         它会静默退化成"钱永远不值钱"，AI 从此不敢再举报捞钱——

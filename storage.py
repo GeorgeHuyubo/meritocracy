@@ -308,6 +308,61 @@ class GameStore:
         }
         return Game.from_snapshot(snapshot, cfg=cfg, rng=rng)
 
+    def latest_game_id(self) -> str | None:
+        row = self.conn.execute(
+            "SELECT game_id FROM games ORDER BY updated_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+        return row["game_id"] if row else None
+
+    def history(self, game_id: str) -> dict[str, Any] | None:
+        """整局的原始记录，给复盘工具（replay.py）重演用。
+
+        和 load() 不同：load 只恢复**当前**这一轮，这里把每一轮的手牌、出牌、
+        事件都拿出来。手牌存的是换完牌之后那一手（每次状态变化整局重写），
+        换牌花了多少钱在 progress.ledger 里。
+        """
+        row = self.conn.execute(
+            "SELECT * FROM games WHERE game_id = ?", (game_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        players = [
+            {
+                "id": r["player_id"],
+                "name": r["name"],
+                "is_ai": bool(r["is_ai"]),
+                "origin": r["origin"],
+            }
+            for r in self.conn.execute(
+                "SELECT * FROM players WHERE game_id = ? ORDER BY player_id", (game_id,)
+            )
+        ]
+        hands: dict[int, dict[int, list]] = {}
+        for r in self.conn.execute("SELECT * FROM hands WHERE game_id = ?", (game_id,)):
+            hands.setdefault(r["round_number"], {})[r["player_id"]] = json.loads(r["cards"])
+        actions: dict[int, dict[int, list]] = {}
+        for r in self.conn.execute("SELECT * FROM actions WHERE game_id = ?", (game_id,)):
+            actions.setdefault(r["round_number"], {})[r["player_id"]] = json.loads(r["picks"])
+        events = {
+            r["round_number"]: r["event_id"]
+            for r in self.conn.execute("SELECT * FROM rounds WHERE game_id = ?", (game_id,))
+        }
+        try:
+            progress = json.loads(row["progress"] or "{}")
+        except json.JSONDecodeError:
+            progress = {}
+        return {
+            "game_id": game_id,
+            "phase": row["phase"],
+            "winners": json.loads(row["winners"]),
+            "players": players,
+            "hands": hands,
+            "actions": actions,
+            "events": events,  # 只有结算过的轮次才有
+            "archive": progress.get("archive") or [],
+            "ledger": {int(k): v for k, v in (progress.get("ledger") or {}).items()},
+        }
+
     def reset(self, game_id: str) -> None:
         with self.conn:
             for table in ("games", "players", "hands", "actions", "rounds"):

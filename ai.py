@@ -184,6 +184,8 @@ class SmartAgent:
         self._prev_players: dict[int, dict[str, Any]] = {}
         self._last_round_seen = 0
         self.decision_log: list[str] = []  # 调试用
+        # 上一次 decide 的不含噪声打分 [(分数, 牌), ...]，复盘工具读它
+        self.last_scores: list[tuple[float, list[Card]]] = []
         # 全场层面的自适应估计：这桌人到底抓得有多凶
         self.est_corrupt_attempts = 0.0  # 估计发生过多少次贪污
         self._times_attacked = 0  # 我自己被攻击过几次
@@ -619,9 +621,59 @@ class SmartAgent:
 
         不能逐张挑最高分就完事——「WORK + 政绩升职」是个组合技，
         单独看每张牌会漏掉协同。所以先给干扰牌定好目标，再**成对**评估经济牌。
+        打分在 score_combos 里；这里只加噪声挑最高、排顺序、定目标。
         """
         self.observe(public, private)
 
+        hand = [
+            Card(d["card"]) if isinstance(d, dict) else Card(d) for d in private["hand"]
+        ]
+        n_picks = min(int(public.get("picks_per_round", 1)), len(hand))
+        if not hand or n_picks <= 0:
+            self.last_scores = []
+            return []
+
+        scored = self.score_combos(public, private)
+        # 留一份不含噪声的打分给复盘工具看（replay.py）。
+        # 复盘不能自己再调一次 score_combos：打平挑目标会消耗 rng，
+        # 多调一次后面的噪声就全错位了，同 seed 也复现不出来。
+        self.last_scores = scored
+        best_score, best_combo = None, None
+        for score, cards in scored:  # 噪声按枚举顺序逐个加，和拆出来之前逐位一致
+            score += self.rng.uniform(-self.w.noise, self.w.noise)
+            if best_score is None or score > best_score:
+                best_score, best_combo = score, cards
+
+        chosen = list(best_combo or hand[:n_picks])
+        chosen = self._order_picks(private, chosen)
+
+        opponents = [p for p in public["players"] if p["id"] != self.id]
+        picks: list[tuple[str, int | None]] = []
+        used_targets: set[int] = set()
+        for card in chosen:
+            target = None
+            if card.needs_target:
+                target = self._pick_target(public, private, card, opponents, used_targets)
+                if target is None:
+                    continue
+                used_targets.add(target)
+            picks.append((card.value, target))
+        self.decision_log.append(
+            f"r{public.get('round')} -> " + ", ".join(
+                f"{c}{'' if t is None else f'@{t}'}" for c, t in picks
+            )
+        )
+        return picks
+
+    def score_combos(
+        self, public: dict[str, Any], private: dict[str, Any]
+    ) -> list[tuple[float, list[Card]]]:
+        """给手里每一组可出的牌打分（不含噪声），按枚举顺序返回 [(分数, 牌), ...]。
+
+        decide 和复盘工具共用这一份，打分永远同源。
+        注意它会消耗 rng（干扰牌打平时随机挑目标），所以别在 decide 之外重复调用
+        ——要看打分就读 decide 留下的 `last_scores`。
+        """
         dealt = [
             (Card(d["card"]) if isinstance(d, dict) else Card(d),
              int(d.get("value", 0)) if isinstance(d, dict) else 0)
@@ -667,7 +719,7 @@ class SmartAgent:
                 solo[card] = (0.0, None)
 
         # 2) 枚举所有出牌组合（按手牌下标，所以同名牌能出两张）
-        best_score, best_combo = None, None
+        scored: list[tuple[float, list[Card]]] = []
         for combo in combinations(range(len(hand)), n_picks):
             cards = [hand[i] for i in combo]
             if not self.allow_corrupt and Card.CORRUPT in cards:
@@ -688,29 +740,37 @@ class SmartAgent:
                     score += solo[c][0]
             if rival_closing and {Card.ATTACK, Card.REPORT} <= seen:
                 score += both_bonus
-            score += self.rng.uniform(-self.w.noise, self.w.noise)
-            if best_score is None or score > best_score:
-                best_score, best_combo = score, cards
+            scored.append((score, cards))
+        return scored
 
-        chosen = list(best_combo or hand[:n_picks])
-        chosen = self._order_picks(private, chosen)
-
-        picks: list[tuple[str, int | None]] = []
-        used_targets: set[int] = set()
-        for card in chosen:
-            target = None
-            if card.needs_target:
-                target = self._pick_target(public, private, card, opponents, used_targets)
-                if target is None:
-                    continue
-                used_targets.add(target)
-            picks.append((card.value, target))
-        self.decision_log.append(
-            f"r{public.get('round')} -> " + ", ".join(
-                f"{c}{'' if t is None else f'@{t}'}" for c, t in picks
-            )
-        )
-        return picks
+    def explain(self, public: dict[str, Any], private: dict[str, Any]) -> list[dict[str, Any]]:
+        """我眼里的每个对手：给复盘工具看 AI 当时是怎么想的。只读，不碰 rng。"""
+        rows = []
+        for o in public["players"]:
+            if o["id"] == self.id:
+                continue
+            model = self.models.get(o["id"], OpponentModel())
+            origin = o.get("origin")
+            mc, tc = self._costs(o["rank"], origin)
+            progress = self._progress(o["rank"], model.money_est, o["merit"], origin)
+            about = self._about_to_win(o, model)
+            rows.append({
+                "id": o["id"],
+                "name": o.get("name", str(o["id"])),
+                "rank": o["rank"],
+                "merit": o["merit"],
+                "merit_cost": tc,
+                "money_est": round(model.money_est, 1),
+                "money_cost": mc,
+                "about_to_win": about,
+                "threat": round(self._threat(o["rank"], progress), 3),
+                "attack": round(self._score_attack(public, private, o)[0], 3),
+                "report": round(self._score_report(public, private, o)[0], 3),
+                "cover": (
+                    [round(x, 2) for x in self._endgame_cover(o, model)] if about else None
+                ),
+            })
+        return rows
 
     def _order_picks(self, private, cards: list[Card]) -> list[Card]:
         """给选好的牌排出场顺序——结算严格按这个顺序走，排错了要吃亏。
