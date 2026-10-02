@@ -157,7 +157,9 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         cut = rules.merit_cost_at(top, "OFFICIAL", CFG)
         self.assertLess(cut, CFG.merit_cost(top))
         model = ai.OpponentModel()
-        model.money_est = CFG.money_cost(top) * 10  # 钱那侧管够，只看政绩
+        # 钱一分没有，得靠这一轮现贪 —— 那张生产牌位子就被占了，
+        # 政绩必须**已经**够线才算。这样比的正好是"门槛有没有打折"。
+        model.money_est = 0
         vip = {"id": 2, "rank": top, "merit": cut, "origin": "OFFICIAL"}
         plain = {"id": 3, "rank": top, "merit": cut, "origin": None}
         self.assertTrue(agent._about_to_win(vip, model), "官二代已经够线了")
@@ -365,13 +367,47 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         self.assertTrue(ai.wants_redraw(game, ids[0], pool))
 
     def test_a_hopeless_estimate_still_does_not_trigger_it(self):
-        """留余量不等于见谁都当大敌——差得远的还是不该触发。"""
+        """留余量不等于见谁都当大敌——差得远的还是不该触发。
+
+        "差得远" = 钱和政绩**两样都差**：一轮只有一个生产牌位子（另一张得是晋升卡），
+        补不了两头。（只差钱的那种不算差得远——省级一张贪污期望 45，
+        比门槛 37 还多，政绩够线的人当轮现贪现买就能登顶。）
+        """
         game, ids, pool = self._table(0, ["WORK"] * 6, know_his_money=False)
         agent = pool.get(ids[0])
         model = agent.models.setdefault(ids[1], ai.OpponentModel())
         model.money_est = CFG.money_cost(self.TOP) * 0.2
-        winner = [o for o in game.public_state()["players"] if o["id"] == ids[1]][0]
+        winner = dict(
+            [o for o in game.public_state()["players"] if o["id"] == ids[1]][0],
+            merit=CFG.merit_cost(self.TOP) - 1,
+        )
         self.assertFalse(agent._about_to_win(winner, model))
+
+    def test_one_production_card_short_still_counts(self):
+        """复盘 QN78 第 9 轮：省级、钱够、政绩 30/43，一张埋头工作（省级 +15）就够。
+
+        「生产牌 + 晋升卡」当轮补上当轮升，人类一眼看得出来；只看"现在够不够"的话
+        AI 会判"不危险"，拿着攻击牌眼睁睁看他登顶。
+        """
+        game, ids, pool = self._table(0, ["WORK"] * 6)
+        agent = pool.get(ids[0])
+        model = agent.models[ids[1]]
+        base = [o for o in game.public_state()["players"] if o["id"] == ids[1]][0]
+        tc = CFG.merit_cost(self.TOP)
+        one_work = agent._own_work_merit(0, self.TOP, None)
+        self.assertTrue(agent._about_to_win(dict(base, merit=tc - 1), model))
+        self.assertTrue(agent._about_to_win(dict(base, merit=int(tc - one_work)), model))
+        self.assertFalse(agent._about_to_win(dict(base, merit=int(tc - one_work) - 1), model))
+
+    def test_lookahead_needs_a_second_pick(self):
+        """一轮只能打一张牌时没法「生产 + 晋升」，前瞻就不该开。"""
+        import dataclasses
+        cfg = dataclasses.replace(CFG, picks_per_round=1)
+        agent = ai.SmartAgent(1, cfg=cfg)
+        model = ai.OpponentModel()
+        model.money_est = cfg.money_cost(self.TOP) * 10
+        opp = {"id": 2, "rank": self.TOP, "merit": cfg.merit_cost(self.TOP) - 1, "origin": None}
+        self.assertFalse(agent._about_to_win(opp, model))
 
     def test_it_keeps_redrawing_if_the_new_hand_is_also_useless(self):
         """换一次没摸到就放弃等于没救——他赢了，省下的钱一分也花不掉。"""
@@ -405,6 +441,72 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         self.assertGreater(
             lead, fat, f"举报快赢的 {lead:.3f} 居然不如举报有钱的路人 {fat:.3f}"
         )
+
+    def test_own_promotion_does_not_outweigh_stopping_the_winner(self):
+        """复盘 QN78 第 10 轮：真人站在主席门口，老张手里有举报牌，
+        却选了"贪污 + 自己凭政绩升一级"——那一级在他登顶之后一文不值。
+
+        原样复现老张那一手：基层、政绩正好够升县级、手里两张大额贪污。
+        修之前 60 局全是"贪污 + 通用升职"，一次都没举报。
+        """
+        hand = [("CORRUPT", 18), ("CORRUPT", 19), ("PROMOTE_ANY", 0),
+                ("REPORT", 0), ("PROMOTE_MONEY", 0), ("WORK", 6)]
+        reported = 0
+        for seed in range(60):
+            game, ids, pool = self._table(seed, [c for c, _ in hand])
+            me = game.players[ids[0]]
+            me.rank, me.merit, me.money = 0, CFG.merit_cost(0), 2
+            game.hands[ids[0]] = [DealtCard(card=Card(c), value=v) for c, v in hand]
+            pool.get(ids[0]).models[ids[1]].money_est = 33
+            picks = ai.choose(game, ids[0], pool)
+            reported += any(
+                pk["action"] == "REPORT" and pk["target"] == ids[1] for pk in picks
+            )
+        self.assertGreaterEqual(reported, 55, f"60 局里只举报了快赢的 {reported} 次")
+
+    def test_holding_both_it_throws_both_at_the_winner(self):
+        """用户原话：同时有攻击和举报的话，真人会两张一起砸向要登顶的人，求稳妥。
+
+        主席那一级攻击只按得住政绩升职、举报只抓得住贿赂升职，
+        他两张晋升卡一起打（或者打通用升职）的话，单张牌拦不住。
+        """
+        both = 0
+        for seed in range(60):
+            game, ids, pool = self._table(seed, ["ATTACK", "REPORT", "WORK", "WORK", "WORK", "WORK"])
+            picks = ai.choose(game, ids[0], pool)
+            both += sorted((pk["action"], pk["target"]) for pk in picks) == [
+                ("ATTACK", ids[1]), ("REPORT", ids[1])
+            ]
+        self.assertGreaterEqual(both, 55, f"60 局里只有 {both} 局两张一起压上去")
+
+    def test_a_second_attack_adds_nothing(self):
+        """第一刀已经按住政绩那条路了，第二刀不会多拦下什么——别把两张攻击都扔出去。
+
+        （我身上没钱，埋头工作对我才有用；不然两张牌都是零分，比的就只是噪声。）
+        """
+        doubled = 0
+        for seed in range(60):
+            game, ids, pool = self._table(
+                seed, ["ATTACK", "ATTACK", "WORK", "WORK", "WORK", "WORK"], my_money=0
+            )
+            picks = ai.choose(game, ids[0], pool)
+            doubled += sum(pk["action"] == "ATTACK" for pk in picks) > 1
+        self.assertEqual(doubled, 0)
+
+    def test_cover_is_route_aware(self):
+        """单张只拦一条路；两张一起才稳。贫农攻击挡不住，现贪的人一张举报就够。"""
+        agent = ai.SmartAgent(1, cfg=CFG)
+        rich = ai.OpponentModel()
+        rich.money_est = CFG.money_cost(self.TOP) * 2
+        broke = ai.OpponentModel()
+        opp = {"id": 2, "rank": self.TOP, "merit": CFG.merit_cost(self.TOP), "origin": None}
+        a, r, b = agent._endgame_cover(opp, rich)
+        self.assertLess(a + r, b)
+        _, r_broke, _ = agent._endgame_cover(opp, broke)
+        self.assertGreater(r_broke, r, "他得现贪才凑得齐钱，举报单张就该几乎稳拦")
+        a_p, r_p, b_p = agent._endgame_cover(dict(opp, origin="PEASANT"), rich)
+        self.assertEqual(a_p, 0.0)
+        self.assertEqual(b_p, r_p, "贫农那条政绩路谁也按不住，两张一起也只多不了")
 
     def test_mid_game_cash_is_not_discounted(self):
         """这一折只能在终局生效。要是 payload 里少了 max_rounds 之类的字段，

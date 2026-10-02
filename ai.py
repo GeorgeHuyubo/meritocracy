@@ -105,6 +105,22 @@ class Weights:
     # 钱是暗的，money_est 是下界（贪污看不见、以权谋私伪装成干活），
     # 1.0 意味着只信估计值，结果就是终局刹车形同虚设。
     endgame_money_doubt: float = 0.6
+    # 有人这一轮就可能登顶、而我自己这轮当不上主席时，我自己的生产/晋升值几折。
+    # 他一赢游戏就结束，我这轮捞的钱、升的官全都兑现不了。
+    # 和 _cash_horizon 给赃款打的折一致。不打这个折，复盘 QN78 第 10 轮：
+    # 老张手里有举报牌、明知真人要登顶，还是选了"贪污 + 基层升县级"（0.85 分）
+    # 而不是举报他（0.32 分）——那一举报本来能拦下整局。
+    endgame_economy_discount: float = 0.15
+    # 拦一个这一轮就可能登顶的人，单靠一张牌能拦下的把握。
+    # 省级 -> 主席那一级"走哪条路由卡决定"：攻击只按得住政绩升职，举报只抓得住贿赂升职，
+    # 通用升职被攻击会改走金钱、还得再挨一张举报。他手里是哪张看不见，
+    # 而真人在门口往往两张晋升卡一起打（复盘 QN78 第 10 轮就是）——
+    # 单张牌只能赌中一半，攻击 + 举报一起压上去才稳。
+    endgame_cover_single: float = 0.4
+    endgame_cover_both: float = 0.95
+    # 他钱还不够、这一轮得现贪才凑得齐时，举报单张就几乎稳拦：
+    # 贪了 -> 查实 -> 排在贪污后面的晋升卡全部冻结。
+    endgame_cover_report_must_corrupt: float = 0.8
     noise: float = 0.02  # 决策噪声，避免完全可预测
     # 目标评分差在**最高分的这个比例**之内视为打平，打平就随机挑。
     # 必须用相对值：绝对阈值（原来是 0.02）在开局能用，到了中局就坏了——
@@ -443,23 +459,85 @@ class SmartAgent:
         )
 
     def _about_to_win(self, opp: dict[str, Any], model: "OpponentModel") -> bool:
-        """他是不是下一次晋升就直接当主席了（而且资源已经够了）。
+        """他是不是**这一轮**就可能直接当上主席。
 
         政绩是公开的，按实数比。**钱是暗的**，`money_est` 只能算个下界——
         贪污看不见，以权谋私看起来又像在老实干活。所以钱这一项留出
         `endgame_money_doubt` 的余量：宁可多拦一次，也不要在他登顶那轮
         才发现自己估少了。少拦一次的代价是整局输掉，多拦一次只亏一个回合。
+
+        还要往前看一轮：一轮能打两张牌，「生产牌 + 晋升卡」当轮就能把差的
+        那点补上再升。以前只看"现在够不够"，复盘 QN78 第 9 轮：真人省级、
+        政绩 30（门槛 43），手里一张埋头工作就是 +15，当轮就能登顶；
+        AI 判"还差 13，不危险"，两个人手里都有攻击牌，谁也没动。
+        人类玩家一眼就看得出"他再干一轮就够了"。
+        所以：差的那一项只要一张生产牌（期望值）补得上，就算。
+        两项都差就补不过来——生产牌只有一个位子，另一张得留给晋升卡。
         """
         cfg = self.cfg
         rank = opp["rank"]
         if rank != cfg.president_rank - 1:
             return False
-        mc, tc = self._costs(rank, opp.get("origin"))
+        origin = opp.get("origin")
+        mc, tc = self._costs(rank, origin)
+        money_bar = mc * self.w.endgame_money_doubt if mc is not None else None
         merit_ready = tc is not None and opp["merit"] >= tc
-        money_ready = mc is not None and model.money_est >= mc * self.w.endgame_money_doubt
+        money_ready = money_bar is not None and model.money_est >= money_bar
+        lookahead = int(cfg.picks_per_round) > 1
+        merit_reach = merit_ready or (
+            lookahead and tc is not None
+            and opp["merit"] + self._own_work_merit(0, rank, origin) >= tc
+        )
+        money_reach = money_ready or (
+            lookahead and money_bar is not None
+            and model.money_est + self._expected_corrupt(rank) >= money_bar
+        )
         if cfg.needs_both(rank):
-            return merit_ready and money_ready
-        return merit_ready or money_ready
+            return (merit_ready and money_reach) or (money_ready and merit_reach)
+        return merit_reach or money_reach
+
+    def _endgame_stop_value(self, opp: dict[str, Any], model: "OpponentModel") -> float:
+        """把一个这一轮就可能登顶的人**确定**拦下来值多少。
+
+        量纲和攻击分一致：拦下一级（1 + promotion_bonus）× 威胁 × 终局权重。
+        单张牌、两张牌各能拦下几成，乘 _endgame_cover 给的把握。
+        """
+        progress = self._progress(
+            opp["rank"], model.money_est, opp["merit"], opp.get("origin")
+        )
+        return (
+            self.w.interfere_attack
+            * (1.0 + self.w.promotion_bonus)
+            * self._threat(opp["rank"], progress)
+            * self.w.endgame_block_weight
+        )
+
+    def _endgame_cover(
+        self, opp: dict[str, Any], model: "OpponentModel"
+    ) -> tuple[float, float, float]:
+        """(只攻击, 只举报, 攻击 + 举报都压上) 各有几成把握拦下他这一轮登顶。
+
+        主席那一级走哪条路由卡决定：
+          * 政绩升职      -> 只怕攻击
+          * 贿赂升职      -> 只怕举报
+          * 通用升职      -> 被攻击就改走金钱，还得再挨一张举报
+          * 两张一起打    -> 两张都得挨
+        他手里是哪张看不见，单张牌只能赌中一部分；两张都压上才稳。
+        这正是人类玩家在门口会做的事：手里攻击、举报都有，就一起砸过去。
+
+        例外：
+          * 他的钱还不够、这一轮得现贪才凑得齐 —— 一贪就能被举报查实，
+            排在贪污后面的晋升卡全部冻结，举报单张就几乎稳拦
+          * 贫农「政治正确」攻击挡不住他，政绩那条路谁也按不住
+        """
+        mc, _ = self._costs(opp["rank"], opp.get("origin"))
+        single = self.w.endgame_cover_single
+        report = single
+        if mc is not None and model.money_est < mc * self.w.endgame_money_doubt:
+            report = max(report, self.w.endgame_cover_report_must_corrupt)
+        if (self.cfg.origin(opp.get("origin")) or {}).get("id") == "PEASANT":
+            return 0.0, report, report
+        return single, report, max(self.w.endgame_cover_both, single, report)
 
     def _cash_horizon(self, public: dict[str, Any]) -> float:
         """抄到手的一笔钱，现在还值几折。
@@ -556,6 +634,23 @@ class SmartAgent:
             return []
 
         opponents = [p for p in public["players"] if p["id"] != self.id]
+        # 有人这一轮就可能登顶？那我自己的经济牌只有在"我也当轮登顶"时才算数
+        killers = [
+            o for o in opponents
+            if self._about_to_win(o, self.models.get(o["id"], OpponentModel()))
+        ]
+        rival_closing = bool(killers)
+        # 攻击 + 举报一起压在他身上，比两张各算各的值钱：单张只能赌中一条路，
+        # 两张一起才把两条路都堵上。补上这份差额，手里两张都有的时候就会一起打。
+        both_bonus = max(
+            (
+                self._endgame_stop_value(o, m)
+                * (lambda a, r, b: b - a - r)(*self._endgame_cover(o, m))
+                for o in killers
+                for m in [self.models.get(o["id"], OpponentModel())]
+            ),
+            default=0.0,
+        )
 
         # 1) 干扰牌：各自挑好最优目标，算出独立分
         solo: dict[Card, tuple[float, int | None]] = {}
@@ -577,12 +672,22 @@ class SmartAgent:
             cards = [hand[i] for i in combo]
             if not self.allow_corrupt and Card.CORRUPT in cards:
                 continue
-            score = self._score_economy(
+            score, i_win = self._score_economy(
                 public, private, cards, [values[i] for i in combo]
             )
+            if rival_closing and not i_win:
+                score *= self.w.endgame_economy_discount
+            seen: set[Card] = set()
             for c in cards:
                 if c in (Card.ATTACK, Card.REPORT):
+                    # 有人要登顶时干扰牌全都压在他身上（见 _pick_target），
+                    # 同一种牌打两张不会多拦下什么：第二刀不算分
+                    if rival_closing and c in seen:
+                        continue
+                    seen.add(c)
                     score += solo[c][0]
+            if rival_closing and {Card.ATTACK, Card.REPORT} <= seen:
+                score += both_bonus
             score += self.rng.uniform(-self.w.noise, self.w.noise)
             if best_score is None or score > best_score:
                 best_score, best_combo = score, cards
@@ -664,8 +769,12 @@ class SmartAgent:
 
     def _score_economy(
         self, public, private, cards: list[Card], values: list[int] | None = None
-    ) -> float:
-        """联合评估这组牌里的生产牌 + 晋升卡：先赚后升，一轮最多升一级。"""
+    ) -> tuple[float, bool]:
+        """联合评估这组牌里的生产牌 + 晋升卡：先赚后升，一轮最多升一级。
+
+        返回 (分数, 这组牌能不能让我当轮登顶)。后者给 decide 判断
+        "对手要赢了，我这手经济牌还有没有意义"。
+        """
         cfg = self.cfg
         rank, money, merit = private["rank"], private["money"], private["merit"]
         my_origin = private.get("origin")
@@ -719,7 +828,10 @@ class SmartAgent:
             merit_after = merit + gain_merit
             money_after = money + gain_money  # 工资已在回合开头到账，别重复计
             here_after = self._progress(new_rank, money_after, merit_after, my_origin)
-            return (1.0 - here) + self.w.promotion_bonus + here_after * 0.5
+            return (
+                (1.0 - here) + self.w.promotion_bonus + here_after * 0.5,
+                new_rank >= cfg.president_rank,
+            )
 
         has_merit_card = any(c.can_use_merit for c in cards)
         has_money_card = any(c.can_use_money for c in cards)
@@ -763,7 +875,7 @@ class SmartAgent:
             if promoted:
                 loss += self.w.promotion_bonus
             score -= self.w.caught_dread * p_caught * loss
-        return score
+        return score, promoted and rank + 1 >= cfg.president_rank
 
     # -- 干扰牌的期望收益（单位：官职；生产牌走 _score_economy） --------
 
@@ -915,12 +1027,14 @@ class SmartAgent:
         # 整体再封一次顶：一次攻击最多值"让他少升一级"
         deny = min(deny, (1.0 + self.w.promotion_bonus) * threat)
 
-        # 但拦住"下一步就夺冠"的人是例外：那不是少升一级，是阻止整局结束。
+        # 但拦住"这一轮就可能登顶"的人是例外：那不是少升一级，是阻止整局结束。
         # 这份好处也不该按人数稀释——他赢了，桌上每个人都输。
+        # 单张攻击只按得住政绩那条路，所以只算 cover 那一份（见 _endgame_cover）。
         if self._about_to_win(opp, model):
+            cover = self._endgame_cover(opp, model)[0]
             return (
-                self.w.interfere_attack
-                * (self_value + deny * self.w.endgame_block_weight),
+                self.w.interfere_attack * self_value
+                + self._endgame_stop_value(opp, model) * cover,
                 opp["id"],
             )
         return self.w.interfere_attack * (self_value + deny * share), opp["id"]
@@ -1001,11 +1115,12 @@ class SmartAgent:
 
         # 拦住"下一步就夺冠"的人是例外：那不是少升一级，是阻止整局结束，
         # 这份好处也不该按人数稀释——他赢了，桌上每个人都输。
+        # 单张举报只抓得住贿赂升职（或者他这轮得现贪），只算 cover 那一份。
         if self._about_to_win(opp, model):
+            cover = self._endgame_cover(opp, model)[1]
             return (
-                self.w.interfere_report
-                * p_hit
-                * (cash_value + threat * self.w.endgame_block_weight),
+                self.w.interfere_report * p_hit * cash_value
+                + self._endgame_stop_value(opp, model) * cover,
                 pid,
             )
         return self.w.interfere_report * p_hit * (cash_value + setback), pid
