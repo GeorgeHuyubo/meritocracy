@@ -811,6 +811,23 @@ class TestRedraw(unittest.TestCase):
             with self.assertRaises(GameError):
                 game.select_actions(1, [{"action": "PROMOTE_FAMILY"}])
 
+    def test_family_card_is_a_free_extra_that_settles_first(self):
+        """一纸调令不算行动卡：照样能再打满两张手牌；不管提交时排在哪，都最先结算。"""
+        game = make_game(2)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
+        game.select_actions(1, [{"index": 0}, {"index": 1}, {"action": "PROMOTE_FAMILY"}])
+        cards = [a.card for a in game.selections[1].picks]
+        self.assertEqual(cards, [Card.PROMOTE_FAMILY, Card.WORK, Card.WORK])
+        game.lock_action(1)  # 三样一起也能锁定
+        with self.assertRaises(GameError):  # 手牌还是最多两张
+            game2 = make_game(2)
+            game2.players[1].origin = Origin.RED
+            game2.start_game()
+            game2.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
+            game2.select_actions(1, [{"index": 0}, {"index": 1}, {"index": 2}])
+
     def test_family_card_is_not_offered_on_the_last_step(self):
         game = make_game(2)
         game.players[1].origin = Origin.RED

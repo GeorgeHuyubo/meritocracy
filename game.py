@@ -292,7 +292,13 @@ class Game:
             raise GameError("你已经锁定了行动。")
 
         picks = picks or []
-        if len(picks) > self.cfg.picks_per_round:
+        # 一纸调令不算行动卡，不占出牌位
+        def is_family(item) -> bool:
+            card = item.card if isinstance(item, Action) else (
+                item.get("action") if isinstance(item, dict) else item[0]
+            )
+            return card is not None and Card(card) is Card.PROMOTE_FAMILY
+        if sum(1 for it in picks if not is_family(it)) > self.cfg.picks_per_round:
             raise GameError(f"每轮最多打出 {self.cfg.picks_per_round} 张牌。")
 
         hand = list(self.hands.get(player_id, []))
@@ -349,7 +355,8 @@ class Game:
                 target_id = None
             parsed.append(Action(card=card, target_id=target_id, value=dealt.value))
 
-        sel.picks = parsed
+        # 一纸调令永远最先结算，不管提交时排在哪
+        sel.picks = sorted(parsed, key=lambda a: a.card is not Card.PROMOTE_FAMILY)
 
     # 兼容旧签名：一次只提交一张牌（追加到已选里）
     def select_action(
@@ -428,7 +435,7 @@ class Game:
         if sel is None:
             raise GameError("你不在这局游戏里。")
         # 允许少打甚至不打：选 0~PICKS_PER_ROUND 张都行，少打就是主动弃权
-        if len(sel.picks) > self.cfg.picks_per_round:
+        if sum(1 for a in sel.picks if a.card is not Card.PROMOTE_FAMILY) > self.cfg.picks_per_round:
             raise GameError(f"每轮最多打出 {self.cfg.picks_per_round} 张牌。")
         sel.locked = True
 

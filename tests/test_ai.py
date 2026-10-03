@@ -237,6 +237,8 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
         picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
         self.assertIn("PROMOTE_FAMILY", picks)
+        self.assertEqual(picks[0], "PROMOTE_FAMILY", "一纸调令最先结算")
+        self.assertEqual(len([p for p in picks if p != "PROMOTE_FAMILY"]), 2, "不占出牌位：两张手牌照样打满")
         game.hands[1] = [DealtCard(card=Card.PROMOTE_MERIT)] + [DealtCard(card=Card.WORK, value=6)] * 5
         picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
         self.assertNotIn("PROMOTE_FAMILY", picks)
@@ -266,6 +268,37 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         self.assertGreater(on_top, on_worker, f"打省级 {on_top:.3f} 居然不如打基层 {on_worker:.3f}")
         self.assertLess(agent._target_focus(public, opp[2]), 0.5)
         self.assertAlmostEqual(agent._target_focus(public, opp[3]), 1.0)
+
+    def test_red_does_not_waste_the_family_card_before_reaching_the_threshold(self):
+        """一纸调令最先结算，这一轮的埋头工作赶不上它。门槛差一点、要靠这轮干活才够时，
+        AI 不能打它（修之前 94% 的一纸调令都是这样白用的）。"""
+        game = Game(game_id="red2", cfg=CFG, rng=random.Random(3))
+        for name in ("我", "甲", "乙"):
+            game.add_player(name)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        me = game.players[1]
+        me.rank, me.merit, me.money = 0, CFG.merit_cost(0) - 4, 0
+        game.hands[1] = [DealtCard(card=Card.WORK, value=8)] * CFG.hand_size
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(3))
+        picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
+        self.assertNotIn("PROMOTE_FAMILY", picks)
+
+    def test_family_card_is_not_tagged_along_with_another_promotion(self):
+        """升职靠的是普通晋升卡时，一纸调令配着打只是浪费。修之前 AI 会这么干：
+        风险按"官不撤"算轻了，「一纸调令 + 贪污 + 贿赂升职」看起来反而更划算。"""
+        game = Game(game_id="red3", cfg=CFG, rng=random.Random(4))
+        for name in ("我", "甲", "乙"):
+            game.add_player(name)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        me = game.players[1]
+        me.rank, me.merit, me.money = 0, 0, 1
+        game.hands[1] = ([DealtCard(card=Card.CORRUPT, value=18), DealtCard(card=Card.PROMOTE_MONEY)]
+                         + [DealtCard(card=Card.REPORT)] * 4)
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(4))
+        picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
+        self.assertNotIn("PROMOTE_FAMILY", picks)
 
     def test_attacking_a_peasant_is_worth_less(self):
         """贫农免疫穿小鞋，所以"挡住他晋升"那份价值不该算进去。"""

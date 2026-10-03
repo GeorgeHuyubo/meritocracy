@@ -724,6 +724,9 @@ class SmartAgent:
 
         chosen = list(best_combo or hand[:n_picks])
         chosen = self._order_picks(private, chosen)
+        if Card.PROMOTE_FAMILY in chosen:  # 一纸调令永远最先结算
+            chosen.remove(Card.PROMOTE_FAMILY)
+            chosen.insert(0, Card.PROMOTE_FAMILY)
 
         opponents = [p for p in public["players"] if p["id"] != self.id]
         picks: list[tuple[str, int | None]] = []
@@ -757,9 +760,8 @@ class SmartAgent:
              int(d.get("value", 0)) if isinstance(d, dict) else 0)
             for d in private["hand"]
         ]
-        # 红二代「一纸调令」：不在手牌里，但能当一张晋升卡打（每局一次）
-        if (private.get("family_card") or {}).get("usable"):
-            dealt.append((Card.PROMOTE_FAMILY, 0))
+        # 红二代「一纸调令」：不算行动卡、不占出牌位，用的话永远最先结算（每局一次）
+        family_ok = bool((private.get("family_card") or {}).get("usable"))
         hand = [c for c, _ in dealt]
         values = [v for _, v in dealt]
         n_picks = min(int(public.get("picks_per_round", 1)), len(hand))
@@ -801,12 +803,17 @@ class SmartAgent:
 
         # 2) 枚举所有出牌组合（按手牌下标，所以同名牌能出两张）
         scored: list[tuple[float, list[Card]]] = []
-        for combo in combinations(range(len(hand)), n_picks):
-            cards = [hand[i] for i in combo]
+        variants = [[]] + ([[Card.PROMOTE_FAMILY]] if family_ok else [])
+        for combo, extra in (
+            (combo, extra)
+            for combo in combinations(range(len(hand)), n_picks)
+            for extra in variants
+        ):
+            cards = extra + [hand[i] for i in combo]
             if not self.allow_corrupt and Card.CORRUPT in cards:
                 continue
             score, i_win = self._score_economy(
-                public, private, cards, [values[i] for i in combo]
+                public, private, cards, [0] * len(extra) + [values[i] for i in combo]
             )
             if rival_closing and not i_win:
                 score *= self.w.endgame_economy_discount
@@ -992,11 +999,21 @@ class SmartAgent:
             here_after = self._progress(new_rank, money_after, merit_after, my_origin)
             score = (1.0 - here) + self.w.promotion_bonus + here_after * 0.5
             promoted = True
+            # 一纸调令最先结算：组合里有它、又能"先升官"，升职就是它带来的
+            via_family = Card.PROMOTE_FAMILY in cards
             # 走的是不是金钱那条路（行贿）：主席那一级由卡决定，其他台阶政绩够就走政绩
             bribed = (
                 not has_merit_card if cfg.needs_both(rank) else money_left < money
             )
         else:
+            # 没能"先升官"——一纸调令只在最先结算时才有用，这一轮赚到的赶不上它，
+            # 下面算"干完活再升"时不能把它当晋升卡（以前算了，AI 资源不够也照打，94% 白用）
+            via_family = False
+            if Card.PROMOTE_FAMILY in cards:
+                rest = [c for c in cards if c is not Card.PROMOTE_FAMILY]
+                has_merit_card = any(c.can_use_merit for c in rest)
+                has_money_card = any(c.can_use_money for c in rest)
+                any_promo_card = any(c.is_promotion for c in rest)
             promoted = False
             if cfg.needs_both(rank):
                 # 双条件台阶：任意晋升卡都行，但钱和政绩要同时够
@@ -1021,10 +1038,12 @@ class SmartAgent:
                 if any(c.is_promotion for c in cards):
                     score -= 0.03
 
-        family = Card.PROMOTE_FAMILY in cards
-        if family:
-            # 每局只有一次：手里有普通晋升卡能升的时候别浪费它
-            score -= self.w.family_card_reserve
+        family = via_family  # 只有真是它把人送上去的，才按它的规矩算风险（官不撤）
+        if Card.PROMOTE_FAMILY in cards:
+            # 每局只有一次：手里有普通晋升卡能升的时候别浪费它；
+            # 打了却不是它送上去的 = 纯浪费（修之前 AI 会配着贿赂升职一起打，
+            # 因为风险按"官不撤"算轻了）
+            score -= self.w.family_card_reserve if via_family else 1.0
 
         # ---- 被举报查实的风险：贪污和行贿都算 ----
         # 以前只有贪污/以权谋私才扣这一项，而且"先升官再干活"那条路整个跳过了。

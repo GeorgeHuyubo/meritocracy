@@ -20,6 +20,8 @@ const CARD_INFO = {
 
 // 一纸调令在 local 里的下标（它不在手牌里）
 const FAMILY_INDEX = -1;
+// 一纸调令不算行动卡、不占出牌位：数"选了几张"时不算它
+const actionCount = () => local.filter((x) => x.index !== FAMILY_INDEX).length;
 
 const TOKEN_KEY = "meritocracy.token";
 const ROOM_KEY = "meritocracy.room";
@@ -232,7 +234,9 @@ function renderOrder() {
     .join("") + `<button class="swap" id="swapBtn">⇄ 调换顺序</button>`;
 
   $("swapBtn").onclick = () => {
-    local.reverse();
+    // 一纸调令永远最先结算，只调换手牌那几张
+    const fam = local.filter((x) => x.index === FAMILY_INDEX);
+    local = fam.concat(local.filter((x) => x.index !== FAMILY_INDEX).reverse());
     syncPicks();
     render();
   };
@@ -286,7 +290,7 @@ function renderAction() {
   const chosen = new Set(local.map((x) => x.index));
   $("handHint").textContent = priv.locked
     ? "已锁定"
-    : `选 ${n} 张（已选 ${local.length}/${n}）` +
+    : `选 ${n} 张（已选 ${actionCount()}/${n}）` +
       (pendingIndex !== null ? " —— 请为这张牌指定目标" : "");
 
   // 每张手牌单独一格（同名牌可以分别选中）
@@ -494,8 +498,8 @@ function familyCardHtml() {
   const badge = order >= 0 ? `<div class="count">${order + 1}</div>` : "";
   return `<div class="${cls}" data-index="${FAMILY_INDEX}">${badge}
     <div class="cn">一纸调令 <span class="subtle">· 红二代每局一次</span></div>
-    <div class="fx">${status}<span class="warn2">政绩优先、其次金钱 · 攻击举报都拦不住 · 不能升主席 ·
-      打出去就算用掉</span></div></div>`;
+    <div class="fx">${status}<span class="warn2">不占出牌位，用的那一轮最先结算 ·
+      政绩优先、其次金钱 · 攻击举报都拦不住 · 不能升主席 · 打出去就算用掉</span></div></div>`;
 }
 
 function myPanelHtml() {
@@ -1161,12 +1165,13 @@ function readyPicks() {
 $("lockBtn").onclick = () => {
   // 少打牌是合法选择，但不该和手滑长得一样——所以要确认一次
   const n = pub.picks_per_round;
-  if (local.length < n) {
-    const wasted = n - local.length;
+  const picked = actionCount();
+  if (picked < n) {
+    const wasted = n - picked;
     const msg =
-      local.length === 0
+      picked === 0
         ? `本轮弃权？${n} 个行动位都会浪费掉。`
-        : `你只选了 ${local.length} 张，还有 ${wasted} 个行动位会浪费掉。确定就这么打？`;
+        : `你只选了 ${picked} 张，还有 ${wasted} 个行动位会浪费掉。确定就这么打？`;
     if (!confirm(msg)) return;
   }
   send({ type: "lock", picks: readyPicks() });
@@ -1181,11 +1186,18 @@ $("hand").addEventListener("click", (e) => {
     local.splice(at, 1); // 再点一下 = 取消
     if (pendingIndex === i) pendingIndex = null;
   } else {
-    if (local.length >= pub.picks_per_round) return toast(`最多选 ${pub.picks_per_round} 张`);
-    if (i === FAMILY_INDEX && !(priv.family_card || {}).usable) {
-      return toast((priv.family_card || {}).why || "现在不能用一纸调令");
+    if (i === FAMILY_INDEX) {
+      // 不占出牌位，而且永远最先结算
+      if (!(priv.family_card || {}).usable) {
+        return toast((priv.family_card || {}).why || "现在不能用一纸调令");
+      }
+      local.unshift({ index: FAMILY_INDEX, card: "PROMOTE_FAMILY", target: null });
+      syncPicks();
+      render();
+      return;
     }
-    const card = i === FAMILY_INDEX ? "PROMOTE_FAMILY" : priv.hand[i].card;
+    if (actionCount() >= pub.picks_per_round) return toast(`最多选 ${pub.picks_per_round} 张`);
+    const card = priv.hand[i].card;
     local.push({ index: i, card, target: null });
     pendingIndex = CARD_INFO[card].target ? i : null;
   }
