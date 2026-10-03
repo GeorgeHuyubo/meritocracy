@@ -158,6 +158,8 @@ class GameStore:
                             "salary_paid": snap["salary_paid"],
                             "redraw_spent": snap["redraw_spent"],
                             "redraw_count": snap["redraw_count"],
+                            "next_event_id": snap["next_event_id"],
+                            "family_used": snap["family_used"],
                         },
                         ensure_ascii=False,
                     ),

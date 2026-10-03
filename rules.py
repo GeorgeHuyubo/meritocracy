@@ -104,6 +104,26 @@ def deal_hand(rng, cfg: Config = DEFAULT_CONFIG) -> list[DealtCard]:
     ]
 
 
+def deal_hand_for(player: PlayerState, rng, cfg: Config = DEFAULT_CONFIG) -> list[DealtCard]:
+    """给某个玩家发一手牌。普通人就是 deal_hand；卷王「加班」有保底：
+
+    **先照常随机发满一手**，埋头工作不够 ORIGIN_GRINDER_MIN_WORK 张时，
+    再从非埋头工作的牌里随机挑缺的那几张换成埋头工作（点数照常现摇）。
+    不是"先塞两张工作再随机发剩下的"——那样卷王的工作牌会系统性偏多
+    （本来就摸到两张的那 37% 也会再多两张）。
+    """
+    hand = deal_hand(rng, cfg)
+    if not origin_is(player, "GRINDER", cfg):
+        return hand
+    need = cfg.origin_grinder_min_work - sum(1 for d in hand if d.card is Card.WORK)
+    if need <= 0:
+        return hand
+    others = [i for i, d in enumerate(hand) if d.card is not Card.WORK]
+    for i in _sample_without_replacement(rng, others, min(need, len(others))):
+        hand[i] = DealtCard(card=Card.WORK, value=roll_card_value(Card.WORK, rng, cfg))
+    return hand
+
+
 def _sample_without_replacement(rng, deck: list[Card], k: int) -> list[Card]:
     """从 deck 里不放回地抓 k 张。
 
@@ -279,9 +299,28 @@ def _resolve_promotion_card(
     merit_ok = card.can_use_merit and has_merit_for_promotion(player, cfg)
     money_ok = card.can_use_money and has_money_for_promotion(player, cfg)
 
-    # 贫农「政治正确」：成分过硬，放黑料挡不住他。
+    if card is Card.PROMOTE_FAMILY:
+        # 红二代「一纸调令」：政绩优先、其次金钱；政治攻击挡不住；不能用来升主席
+        if cfg.needs_both(player.rank) or player.rank + 1 >= cfg.president_rank:
+            outcome.private_notes.append("一纸调令不能用来升国家主席，这张卡白用了。")
+            return
+        if not (merit_ok or money_ok):
+            outcome.private_notes.append("一纸调令用了，可惜政绩和金钱都不够门槛——白用了。")
+            return
+        kind = PromotionKind.MERIT if merit_ok else PromotionKind.MONEY
+        _apply_promotion(player, kind, outcome, cfg)
+        outcome.family_promotion = True
+        if kind is PromotionKind.MONEY:
+            # 用钱升的那笔算行贿：举报查实照样记警告、钱进分赃池，只是官不撤
+            outcome.family_bribe = outcome.promotion_money_cost
+        promo_msgs.append(
+            f"{names[player.id]} 家里一纸调令，直接调任{cfg.rank_name(player.rank)}。"
+        )
+        return
+
+    # 贫农「政治正确」：成分过硬，**一个人**放黑料挡不住他；两个人以上一起打就躲不过。
     # 注意只免疫"挡晋升"这一项——抢功和戴帽子照打，不然这张就太全能了。
-    blocked_by_attack = outcome.attacked and not origin_is(player, "PEASANT", cfg)
+    blocked_by_attack = outcome.attacked and not smear_resisted(player, outcome, cfg)
 
     if blocked_by_attack and merit_ok:
         # 暂缓升职：这一轮走不了政绩这条路，但政绩一点不掉。
@@ -389,6 +428,32 @@ def origin_is(player: PlayerState, origin_id: str, cfg: Config = DEFAULT_CONFIG)
     """这个玩家是不是某个出身。走 cfg.origin 所以总开关一关就全员失效。"""
     o = cfg.origin(player.origin.value if player.origin else None)
     return bool(o and o["id"] == origin_id)
+
+
+def redraw_cost_for(
+    player: PlayerState, used_this_round: int, cfg: Config = DEFAULT_CONFIG
+) -> int | None:
+    """这个人本轮第 used_this_round+1 次换牌要花多少钱。None = 这一级不能换牌。
+
+    0 和 None 要分开：0 是"免费换"（富二代每轮前几次），None 是"不提供"。
+    富二代免费的那几次用完之后从**底价**开始正常翻倍，不是接着翻。
+    """
+    if cfg.redraw_cost(player.rank, 0) <= 0:
+        return None
+    free = cfg.origin_rich_free_redraws if origin_is(player, "RICH", cfg) else 0
+    if used_this_round < free:
+        return 0
+    return cfg.redraw_cost(player.rank, used_this_round - free)
+
+
+def smear_resisted(player: PlayerState, outcome, cfg: Config = DEFAULT_CONFIG) -> bool:
+    """贫农「政治正确」这一轮挡不挡得住穿小鞋：只有**一个人**攻击他时挡得住。
+
+    原来是不管几个人打都挡得住。AI 学会终局拦人之后（主席那一级政绩路线只有攻击拦得住），
+    贫农走政绩登顶谁也拦不住：3000 局混战胜率 25.4%，六张里最强。
+    改成两个人联手就能按住他。
+    """
+    return origin_is(player, "PEASANT", cfg) and outcome.attacker_count <= 1
 
 
 def apply_origin_start_bonuses(
@@ -797,6 +862,8 @@ def resolve_round(
             if p.id not in attackers_of[target.id]:
                 # 同一个人对同一目标打两张攻击不会翻倍，只是浪费一张牌
                 attackers_of[target.id].append(p.id)
+            # 有几个**不同的人**在打他（贫农「政治正确」只挡得住一个人）
+            outcome.outcomes[target.id].attacker_count = len(attackers_of[target.id])
             o_actor.private_notes.append(f"你对 {names[target.id]} 发动了政治攻击。")
 
     report_counts: dict[int, int] = defaultdict(int)
@@ -835,6 +902,8 @@ def resolve_round(
     #      少了这一条，"贪一笔立刻洗成官职"就能躲开没收：举报人查实了却分不到钱，
     #      而且升一级又被降一级，官职净变化为零，等于举报白打。
     deferred_promotions: list[tuple[PlayerState, Card]] = []
+    # 卷王「加班」：这一轮两张埋头工作的政绩（攻击结算完之后再 ×倍数，见第 3b 步）
+    overtime_base: dict[int, int] = {}
     for p in ordered:
         o = outcome.outcomes[p.id]
         # 举报只管**要花钱**的那条路（贪污所得、拿钱买官）。
@@ -843,6 +912,7 @@ def resolve_round(
         produced_yet = False
         interfered_yet = False
         corrupted_yet = False
+        work_merits: list[int] = []  # 本轮每张埋头工作的政绩（卷王「加班」要用）
         for act in played(p.id):
             card = act.card
             if card.is_production:
@@ -851,12 +921,13 @@ def resolve_round(
                 corrupted_yet = True
             if card is Card.WORK:
                 base = act.value if act.value > 0 else roll_work_base(rng, cfg)
-                if origin_is(p, "GRINDER", cfg):
-                    base += cfg.origin_grinder_work_bonus  # 卷王：加在倍率之前
                 gained = work_merit(base, p.rank, event, cfg)
                 o.base_values.append(base)
                 o.merit_gained += gained
                 p.merit += gained
+                work_merits.append(gained)
+                if len(work_merits) == 2 and origin_is(p, "GRINDER", cfg):
+                    overtime_base[p.id] = sum(work_merits)
             elif card is Card.CORRUPT:
                 base = act.value if act.value > 0 else roll_corrupt_base(rng, cfg)
                 gained = corrupt_money(base, p.rank, event, cfg)
@@ -878,6 +949,15 @@ def resolve_round(
                 p.merit += bonus
             elif card in (Card.REPORT, Card.ATTACK):
                 interfered_yet = True
+            elif card is Card.PROMOTE_FAMILY:
+                # 一纸调令不等举报、不怕攻击，按玩家排的顺序当场结算，查实了也不撤
+                if has_merit_for_promotion(p, cfg):
+                    o.tried_merit_promotion = True
+                _resolve_promotion_card(
+                    p, card, o, cfg, names, promo_msgs, already=o.promotion
+                )
+                if o.promotion is not PromotionKind.NONE and not produced_yet:
+                    o.promoted_before_production = True
             elif card.is_promotion:
                 # 这一张实际会走哪条路？政绩优先，但被攻击就得改走金钱。
                 #   * 双条件台阶（省级 -> 主席）钱和政绩都要花 -> 一定要掏钱
@@ -1247,6 +1327,22 @@ def resolve_round(
                 f"{names[target_id]} 遭到政治攻击，但本轮埋头工作，未受政绩处罚。"
             )
 
+    # ---- 3b. 卷王「加班」：两张埋头工作的政绩最后 ×倍数 -----------------------
+    # 放在攻击之后（"最后"）：抢功只抢得到乘之前的那份，剩下的再乘。
+    for pid, base in overtime_base.items():
+        o = outcome.outcomes[pid]
+        net = max(0, base - o.merit_stolen_by_attackers)
+        extra = (cfg.origin_grinder_overtime_multiplier - 1) * net
+        if extra > 0:
+            o.overtime_merit = extra
+            o.merit_gained += extra
+            by_id[pid].merit += extra
+        # 加班费：上了别人几倍的班，就拿几倍工资（按此刻的官职）。合法收入，举报抓不到。
+        pay = cfg.origin_grinder_overtime_multiplier * cfg.salary(by_id[pid].rank)
+        if pay > 0:
+            o.overtime_pay = pay
+            by_id[pid].money += pay
+
     # ---- 4. 匿名举报：判定是否查实 ----------------------------------------
     # 事件产生的举报没有举报人，查实的赃款直接充公。
     # 这里要把"真人举报"和"事件查办"分开记：后果一样，但公报得说清楚是哪一种，
@@ -1272,7 +1368,7 @@ def resolve_round(
             continue
         o.reported = True
         o.report_count = count
-        kind = classify_report(o.corrupt_amount, cfg, bribe=o.pending_bribe)
+        kind = classify_report(o.corrupt_amount, cfg, bribe=o.pending_bribe + o.family_bribe)
         if kind is DemotionKind.NONE:
             # 目标本轮没有贪污 -> 举报无效
             if o.report_count_players:
@@ -1378,11 +1474,20 @@ def resolve_round(
         # 行贿的钱打水漂：官没升成，钱也要不回来。
         # 这笔钱同样是查获的赃款，要并进分赃池——
         # 不然"抓到一个光买官没贪钱的"，举报人查实了却一分钱拿不到。
-        bribe = min(o.pending_bribe, p.money)
+        bribe = min(
+            math.floor(Fraction(o.pending_bribe) * cfg.bribe_forfeit_ratio), p.money
+        )
         if bribe:
             p.money -= bribe
             o.bribe_lost = bribe
             confiscated[p.id] = confiscated.get(p.id, 0) + bribe
+        # 一纸调令用钱升的那笔：钱已经花掉了、官也不撤，但同样算查获的行贿，进分赃池
+        family = (
+            math.floor(Fraction(o.family_bribe) * cfg.bribe_forfeit_ratio)
+            if cfg.report_catches_bribery else 0
+        )
+        if family:
+            confiscated[p.id] = confiscated.get(p.id, 0) + family
 
         issued = warnings_for(o.demotion, cfg)
         o.warnings_issued = issued
@@ -1413,6 +1518,8 @@ def resolve_round(
             bits.append(f"赃款 {taken} 全部没收")
         if bribe:
             bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
+        if family:
+            bits.append(f"调令背后的 {o.family_bribe} 被认定为行贿（官照样升）")
         detail = "，".join(bits)
         if saved:
             report_msgs.append(
@@ -1451,7 +1558,11 @@ def resolve_round(
         o_victim = outcome.outcomes[victim_id]
         # 毛额 = 本轮脏收入 + 查获的行贿。行贿那笔没有"洗白"一说，
         # 它是原样并进分赃池的，所以两边都要算上。
-        gross = o_victim.corrupt_amount + o_victim.bribe_lost
+        family = (
+            math.floor(Fraction(o_victim.family_bribe) * cfg.bribe_forfeit_ratio)
+            if cfg.report_catches_bribery else 0
+        )
+        gross = o_victim.corrupt_amount + o_victim.bribe_lost + family
         payout = min(taken, math.floor(Fraction(gross) * cfg.report_reward_ratio))
         share = payout // len(actors) if cfg.report_reward_split_evenly else payout
         if share <= 0:
@@ -1626,7 +1737,8 @@ def resolve_round(
             (
                 (
                     names[pid],
-                    salaries.get(pid, cfg.salary(o.rank_before)) + gossip_graft[pid],
+                    salaries.get(pid, cfg.salary(o.rank_before)) + o.overtime_pay
+                    + gossip_graft[pid],
                 )
                 for pid, o in outcome.outcomes.items()
             ),

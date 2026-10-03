@@ -2649,6 +2649,30 @@ class TestOrigins(unittest.TestCase):
             rich.money, REAL_CFG.origin_old_money_start + REAL_CFG.salary(0)
         )
 
+    def test_old_money_is_one_full_tier(self):
+        """15 = 基层的金钱门槛：开局白拿正好够买一级。"""
+        self.assertEqual(REAL_CFG.origin_old_money_start, REAL_CFG.money_cost(0))
+
+    def test_rich_first_redraw_each_round_is_free(self):
+        """富二代：0 -> 1 -> 2 -> 4。免费那次之后从底价开始，不是 0 -> 2 -> 4。"""
+        for rank in range(REAL_CFG.president_rank):
+            rich = player(1, rank=rank, origin=Origin.RICH)
+            plain = player(2, rank=rank)
+            base = REAL_CFG.redraw_cost(rank)
+            self.assertEqual(
+                [rules.redraw_cost_for(rich, k, REAL_CFG) for k in range(4)],
+                [0, base, base * 2, base * 4],
+            )
+            self.assertEqual(
+                [rules.redraw_cost_for(plain, k, REAL_CFG) for k in range(3)],
+                [base, base * 2, base * 4],
+            )
+
+    def test_free_does_not_mean_available_at_the_top(self):
+        """主席那一级不提供换牌：富二代也是 None（不能换），不是 0（免费换）。"""
+        rich = player(1, rank=REAL_CFG.president_rank, origin=Origin.RICH)
+        self.assertIsNone(rules.redraw_cost_for(rich, 0, REAL_CFG))
+
     # ---- 官二代 · 提携 ----
 
     def test_patronage_discounts_merit_but_not_money(self):
@@ -2691,6 +2715,64 @@ class TestOrigins(unittest.TestCase):
         self.assertEqual(out.outcomes[1].promotion, PromotionKind.MERIT)
         self.assertEqual(out.outcomes[2].promotion, PromotionKind.NONE)
 
+    # ---- 红二代 · 一纸调令 ----
+
+    def test_family_card_ignores_attacks(self):
+        """一纸调令攻击挡不住：政绩够门槛就升，哪怕挨了政治攻击。"""
+        tc = REAL_CFG.merit_cost(1)
+        red = player(1, rank=1, merit=tc, origin=Origin.RED)
+        attacker = player(2, rank=1)
+        out = resolve(
+            [red, attacker],
+            {1: [Action(Card.PROMOTE_FAMILY)], 2: [Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        self.assertTrue(out.outcomes[1].attacked)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.MERIT)
+        self.assertTrue(out.outcomes[1].family_promotion)
+        self.assertEqual(red.rank, 2)
+
+    def test_family_card_prefers_merit_then_money(self):
+        rank = 1
+        both = player(1, rank=rank, merit=REAL_CFG.merit_cost(rank),
+                      money=REAL_CFG.money_cost(rank), origin=Origin.RED)
+        cash = player(2, rank=rank, merit=0, money=REAL_CFG.money_cost(rank), origin=Origin.RED)
+        out = resolve(
+            [both, cash],
+            {1: [Action(Card.PROMOTE_FAMILY)], 2: [Action(Card.PROMOTE_FAMILY)]},
+            cfg=REAL_CFG,
+        )
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.MERIT)
+        self.assertEqual(out.outcomes[1].family_bribe, 0)
+        self.assertEqual(out.outcomes[2].promotion, PromotionKind.MONEY)
+        self.assertEqual(out.outcomes[2].family_bribe, REAL_CFG.money_cost(rank))
+
+    def test_family_card_bought_with_money_still_counts_as_bribery(self):
+        """用钱升的那笔算行贿：举报查实记警告、举报人分到钱，但官不撤、钱不重复扣。"""
+        rank = 1
+        cost = REAL_CFG.money_cost(rank)
+        red = player(1, rank=rank, merit=0, money=cost + 3, origin=Origin.RED)
+        reporter = player(2, rank=1)
+        out = resolve(
+            [red, reporter],
+            {1: [Action(Card.PROMOTE_FAMILY)], 2: [Action(Card.REPORT, 1)]},
+            cfg=REAL_CFG,
+        )
+        o = out.outcomes[1]
+        self.assertTrue(o.report_effective)
+        self.assertEqual(o.warnings_issued, 1)
+        self.assertEqual(red.rank, rank + 1)  # 官不撤
+        self.assertEqual(red.money, 3)  # 只花了一次门槛
+        self.assertGreater(out.outcomes[2].money_from_reports, 0)
+        self.assertTrue(any("调令" in m for m in out.public_messages))
+
+    def test_family_card_cannot_make_president(self):
+        top = REAL_CFG.president_rank - 1
+        red = player(1, rank=top, merit=99, money=99, origin=Origin.RED)
+        out = resolve([red, player(2)], {1: [Action(Card.PROMOTE_FAMILY)]}, cfg=REAL_CFG)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+        self.assertEqual(red.rank, top)
+
     # ---- 贫农 · 政治正确 ----
 
     def test_peasant_ignores_the_smear(self):
@@ -2712,6 +2794,50 @@ class TestOrigins(unittest.TestCase):
         self.assertFalse(out.outcomes[1].merit_promotion_blocked)
         self.assertEqual(out.outcomes[2].promotion, PromotionKind.NONE)  # 对照组被拦
 
+    def test_two_attackers_get_through_the_peasant(self):
+        """贫农只挡得住一个人：两个人一起攻击，穿小鞋照样生效。"""
+        tc = REAL_CFG.merit_cost(0)
+        peasant = player(1, rank=0, merit=tc, origin=Origin.PEASANT)
+        a, b = player(2, rank=0), player(3, rank=0)
+        out = resolve(
+            [peasant, a, b],
+            {1: [Action(Card.PROMOTE_MERIT)],
+             2: [Action(Card.ATTACK, 1)], 3: [Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        self.assertEqual(out.outcomes[1].attacker_count, 2)
+        self.assertTrue(out.outcomes[1].merit_promotion_blocked)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+
+    def test_one_person_attacking_twice_still_counts_as_one(self):
+        """同一个人打两张攻击不算"两个人"，贫农照样挡得住。"""
+        tc = REAL_CFG.merit_cost(0)
+        peasant = player(1, rank=0, merit=tc, origin=Origin.PEASANT)
+        a = player(2, rank=0)
+        out = resolve(
+            [peasant, a],
+            {1: [Action(Card.PROMOTE_MERIT)],
+             2: [Action(Card.ATTACK, 1), Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        self.assertEqual(out.outcomes[1].attacker_count, 1)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.MERIT)
+
+    def test_attacker_count_is_recorded_even_when_attacks_are_anonymous(self):
+        """不公开署名时 attacked_by 是空的，贫农的判定不能靠它。"""
+        cfg = dataclasses.replace(REAL_CFG, attack_announces_attacker=False)
+        tc = cfg.merit_cost(0)
+        peasant = player(1, rank=0, merit=tc, origin=Origin.PEASANT)
+        a, b = player(2, rank=0), player(3, rank=0)
+        out = resolve(
+            [peasant, a, b],
+            {1: [Action(Card.PROMOTE_MERIT)],
+             2: [Action(Card.ATTACK, 1)], 3: [Action(Card.ATTACK, 1)]},
+            cfg=cfg,
+        )
+        self.assertEqual(out.outcomes[1].attacked_by, [])
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+
     def test_peasant_still_takes_the_other_two_attack_effects(self):
         """只免疫"穿小鞋"。抢功和戴帽子照打，不然这张就太全能了。"""
         peasant = player(1, rank=0, origin=Origin.PEASANT)
@@ -2724,21 +2850,129 @@ class TestOrigins(unittest.TestCase):
         )
         self.assertGreater(out.outcomes[1].merit_stolen_by_attackers, 0, "抢功该照样生效")
 
-    # ---- 小镇做题家·技术员 · 卷王 ----
+    # ---- 卷王 · 加班 ----
 
-    def test_grinder_works_harder(self):
-        grinder = player(1, origin=Origin.GRINDER)
-        plain = player(2)
+    def test_grinder_single_work_is_plain(self):
+        """卷王的牌和普通人一样：单打一张埋头工作，政绩完全相同。"""
+        grinder, plain = player(1, rank=2, origin=Origin.GRINDER), player(2, rank=2)
         out = resolve(
             [grinder, plain],
-            {1: [Action(Card.WORK, value=10)], 2: [Action(Card.WORK, value=10)]},
+            {1: [Action(Card.WORK, value=7)], 2: [Action(Card.WORK, value=7)]},
             cfg=REAL_CFG,
         )
-        gain_g = out.outcomes[1].merit_gained
-        gain_p = out.outcomes[2].merit_gained
-        self.assertGreater(gain_g, gain_p)
-        # 加在官职倍率之前，所以基层这一级正好差 bonus 点
-        self.assertEqual(gain_g - gain_p, REAL_CFG.origin_grinder_work_bonus)
+        self.assertEqual(out.outcomes[1].merit_gained, out.outcomes[2].merit_gained)
+        self.assertEqual(out.outcomes[1].overtime_merit, 0)
+
+    def test_grinder_two_works_times_four(self):
+        """连干两张：这两张的政绩最后 ×4。流水账单列多出来的那 3 份。"""
+        for rank in range(REAL_CFG.president_rank):
+            g, plain = player(1, rank=rank, origin=Origin.GRINDER), player(2, rank=rank)
+            out = resolve(
+                [g, plain],
+                {1: [Action(Card.WORK, value=6), Action(Card.WORK, value=4)],
+                 2: [Action(Card.WORK, value=6), Action(Card.WORK, value=4)]},
+                cfg=REAL_CFG,
+            )
+            two = rules.work_merit(6, rank, None, REAL_CFG) + rules.work_merit(4, rank, None, REAL_CFG)
+            self.assertEqual(out.outcomes[1].merit_gained, 4 * two)
+            self.assertEqual(out.outcomes[1].overtime_merit, 3 * two)
+            self.assertEqual(out.outcomes[2].merit_gained, two)
+            self.assertEqual(out.outcomes[2].overtime_merit, 0)
+            rows = {r["label"]: r for r in out.outcomes[1].ledger_lines("x")}
+            self.assertEqual(rows["加班：两张工作翻倍多出来的"]["merit"], 3 * two)
+            self.assertEqual(rows["干活所得"]["merit"], two)
+
+    def test_overtime_pays_four_salaries(self):
+        """加班费：上了别人 4 倍的班就拿 4 倍工资，按官职；合法收入，举报查不到。"""
+        k = REAL_CFG.origin_grinder_overtime_multiplier
+        for rank in range(REAL_CFG.president_rank):
+            g = player(1, rank=rank, money=0, origin=Origin.GRINDER)
+            reporter = player(2, rank=rank)
+            out = resolve(
+                [g, reporter],
+                {1: [Action(Card.WORK, value=6), Action(Card.WORK, value=6)],
+                 2: [Action(Card.REPORT, 1)]},
+                cfg=REAL_CFG,
+            )
+            o = out.outcomes[1]
+            self.assertEqual(o.overtime_pay, k * REAL_CFG.salary(rank))
+            self.assertEqual(g.money, k * REAL_CFG.salary(rank))
+            self.assertFalse(o.report_effective, "加班费是合法收入，举报查不到")
+            rows = {r["label"]: r for r in o.ledger_lines("x")}
+            self.assertEqual(rows["加班费"]["money"], k * REAL_CFG.salary(rank))
+
+    def test_no_overtime_pay_for_one_work_or_non_grinders(self):
+        g, plain = player(1, origin=Origin.GRINDER), player(2)
+        out = resolve(
+            [g, plain],
+            {1: [Action(Card.WORK, value=6)],
+             2: [Action(Card.WORK, value=6), Action(Card.WORK, value=6)]},
+            cfg=REAL_CFG,
+        )
+        self.assertEqual(out.outcomes[1].overtime_pay, 0)
+        self.assertEqual(out.outcomes[2].overtime_pay, 0)
+
+    def test_overtime_multiplies_the_event_boosted_work(self):
+        """重点项目这类事件加成先算进每张牌，再整体 ×4。"""
+        boost = next(e for e in REAL_CFG.event_definitions if e["effects"].get("work_bonus"))
+        event = rules.event_by_id(boost["id"], REAL_CFG)
+        g = player(1, rank=0, origin=Origin.GRINDER)
+        out = resolve(
+            [g, player(2)],
+            {1: [Action(Card.WORK, value=5), Action(Card.WORK, value=8)]},
+            event, cfg=REAL_CFG,
+        )
+        two = rules.work_merit(5, 0, event, REAL_CFG) + rules.work_merit(8, 0, event, REAL_CFG)
+        self.assertEqual(out.outcomes[1].overtime_merit, 3 * two)
+
+    def test_attackers_only_steal_from_before_the_multiplier(self):
+        """×4 在攻击之后：抢功按乘之前的政绩抢，剩下的再 ×4。"""
+        g = player(1, rank=1, origin=Origin.GRINDER)
+        attacker = player(2, rank=1)
+        out = resolve(
+            [g, attacker],
+            {1: [Action(Card.WORK, value=6), Action(Card.WORK, value=6)],
+             2: [Action(Card.ATTACK, 1)]},
+            cfg=REAL_CFG,
+        )
+        two = 2 * rules.work_merit(6, 1, None, REAL_CFG)
+        stolen = out.outcomes[1].merit_stolen_by_attackers
+        self.assertGreater(stolen, 0)
+        self.assertLessEqual(stolen, two)
+        self.assertEqual(out.outcomes[1].overtime_merit, 3 * (two - stolen))
+
+    def test_two_works_reach_the_threshold_for_a_grinder(self):
+        """政绩门槛 = 3 张本级埋头工作；卷王连干两张 ×4 每级都远超门槛。"""
+        dist = [v for v, w in REAL_CFG.work_card_distribution for _ in range(w)]
+        e_one = sum(dist) / len(dist)
+        k = REAL_CFG.origin_grinder_overtime_multiplier
+        for rank in range(REAL_CFG.president_rank):
+            mult = float(REAL_CFG.work_multiplier(rank))
+            self.assertEqual(REAL_CFG.merit_cost(rank), round(3 * e_one * mult))
+            self.assertGreaterEqual(2 * e_one * mult * k, REAL_CFG.merit_cost(rank))
+
+    def test_grinder_hand_is_topped_up_not_front_loaded(self):
+        """卷王保底：先照常随机发满一手，不够两张工作才把缺的那几张换掉。
+
+        同一个 seed 下，卷王的手牌 = 普通人的那一手，只是缺的工作被补上——
+        本来就有两张以上工作的手牌一张都不动（不是"先塞两张再发四张"）。
+        """
+        import random as _r
+        grinder, plain = player(1, origin=Origin.GRINDER), player(2)
+        topped = 0
+        for seed in range(300):
+            natural = rules.deal_hand_for(plain, _r.Random(seed), REAL_CFG)
+            mine = rules.deal_hand_for(grinder, _r.Random(seed), REAL_CFG)
+            n_nat = sum(d.card is Card.WORK for d in natural)
+            n_mine = sum(d.card is Card.WORK for d in mine)
+            self.assertEqual(n_mine, max(n_nat, REAL_CFG.origin_grinder_min_work))
+            changed = [i for i in range(len(mine)) if mine[i] != natural[i]]
+            self.assertTrue(all(mine[i].card is Card.WORK for i in changed))
+            self.assertTrue(all(natural[i].card is not Card.WORK for i in changed))
+            if n_nat >= REAL_CFG.origin_grinder_min_work:
+                self.assertEqual(mine, natural)
+            topped += bool(changed)
+        self.assertGreater(topped, 100, "大约六成多的手牌需要补")
 
     def test_grinder_does_not_touch_corruption(self):
         grinder = player(1, origin=Origin.GRINDER)

@@ -165,6 +165,108 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         self.assertTrue(agent._about_to_win(vip, model), "官二代已经够线了")
         self.assertFalse(agent._about_to_win(plain, model))
 
+    def test_buying_a_promotion_carries_report_risk(self):
+        """举报也抓行贿：买官被查实官作废、钱打水漂。AI 以前把买官当零风险，
+        钱越多越急着买（富二代开局 10 -> 15，第 2 轮被查实从 7% 涨到 23%）。"""
+        import dataclasses
+        public = {"players": [{"id": 1, "name": "我", "rank": 0, "merit": 0, "tenure": 0},
+                              {"id": 2, "name": "甲", "rank": 0, "merit": 0, "tenure": 0}],
+                  "round": 2, "last_result": None, "picks_per_round": 2, "max_rounds": 12}
+        private = {"rank": 0, "merit": 0, "money": CFG.money_cost(0) + 5, "origin": None}
+        cards, vals = [Card.PROMOTE_MONEY, Card.WORK], [0, 6]
+        risky = ai.SmartAgent(1, cfg=CFG)._score_economy(public, private, cards, vals)[0]
+        safe_cfg = dataclasses.replace(CFG, report_catches_bribery=False)
+        safe = ai.SmartAgent(1, cfg=safe_cfg)._score_economy(public, private, cards, vals)[0]
+        self.assertLess(risky, safe)
+        # 走政绩那条路不算行贿，不该扣
+        merit_private = dict(private, merit=CFG.merit_cost(0), money=0)
+        m_cards = [Card.PROMOTE_MERIT, Card.WORK]
+        self.assertEqual(
+            ai.SmartAgent(1, cfg=CFG)._score_economy(public, merit_private, m_cards, vals),
+            ai.SmartAgent(1, cfg=safe_cfg)._score_economy(public, merit_private, m_cards, vals),
+        )
+
+    def test_promote_first_then_corrupt_still_counts_the_risk(self):
+        """"先升官再贪"那条路以前直接 return，贪污被抓的风险整个没算。"""
+        import dataclasses
+        public = {"players": [{"id": 1, "name": "我", "rank": 0, "merit": 0, "tenure": 0},
+                              {"id": 2, "name": "甲", "rank": 0, "merit": 0, "tenure": 0}],
+                  "round": 2, "last_result": None, "picks_per_round": 2, "max_rounds": 12}
+        private = {"rank": 0, "merit": CFG.merit_cost(0), "money": 0, "origin": None}
+        cards, vals = [Card.PROMOTE_MERIT, Card.CORRUPT], [0, 18]
+        fearless = dataclasses.replace(ai.Weights(), caught_dread=0.0)
+        brave = ai.SmartAgent(1, cfg=CFG, weights=fearless)._score_economy(public, private, cards, vals)[0]
+        normal = ai.SmartAgent(1, cfg=CFG)._score_economy(public, private, cards, vals)[0]
+        self.assertLess(normal, brave)
+
+    def test_official_uses_the_tipoff(self):
+        """官二代 AI 听到风声要真的用上：反腐风暴不贪，重点项目更愿意埋头工作。"""
+        import dataclasses
+        public = {"players": [{"id": 1, "name": "我", "rank": 1, "merit": 0, "tenure": 0},
+                              {"id": 2, "name": "甲", "rank": 1, "merit": 0, "tenure": 0}],
+                  "round": 3, "last_result": None, "picks_per_round": 2, "max_rounds": 12}
+        agent = self._agent()
+        cards, vals = [Card.CORRUPT, Card.WORK], [18, 6]
+
+        def score(event_id):
+            private = {"rank": 1, "merit": 0, "money": 0, "origin": "OFFICIAL"}
+            if event_id:
+                private["tipoff_event"] = {"id": event_id}
+            return agent._score_economy(public, private, cards, vals)[0]
+
+        self.assertLess(score("ANTI_CORRUPTION"), score(None))
+
+        def work_score(event_id):  # 市级：一张工作离门槛还远，不会被进度封顶吃掉
+            private = {"rank": 2, "merit": 0, "money": 0, "origin": "OFFICIAL"}
+            if event_id:
+                private["tipoff_event"] = {"id": event_id}
+            return agent._score_economy(public, private, [Card.WORK, Card.PROMOTE_MONEY], [6, 0])[0]
+
+        self.assertGreater(work_score("KEY_PROJECT"), work_score(None))
+
+    def test_red_plays_the_family_card_when_it_has_no_promotion_card(self):
+        """够门槛却没摸到晋升卡：红二代 AI 会掏出一纸调令。手里有普通晋升卡时不浪费它。"""
+        game = Game(game_id="red", cfg=CFG, rng=random.Random(2))
+        for name in ("我", "甲", "乙"):
+            game.add_player(name)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        me = game.players[1]
+        me.rank, me.merit, me.money = 1, CFG.merit_cost(1), 0
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(2))
+        game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
+        picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
+        self.assertIn("PROMOTE_FAMILY", picks)
+        game.hands[1] = [DealtCard(card=Card.PROMOTE_MERIT)] + [DealtCard(card=Card.WORK, value=6)] * 5
+        picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
+        self.assertNotIn("PROMOTE_FAMILY", picks)
+        self.assertIn("PROMOTE_MERIT", picks)
+
+    def test_attacks_go_to_the_highest_rank_not_the_hardest_worker(self):
+        """用户原话：基层公务员就算政绩一万也没什么好担心的；省级第一了 AI 还在打我。
+
+        桌上一个政绩堆成山、每轮都在干活的基层，一个省级领跑者——攻击该打省级的。
+        """
+        game = Game(game_id="focus", cfg=CFG, rng=random.Random(1))
+        for name in ("我", "卷王", "省级"):
+            game.add_player(name)
+        game.start_game()
+        me, worker, top = (game.players[i] for i in (1, 2, 3))
+        me.rank, me.merit = 1, 5
+        worker.rank, worker.merit = 0, 9999
+        top.rank, top.merit = CFG.president_rank - 1, 10
+        agent = ai.AgentPool(cfg=CFG, rng=random.Random(1)).get(1)
+        public, private = game.public_state(), game.private_state(1)
+        agent.observe(public, private)
+        for pid in (2, 3):  # 两个人都一直在干活
+            agent.models[pid].work_rounds = agent.models[pid].observed_rounds = 5
+        opp = {o["id"]: o for o in public["players"]}
+        on_worker = agent._score_attack(public, private, opp[2])[0]
+        on_top = agent._score_attack(public, private, opp[3])[0]
+        self.assertGreater(on_top, on_worker, f"打省级 {on_top:.3f} 居然不如打基层 {on_worker:.3f}")
+        self.assertLess(agent._target_focus(public, opp[2]), 0.5)
+        self.assertAlmostEqual(agent._target_focus(public, opp[3]), 1.0)
+
     def test_attacking_a_peasant_is_worth_less(self):
         """贫农免疫穿小鞋，所以"挡住他晋升"那份价值不该算进去。"""
         agent = self._agent()
@@ -194,14 +296,25 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         self.assertEqual(agent._exposed_share(None), 1.0)
         self.assertEqual(agent._exposed_share("RICH"), 1.0)
 
-    def test_a_grinder_values_work_more(self):
+    def test_a_grinder_values_two_works_more(self):
+        """卷王单张和普通人一样；连干两张时 AI 要把 ×4 算进去。"""
         agent = self._agent()
-        self.assertGreater(
-            agent._own_work_merit(0, 0, "GRINDER"), agent._own_work_merit(0, 0, None)
+        self.assertEqual(
+            agent._own_work_merit(6, 2, "GRINDER"), agent._own_work_merit(6, 2, None)
         )
-        self.assertGreater(
-            agent._own_work_merit(10, 2, "GRINDER"), agent._own_work_merit(10, 2, None)
-        )
+        public = {"players": [{"id": 1, "name": "我", "rank": 1, "merit": 0, "tenure": 0},
+                              {"id": 2, "name": "甲", "rank": 1, "merit": 0, "tenure": 0}],
+                  "round": 2, "last_result": None, "picks_per_round": 2, "max_rounds": 12}
+        cards, vals = [Card.WORK, Card.WORK], [6, 4]
+
+        def score(origin):
+            private = {"rank": 1, "merit": 0, "money": 0, "origin": origin}
+            return agent._score_economy(public, private, cards, vals)[0]
+
+        # 进度单位，封顶 1.0（政绩够了门槛之后再多也不算进度）
+        two = (rules.work_merit(6, 1, None, CFG) + rules.work_merit(4, 1, None, CFG)) / CFG.merit_cost(1)
+        k = CFG.origin_grinder_overtime_multiplier
+        self.assertAlmostEqual(score("GRINDER") - score(None), min(1.0, k * two) - two, places=6)
 
     def test_the_master_switch_makes_the_ai_blind_to_origins_too(self):
         """关掉总开关时技能不生效，AI 的估值也得跟着回到原样，
@@ -339,6 +452,33 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         hits = self._targets(["REPORT", "ATTACK"] + ["WORK"] * 4)
         self.assertEqual(hits[("REPORT", "快赢的")], 60)
         self.assertEqual(hits[("ATTACK", "快赢的")], 60)
+
+    def test_rich_uses_the_free_redraw_on_a_weak_hand(self):
+        """富二代换牌不花钱：够门槛却没有晋升卡、或者一张能推进的牌都没有，就换。"""
+        game = Game(game_id="rich", cfg=CFG, rng=random.Random(1))
+        for name in ("我", "甲", "乙"):
+            game.add_player(name)
+        game.players[1].origin = Origin.RICH
+        game.start_game()
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(1))
+        me = game.players[1]
+
+        me.rank, me.merit, me.money = 0, CFG.merit_cost(0), 0
+        game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
+        self.assertTrue(ai.wants_redraw(game, 1, pool), "政绩够了手里却没晋升卡")
+
+        me.merit = 0
+        game.hands[1] = [DealtCard(card=Card.REPORT)] * CFG.hand_size
+        self.assertTrue(ai.wants_redraw(game, 1, pool), "一张生产牌都没有")
+
+        game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
+        self.assertFalse(ai.wants_redraw(game, 1, pool), "手牌正常就别换")
+
+        game.players[2].origin = None
+        me.origin = None
+        me.merit = CFG.merit_cost(0)
+        me.money = 50
+        self.assertFalse(ai.wants_redraw(game, 1, pool), "不是富二代就得花钱，没人要赢时不换")
 
     def test_redraws_when_holding_no_interference_card(self):
         game, ids, pool = self._table(0, ["WORK"] * 6)
@@ -504,9 +644,12 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         self.assertLess(a + r, b)
         _, r_broke, _ = agent._endgame_cover(opp, broke)
         self.assertGreater(r_broke, r, "他得现贪才凑得齐钱，举报单张就该几乎稳拦")
+        # 贫农只挡得住一个人：攻击要靠别人也一起打才管用，把握打折但不是 0
         a_p, r_p, b_p = agent._endgame_cover(dict(opp, origin="PEASANT"), rich)
-        self.assertEqual(a_p, 0.0)
-        self.assertEqual(b_p, r_p, "贫农那条政绩路谁也按不住，两张一起也只多不了")
+        k = agent.w.peasant_second_attacker
+        self.assertAlmostEqual(a_p, k * a)
+        self.assertEqual(r_p, r)
+        self.assertTrue(r_p < b_p < b)
 
     def test_decide_plays_the_top_of_its_own_scores(self):
         """decide 和复盘工具共用 score_combos。零噪声时 decide 挑的必须就是 last_scores

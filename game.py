@@ -51,10 +51,14 @@ class Game:
     salary_paid: dict[int, int] = field(default_factory=dict)
     # 开局的出身红利（富二代的老钱），记下来给流水账用
     origin_bonus: dict[int, int] = field(default_factory=dict)
+    # 红二代「一纸调令」已经用掉的人（每局一次，打出去就算用了，不管成没成）
+    family_used: set[int] = field(default_factory=set)
     # 挑出身阶段每人手上的候选 {玩家id: [出身id, ...]}
     origin_choices: dict[int, list[str]] = field(default_factory=dict)
 
     current_event: GameEvent | None = None
+    # 本轮已经抽好、但还没揭晓的事件。发牌时就抽，只有官二代「透风」能提前看到。
+    next_event: GameEvent | None = None
     last_outcome: RoundOutcome | None = None
     history: list[RoundOutcome] = field(default_factory=list)
     public_log: list[str] = field(default_factory=list)
@@ -165,6 +169,7 @@ class Game:
             p.origin = None
 
         self.origin_bonus = {}
+        self.family_used = set()
         self.origin_choices = {}
         self.phase = Phase.LOBBY
         self.round_number = 0
@@ -172,6 +177,7 @@ class Game:
         self.selections = {pid: Selection() for pid in self.players}
         self.ready.clear()
         self.current_event = None
+        self.next_event = None
         self.last_outcome = None
         self._restored_last_result = None
         self.history.clear()
@@ -260,8 +266,12 @@ class Game:
         # 工资在回合一开始就到账，这样当轮就能拿去换牌
         self.salary_paid = rules.pay_salaries(self.ordered_players(), self.cfg)
         self.hands = {
-            pid: rules.deal_hand(self.rng, self.cfg) for pid in sorted(self.players)
+            pid: rules.deal_hand_for(self.players[pid], self.rng, self.cfg)
+            for pid in sorted(self.players)
         }
+        # 事件在发牌时就抽好（官二代「透风」要在选牌阶段看到），但不写进 current_event：
+        # 公开状态里它仍然是"未揭晓"，直到所有人锁定。
+        self.next_event = rules.pick_event(self.rng, self.cfg)
         self.selections = {pid: Selection() for pid in sorted(self.players)}
         self.phase = Phase.ACTION_SELECTION
 
@@ -298,6 +308,16 @@ class Game:
             else:
                 card, target_id = item
             if index is None and card is None:
+                continue
+
+            # 红二代「一纸调令」不在手牌里，按牌名单独处理
+            if index is None and card is not None and Card(card) is Card.PROMOTE_FAMILY:
+                why = self._family_card_blocker(self.players[player_id])
+                if why:
+                    raise GameError(why)
+                if any(a.card is Card.PROMOTE_FAMILY for a in parsed):
+                    raise GameError("一纸调令一轮只能打一张。")
+                parsed.append(Action(card=Card.PROMOTE_FAMILY, target_id=None, value=0))
                 continue
 
             # 优先按手牌下标定位（同名牌点数可能不同，必须指明是哪一张）；
@@ -349,6 +369,7 @@ class Game:
         底价按**当前官职**算（官越大越贵），而且同一轮里**每换一次就翻倍**：
         1 -> 2 -> 4 -> 8。想换几次换几次，但越换越肉疼——
         没有这条的话，有钱人可以在一轮里反复重抽直到摸出想要的牌。
+        富二代每轮第一次免费（rules.redraw_cost_for）。
         返回这次花掉的钱。
         """
         if self.phase is not Phase.ACTION_SELECTION:
@@ -360,8 +381,8 @@ class Game:
         if sel.locked:
             raise GameError("已经锁定了，不能再换牌。")
         used = self.redraw_count.get(player_id, 0)
-        cost = self.cfg.redraw_cost(player.rank, used)
-        if cost <= 0:
+        cost = rules.redraw_cost_for(player, used, self.cfg)
+        if cost is None:
             raise GameError("你这一级不能换牌。")
         if player.money < cost:
             raise GameError(f"换一手牌要 {cost} 金钱，你不够。")
@@ -369,8 +390,36 @@ class Game:
         self.redraw_spent[player_id] = self.redraw_spent.get(player_id, 0) + cost
         self.redraw_count[player_id] = used + 1
         sel.picks = []
-        self.hands[player_id] = rules.deal_hand(self.rng, self.cfg)
+        self.hands[player_id] = rules.deal_hand_for(player, self.rng, self.cfg)
         return cost
+
+    def _family_card_blocker(self, player: PlayerState) -> str | None:
+        """这个人现在能不能打一纸调令。能打返回 None，否则返回原因。"""
+        if not rules.origin_is(player, "RED", self.cfg):
+            return "只有红二代才有一纸调令。"
+        if player.id in self.family_used:
+            return "一纸调令每局只能用一次，已经用过了。"
+        if player.rank + 1 >= self.cfg.president_rank:
+            return "一纸调令不能用来升国家主席。"
+        return None
+
+    def _family_card_info(self, player: PlayerState) -> dict[str, Any] | None:
+        """给私密状态用：红二代才有，没用过才显示"""
+        if not rules.origin_is(player, "RED", self.cfg) or player.id in self.family_used:
+            return None
+        why = self._family_card_blocker(player)
+        return {"usable": why is None, "why": why or ""}
+
+    def _redraw_info(self, player: PlayerState) -> dict[str, Any]:
+        used = self.redraw_count.get(player.id, 0)
+        cost = rules.redraw_cost_for(player, used, self.cfg)
+        nxt = rules.redraw_cost_for(player, used + 1, self.cfg)
+        return {
+            "redraw_available": cost is not None,
+            "redraw_cost": cost or 0,
+            "redraw_next_cost": nxt or 0,
+            "redraw_affordable": cost is not None and player.money >= cost,
+        }
 
     def lock_action(self, player_id: int) -> None:
         if self.phase is not Phase.ACTION_SELECTION:
@@ -404,7 +453,8 @@ class Game:
             raise GameError("现在不能揭示事件。")
         if not self.all_locked():
             raise GameError("还有玩家没有锁定行动。")
-        self.current_event = rules.pick_event(self.rng, self.cfg)
+        self.current_event = self.next_event or rules.pick_event(self.rng, self.cfg)
+        self.next_event = None
         self.phase = Phase.REVEAL_EVENT
         return self.current_event
 
@@ -418,6 +468,10 @@ class Game:
         actions: dict[int, list[Action]] = {
             pid: sel.as_actions() for pid, sel in self.selections.items()
         }
+        # 一纸调令打出去就算用掉，不管这轮升没升成
+        for pid, acts in actions.items():
+            if any(a.card is Card.PROMOTE_FAMILY for a in acts):
+                self.family_used.add(pid)
 
         outcome = rules.resolve_round(
             players=self.ordered_players(),
@@ -434,6 +488,9 @@ class Game:
         for pid, spent in self.redraw_spent.items():
             if pid in outcome.outcomes:
                 outcome.outcomes[pid].redraw_spent = spent
+        for pid, count in self.redraw_count.items():
+            if pid in outcome.outcomes:
+                outcome.outcomes[pid].redraw_count = count
         self.last_outcome = outcome
         self.history.append(outcome)
         self._accumulate_stats(outcome)
@@ -775,7 +832,19 @@ class Game:
             o = self.last_outcome.outcomes.get(player_id)
             if o is not None:
                 private_result = o.private_view()
+        # 官二代「透风」：选牌阶段就知道本轮事件。只进他自己的私密状态，别人连这个键都没有。
+        tipoff = {}
+        if (
+            self.phase is Phase.ACTION_SELECTION
+            and self.next_event is not None
+            and rules.origin_is(player, "OFFICIAL", self.cfg)
+        ):
+            tipoff = {"tipoff_event": self.next_event.public_view()}
+        family = self._family_card_info(player)
         return {
+            **tipoff,
+            # 红二代「一纸调令」：None = 没有这张卡（不是红二代或者已经用掉）
+            "family_card": family,
             "player_id": player.id,
             "name": player.name,
             "money": player.money,
@@ -812,15 +881,9 @@ class Game:
             "next_promotion": self._next_promotion_info(player),
             "card_preview": self._card_preview(player),
             "warnings": player.warnings,
-            # 下一次换牌的价钱（本轮换过几次就翻几次倍）
-            "redraw_cost": self.cfg.redraw_cost(
-                player.rank, self.redraw_count.get(player_id, 0)
-            ),
-            "redraw_affordable": (
-                self.cfg.redraw_cost(player.rank, self.redraw_count.get(player_id, 0)) > 0
-                and player.money
-                >= self.cfg.redraw_cost(player.rank, self.redraw_count.get(player_id, 0))
-            ),
+            # 下一次换牌的价钱（本轮换过几次就翻几次倍；富二代第一次是 0）
+            # 和再下一次的价钱（确认框里提示用）。这一级不能换牌时 available=False。
+            **self._redraw_info(player),
             "redraws_used_this_round": self.redraw_count.get(player_id, 0),
             "redraw_spent_this_round": self.redraw_spent.get(player_id, 0),
             "ledger": self.ledger.get(player_id, []) + self._pending_ledger(player_id),
@@ -878,8 +941,14 @@ class Game:
                 gaps.append(f"金钱还差 {mc - player.money}")
             return {"usable": bool(ok_merit or ok_money), "why": "、".join(gaps)}
 
+        grinder = rules.origin_is(player, "GRINDER", cfg)
         return {
-            "WORK": {"merit_lo": work_lo, "merit_hi": work_hi},
+            "WORK": {
+                "merit_lo": work_lo,
+                "merit_hi": work_hi,
+                # 卷王「加班」：同一轮打两张，这两张的政绩最后 ×几（不是卷王就是 0）
+                "overtime": cfg.origin_grinder_overtime_multiplier if grinder else 0,
+            },
             "CORRUPT": {
                 "money_lo": corrupt_lo,
                 "money_hi": corrupt_hi,
@@ -936,6 +1005,9 @@ class Game:
             "round_number": self.round_number,
             "next_player_id": self._next_player_id,
             "current_event_id": self.current_event.id if self.current_event else None,
+            # 已经抽好还没揭晓的事件。不存的话重启后会重抽，官二代刚听到的风声就变了
+            "next_event_id": self.next_event.id if self.next_event else None,
+            "family_used": sorted(self.family_used),
             "winners": list(self.winners),
             "game_over_reason": self.game_over_reason,
             "reveal": self.full_reveal(),
@@ -1052,6 +1124,10 @@ class Game:
         event_id = data.get("current_event_id")
         if event_id:
             game.current_event = rules.event_by_id(event_id, cfg)
+        game.family_used = {int(pid) for pid in (data.get("family_used") or [])}
+        next_id = data.get("next_event_id")
+        if next_id:
+            game.next_event = rules.event_by_id(next_id, cfg)
 
         # 结算中途崩溃时，把阶段退回到可以继续操作的地方
         if game.phase in (Phase.RESOLUTION,):

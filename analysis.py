@@ -292,7 +292,8 @@ def _smart_factory(**flags):
         pool = ai.AgentPool(cfg=cfg, rng=rng, **flags)
 
         def strategy(game, me, hand, others, _rng):
-            return ai.choose(game, me.id, pool)
+            # 和服务器一样走 ai.turn：该换牌就先换（含富二代的免费换牌）
+            return ai.turn(game, me.id, pool)
 
         return strategy
 
@@ -377,13 +378,19 @@ class Record:
     report_shots: list[dict[str, Any]] = field(default_factory=list)
     # 每轮每个被举报者被几个真人同时举报（用来看撞车摊薄）
     report_crowding: Counter = field(default_factory=Counter)
+    # 每个座位的出身（--origins melee 时才有）
+    origin_of: dict[int, str | None] = field(default_factory=dict)
 
 
 def play(n_players: int, rng: random.Random, cfg: Config, assign: list[Strategy],
-         names: list[str] | None = None) -> Record:
+         names: list[str] | None = None,
+         origins: list[str | None] | None = None) -> Record:
     game = Game(game_id="analysis", cfg=cfg, rng=rng)
     for i in range(n_players):
         game.add_player(f"P{i + 1}")
+    if origins:
+        for pid, oid in zip(sorted(game.players), origins):
+            game.players[pid].origin = Origin(oid) if oid else None
 
     rec = Record(n_players=n_players, rounds=0, winners=[], ended_by_president=False)
     rec.cards = {pid: Counter() for pid in game.players}
@@ -392,14 +399,18 @@ def play(n_players: int, rng: random.Random, cfg: Config, assign: list[Strategy]
     rec.diag = {pid: Counter() for pid in game.players}
     if names:
         rec.strategy_of = {pid: names[i] for i, pid in enumerate(sorted(game.players))}
+    rec.origin_of = {
+        pid: (game.players[pid].origin.value if game.players[pid].origin else None)
+        for pid in game.players
+    }
 
     game.start_game()
     while not game.is_over:
         pending_reports: list[dict[str, Any]] = []
         for i, pid in enumerate(sorted(game.players)):
             me = game.players[pid]
-            hand = game.hands[pid]
-            picks = assign[i](game, me, hand, _others(game, pid), rng) or []
+            picks = assign[i](game, me, game.hands[pid], _others(game, pid), rng) or []
+            hand = game.hands[pid]  # 策略里可能换过牌，统计要看最后打的那一手
             for c in {d.card for d in hand}:
                 rec.offered[c.value] += 1
 
@@ -608,6 +619,9 @@ def analyse_leadership(records: list[Record], cfg: Config) -> dict[str, Any]:
     n_winners = [len(r.winners) for r in records]
     return {
         "games": total,
+        "president_pct": pct(sum(1 for r in records if r.ended_by_president), total),
+        "avg_rounds": round(statistics.fmean(r.rounds for r in records), 2),
+        "end_round_hist": dict(sorted(Counter(r.rounds for r in records).items())),
         "avg_winners_per_game": round(statistics.fmean(n_winners), 3),
         "co_winner_games_pct": pct(sum(1 for n in n_winners if n > 1), total),
         "co_winner_hist": dict(sorted(Counter(n_winners).items())),
@@ -951,6 +965,50 @@ def analyse_event_swings(records: list[Record], cfg: Config) -> dict[str, Any]:
     return out
 
 
+def analyse_origin_results(records: list[Record], cfg: Config) -> dict[str, Any]:
+    """--origins melee：同一批对局里每个出身的战绩。
+
+    胜率按"并列冠军 1/人数"折算；垫底率看最后一名；被瞄准看攻击/举报落在谁身上。
+    """
+    seats: Counter = Counter()
+    wins: defaultdict = defaultdict(float)
+    pres_wins: defaultdict = defaultdict(float)
+    last: Counter = Counter()
+    place_sum: Counter = Counter()
+    promos: Counter = Counter()
+    targeted: Counter = Counter()
+    for rec in records:
+        if not rec.origin_of:
+            continue
+        order = final_standing(rec, cfg)
+        for place, pid in enumerate(order, start=1):
+            oid = rec.origin_of.get(pid) or "NONE"
+            seats[oid] += 1
+            place_sum[oid] += place
+            promos[oid] += sum(1 for r in rec.reached_rank.get(pid, {}) if r > 0)
+            targeted[oid] += rec.targeted.get(pid, 0)
+            if pid in rec.winners:
+                wins[oid] += 1.0 / len(rec.winners)
+                if rec.ended_by_president:
+                    pres_wins[oid] += 1.0 / len(rec.winners)
+        last[rec.origin_of.get(order[-1]) or "NONE"] += 1
+    out: dict[str, Any] = {}
+    for oid in sorted(seats, key=lambda o: -wins[o] / seats[o]):
+        n = seats[oid]
+        p = wins[oid] / n
+        out[oid] = {
+            "seats": n,
+            "win_pct": round(100 * p, 2),
+            "ci_half_width": round(100 * 1.96 * math.sqrt(p * (1 - p) / n), 2),
+            "president_win_pct": round(100 * pres_wins[oid] / n, 2),
+            "last_place_pct": round(100 * last[oid] / n, 2),
+            "avg_place": round(place_sum[oid] / n, 2),
+            "avg_promotions": round(promos[oid] / n, 2),
+            "targeted_per_game": round(targeted[oid] / n, 2),
+        }
+    return out
+
+
 def final_standing(rec: Record, cfg: Config) -> list[int]:
     """按真正的胜负口径排名（FINAL_RANKING_KEYS，默认 官职 > 金钱 > 政绩），赢家排最前。"""
     snap = rec.timeline[-1]
@@ -1210,7 +1268,7 @@ def _ablation_once(
         game.start_game()
         while not game.is_over:
             for pid in sorted(game.players):
-                game.select_actions(pid, ai.choose(game, pid, pools[role[pid]]))
+                game.select_actions(pid, ai.turn(game, pid, pools[role[pid]]))
                 game.lock_action(pid)
             game.reveal_event()
             game.resolve()
@@ -1328,7 +1386,7 @@ def analyse_origins(
         while not game.is_over:
             ranks_before = {p.id: p.rank for p in game.players.values()}
             for pid in sorted(game.players):
-                game.select_actions(pid, ai.choose(game, pid, pool))
+                game.select_actions(pid, ai.turn(game, pid, pool))
                 game.lock_action(pid)
             game.reveal_event()
             res = game.resolve()
@@ -1401,18 +1459,17 @@ def _origin_fired(origin_id, outcome, player, rank_before) -> int:
     if not origin_id:
         return 0
     if origin_id == "RICH":
-        # 老钱是开局一次性的，不在逐轮结算里体现，所以这张的"触发率"
-        # 没有意义（恒为 1 次/局）。打印时会显示成 "—"，不要读成"没触发"。
-        return 0
+        # 开局那笔钱一次性、看不出来；这里数的是"每轮一次免费换牌"用了没有
+        return 1 if outcome.redraw_count else 0
     if origin_id == "ACCOUNTANT":
         return 1 if outcome.laundered and outcome.report_effective else 0
     if origin_id == "RED":
-        return 1 if outcome.origin_shielded_demotion else 0
+        return 1 if (outcome.origin_shielded_demotion or outcome.family_promotion) else 0
     if origin_id == "PEASANT":
         # 挨了打、而且这一轮确实在走政绩升职 —— 换成别人就被拦下了
         return 1 if (outcome.attacked and outcome.promotion.value == "MERIT") else 0
     if origin_id == "GRINDER":
-        return 1 if outcome.merit_gained else 0
+        return 1 if outcome.overtime_merit else 0  # 真的连干两张、加了班才算
     if origin_id == "OFFICIAL":
         return 1 if outcome.promotion_merit_cost else 0
     return 0
@@ -1439,7 +1496,7 @@ def analyse_funnel(
         game.start_game()
         while not game.is_over:
             for pid in sorted(game.players):
-                game.select_actions(pid, ai.choose(game, pid, pool))
+                game.select_actions(pid, ai.turn(game, pid, pool))
                 game.lock_action(pid)
             game.reveal_event()
             outcome = game.resolve()
@@ -1700,6 +1757,11 @@ def main(argv: list[str] | None = None) -> int:
         help="第 1~3 节用谁来打：random（完全随机）或 smart（思考型 AI），"
              "也可以是任意策略名",
     )
+    ap.add_argument(
+        "--origins", choices=("none", "melee"), default="none",
+        help="第 1~5 节对局要不要带出身。melee = 每局把所有出身随机发给各座位"
+             "（6 人桌正好六张各一），并多出一节「身份战绩」",
+    )
     ap.add_argument("--examples", type=int, default=5,
                     help="死因分析要打印几局具体例子")
     ap.add_argument("--json", action="store_true")
@@ -1732,10 +1794,22 @@ def main(argv: list[str] | None = None) -> int:
     if need_games:
         rng = random.Random(args.seed)
         names = [args.agents] * args.players
+        origin_ids = cfg.origin_ids() if args.origins == "melee" else []
+
+        def deal_origins() -> list[str | None] | None:
+            if not origin_ids:
+                return None
+            pool = list(origin_ids)
+            rng.shuffle(pool)
+            return [pool[i % len(pool)] for i in range(args.players)]
+
         records = [
-            play(args.players, rng, cfg, build_assignment(names, cfg, rng))
+            play(args.players, rng, cfg, build_assignment(names, cfg, rng),
+                 origins=deal_origins())
             for _ in range(args.games)
         ]
+        if origin_ids:
+            out["origin_results"] = analyse_origin_results(records, cfg)
 
     if FULL or args.section == "leader":
         out["leadership"] = analyse_leadership(records, cfg)
@@ -1834,9 +1908,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"  注：{which} 这几节固定用思考型 AI 对局，不受 --agents 影响")
 
+    if "origin_results" in out:
+        d = out["origin_results"]
+        h("0. 身份战绩（同一批对局，每局六个出身随机发给六个座位）")
+        print(f"  公平线 {100 / max(1, args.players):.2f}%；胜率按并列冠军 1/人数折算")
+        print(f"  {'出身':<18}{'胜率':>8}{'±95%':>7}{'当主席赢':>9}{'垫底率':>8}"
+              f"{'平均名次':>9}{'晋升次数':>9}{'被瞄准/局':>10}")
+        for oid, r in d.items():
+            name = (cfg.origin(oid) or {"name": "无出身"})["name"]
+            print(f"  {name:<18}{r['win_pct']:>7.2f}%{r['ci_half_width']:>6.2f}"
+                  f"{r['president_win_pct']:>8.2f}%{r['last_place_pct']:>7.2f}%"
+                  f"{r['avg_place']:>9.2f}{r['avg_promotions']:>9.2f}{r['targeted_per_game']:>10.2f}")
+        rates = [r["win_pct"] for r in d.values()]
+        print(f"\n  最强 vs 最弱差 {max(rates) - min(rates):.2f} 个点")
+
     if "leadership" in out:
         d = out["leadership"]
         h("1. 领先权的易手频率")
+        print(f"节奏: 主席率 {d['president_pct']}%，平均 {d['avg_rounds']} 轮结束，"
+              f"打满 {cfg.max_rounds} 轮 {100 - d['president_pct']:.2f}%")
+        print("结束轮次: " + "  ".join(
+            f"{k}:{pct(v, args.games):.0f}%" for k, v in d["end_round_hist"].items()))
         print(f"每局冠军人数: 平均 {d['avg_winners_per_game']}，"
               f"出现并列冠军的对局 {d['co_winner_games_pct']}%  {d['co_winner_hist']}")
         print(f"每局领先者易手次数（官职口径）: {d['lead_changes_rank_avg']}")
@@ -2038,14 +2130,11 @@ def main(argv: list[str] | None = None) -> int:
                 lo = r["delta"] - r["ci_half_width"]
                 hi = r["delta"] + r["ci_half_width"]
                 wr = f"{r['avg_win_round']:.1f}" if r["avg_win_round"] else "—"
-                # 老钱是开局一次性的，逐轮结算里看不到，触发率对它没意义
-                fr = "—" if oid == "RICH" else f"{r['fires_per_game']}"
+                fr = f"{r['fires_per_game']}"
                 print(f"    {info['name']:<20}{fr:>9}"
                       f"{r['win_pct']:>9.2f}%{r['others_pct']:>7.2f}%"
                       f"{r['delta']:>+8.2f}   [{lo:+.2f}, {hi:+.2f}]{wr:>10}")
-            fires = [
-                r["fires_per_game"] for oid, r in d["solo"].items() if oid != "RICH"
-            ]
+            fires = [r["fires_per_game"] for r in d["solo"].values()]
             if min(fires) < 0.1:
                 print("\n    注：触发率接近 0 的那几张，胜率差一定是噪声，别去解读它。")
 

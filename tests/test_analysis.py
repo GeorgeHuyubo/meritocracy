@@ -231,5 +231,23 @@ class TestEverySectionActuallyRuns(unittest.TestCase):
                 )
 
 
+class TestOriginsMelee(unittest.TestCase):
+    def test_every_seat_gets_an_origin_and_results_add_up(self):
+        """--origins melee：每局六个出身各一，胜率份额加起来 100%。"""
+        import contextlib
+        import io
+        import json
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            analysis.main(["--section", "leader", "--agents", "smart", "--origins", "melee",
+                           "--games", "12", "--players", "6", "--seed", "1", "--json"])
+        d = json.loads(out.getvalue())
+        res = d["origin_results"]
+        self.assertEqual(set(res), set(DEFAULT_CONFIG.origin_ids()))
+        self.assertTrue(all(r["seats"] == 12 for r in res.values()))
+        self.assertAlmostEqual(sum(r["win_pct"] for r in res.values()), 100.0, delta=0.1)
+        self.assertIn("president_pct", d["leadership"])
+
+
 if __name__ == "__main__":
     unittest.main()

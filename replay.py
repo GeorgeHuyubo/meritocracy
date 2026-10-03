@@ -109,6 +109,9 @@ def _to_index_picks(hand: list[DealtCard], picks: list[dict[str, Any]]) -> list[
     out = []
     for p in picks:
         card = Card(p["card"])
+        if card is Card.PROMOTE_FAMILY:  # 一纸调令不在手牌里
+            out.append({"action": card.value, "target": None})
+            continue
         value = p.get("value")
         idx = next(
             (i for i, d in enumerate(hand)
@@ -173,6 +176,8 @@ def replay(
                         game.players[pid].money += row["money"]
                         game.redraw_spent[pid] = game.redraw_spent.get(pid, 0) - row["money"]
 
+        # 官二代「透风」看到的是本轮真实发生的那个事件，复盘时得和当时一样
+        game.next_event = rules.event_by_id(history["events"][rnd], cfg)
         pub = game.public_state()
         for pid in ai_ids:
             agent = pool.get(pid)

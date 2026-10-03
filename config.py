@@ -65,8 +65,14 @@ MONEY_RANK_MULTIPLIERS: list[Fraction] | None = None
 #
 # 之前的 [16,30,49,51] 是按别的思路定的，门槛按 ×1/1.9/3.1/3.2 增长，
 # 而收益只按官职倍率 ×1/1.5/2/2.5 增长——越往上越够不着，市级时一笔只够 61%。
+#
+# 政绩门槛后来也照这个思路锚定：**3 张本级埋头工作升一级** = 3 × 6 × 官职倍率
+# = 18 / 27 / 36 / 45。规则因此一句话说完：**贪一笔，或者干三张，都是升一级。**
+# （上面 ×1.6 / ×0.8 / ×0.65 那串缩放是老口径，留着当历史。那套算出来的
+#   15 / 27 / 43 / 43 折成张数是 2.5 / 3.0 / 3.6 / 2.9 张——市级最难，
+#   所有走政绩的人都卡在那一级。新旧全程合计 128 -> 126，整体节奏不变，只是摊平。）
 PROMOTION_MONEY_COSTS: list[int] = [15, 22, 30, 37]
-PROMOTION_MERIT_COSTS: list[int] = [15, 27, 43, 43]
+PROMOTION_MERIT_COSTS: list[int] = [18, 27, 36, 45]
 
 # 晋升必须打出晋升卡（工龄晋升除外）。
 # False = 回到规则书原版：资源够了自动晋升。
@@ -354,6 +360,10 @@ WARNINGS_BEFORE_DEMOTION: int = 2
 # 附带好处：True 完整保住了升职的克制矩阵（贿赂升职 <- 举报）。
 REPORT_CATCHES_BRIBERY: bool = True
 
+# 买官被举报查实时，行贿的钱打水漂多少（其余退回本人）。1 = 全部打水漂。
+# 打水漂的那部分照样并进分赃池。AI 估买官风险时按这个比例算损失。
+BRIBE_FORFEIT_RATIO: Fraction = Fraction(1)
+
 # 一次"重大贪腐"（本轮贪污额 >= MAJOR_CORRUPTION_THRESHOLD）记几次警告。
 # 默认 1 = 和普通查实一样，大案不再有额外后果。
 # 设成 2 就恢复"贪一大笔被抓当场降级"。
@@ -503,7 +513,7 @@ EVENT_STORM_FRACTION: Fraction = Fraction(1, 3)
 # "他还差多远"，终局那道"有人下一步就夺冠"的刹车会失灵——这个 bug 刚踩过一次。
 # 而且出身本来就是官场上人人都知道的事。
 #
-# 结构：三个"二代" + 贫农 + 两个小镇做题家。前四张靠投胎，后两张没背景、
+# 结构：三个"二代" + 贫农 + 卷王 + 小镇做题家·会计。前四张靠投胎，后两张没背景、
 # 只能靠一门手艺。
 
 ORIGINS_ENABLED: bool = True  # 总开关。关掉 = 所有人都没有出身，用于平衡对照
@@ -512,23 +522,39 @@ ORIGIN_CHOICES_OFFERED: int = 3  # 每人随机发几个候选。**放回抽样*
 # ---- 各技能的数值旋钮 ----
 
 # 富二代「老钱」：开局白送多少钱。
-# 15 是基层的金钱门槛，所以 10 约等于开局送 2/3 级。这张牌**前重后轻**：
-# 到省级门槛 37 的时候，这 10 块就不值钱了。
-ORIGIN_OLD_MONEY_START: int = 10
+# 15 正好是基层的金钱门槛 = 开局送一级的钱（以前是 10，3000 局混战垫底 14.67%）。
+# 光送钱**前重后轻**：到省级门槛 37 的时候，这笔钱就不值钱了，所以再配一个
+# 贯穿全局的 ORIGIN_RICH_FREE_REDRAWS。
+ORIGIN_OLD_MONEY_START: int = 15
+
+# 富二代：每轮前几次换牌免费。之后从**底价**开始正常翻倍（0 -> 1 -> 2 -> 4），
+# 不是跳过底价接着翻（0 -> 2 -> 4）——"第二次才像别人一样开始花钱"。
+ORIGIN_RICH_FREE_REDRAWS: int = 1
 
 # 官二代「提携」：政绩门槛打几折。2/3 把 15/27/43 压成 10/18/29。
 # 只打政绩那一侧，金钱门槛不动——两边都打折就太强了。
 #
-# 4/5（12/22/35）那一版测出来 +2.82 [+1.31, +4.34]，和技术员打平、垫底。
-# 更要命的是**存在感**：技术员每局响 5.1 次、每张工作牌面上都写着 +8，
+# 4/5（12/22/35）那一版测出来 +2.82 [+1.31, +4.34]，和卷王打平、垫底。
+# 更要命的是**存在感**：卷王每局响 5.1 次、每张工作牌面上都写着 +8，
 # 官二代响 1.21 次，还是个要自己去对门槛表才看得出来的折扣。
 # 加深到 2/3 之后基层少一张工作牌、省级少两张多，够明显了。
 ORIGIN_PATRONAGE_MERIT_RATIO: Fraction = Fraction(2, 3)
 
-# 小镇做题家·技术员「卷王」：WORK 的基础点数加几点（在官职倍率之前）。
-# WORK 期望是 6，+2 等于 +33%。这张故意做成纯数值零机制，当**基准锚**——
-# 其他五张的强弱都拿它来比。
-ORIGIN_GRINDER_WORK_BONUS: int = 2
+# 卷王「加班」：埋头工作的牌和普通人一样；同一轮打出两张埋头工作时，
+# **这两张的政绩最后 ×这个数**（在政治攻击之后乘：抢功只抢得到乘之前的那份）。
+# 期望：两张 12 牌面点 × 倍率 × 4 = 48 / 72 / 96 / 120，对政绩门槛 18 / 27 / 36 / 45。
+# 多出门槛的部分升官时会被 ÷5 吃掉，实际效果是"下一轮的升职稳了，挨了抢也稳"。
+# 加班费：同样按这个倍数拿工资（基层 4 / 县级 8 / 市级 16 / 省级 24），合法收入。
+# 不给钱的话卷王政绩一大堆、钱一分没有，卡在省级（主席那一步要 37 块）——
+# 3000 局混战胜率掉到 6.80%，垫底率 23.6%。
+# 手里要有两张埋头工作才触发——不保底的话只有约 37% 的轮次能触发，所以配了下面的发牌保底。
+# 历史：每张 +2（3000 局混战 15.12%）-> 补到门槛（基层补 0，像没有技能）
+# -> 再算一张 max(A, B)（10.40%，最弱）-> ×4。
+ORIGIN_GRINDER_OVERTIME_MULTIPLIER: int = 4
+
+# 卷王发牌保底：每手至少几张埋头工作。先照常随机发满，不够才把缺的那几张非工作牌换掉
+# （rules.deal_hand_for）。不保底的话手里有两张工作的轮次只有约 37%，加班很难触发。
+ORIGIN_GRINDER_MIN_WORK: int = 2
 
 # 小镇做题家·会计「做账」：脏钱里有多大比例记成合法收入。
 #
@@ -544,34 +570,48 @@ ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
         "id": "RICH",
         "name": "富二代",
         "skill": "老钱",
-        "description": f"开局白拿 {ORIGIN_OLD_MONEY_START} 金钱。",
+        "description": (
+            f"开局白拿 {ORIGIN_OLD_MONEY_START} 金钱；每轮第一次换牌免费，"
+            "再换才像别人一样从底价开始花钱。"
+        ),
     },
     {
         "id": "OFFICIAL",
         "name": "官二代",
-        "skill": "提携",
+        "skill": "提携 · 透风",
         "description": "有人提拔：每一级的政绩门槛只要别人的 2/3"
                        f"（{PROMOTION_MERIT_COSTS[0]} 点的那一级，他只要 "
-                       f"{-(-PROMOTION_MERIT_COSTS[0] * 2 // 3)} 点）。",
+                       f"{-(-PROMOTION_MERIT_COSTS[0] * 2 // 3)} 点）；"
+                       "家里有人透风：选牌时就知道本轮的全局事件，别人要等所有人锁定才揭晓。",
     },
     {
         "id": "RED",
         "name": "红二代",
-        "skill": "硬保",
+        "skill": "硬保 · 一纸调令",
         "description": f"上头有人：降职警告照记、赃款照抄，但官职动不了——"
-                       f"攒满 {WARNINGS_BEFORE_DEMOTION} 次也降不下来。",
+                       f"攒满 {WARNINGS_BEFORE_DEMOTION} 次也降不下来；"
+                       "另有一张每局一次的「一纸调令」（占一个出牌位）：政绩优先、其次金钱，"
+                       "攻击和举报都拦不住，不能用来升主席，打出去不管成没成都算用掉"
+                       "（用钱升的那笔照样算行贿，举报查实记警告，只是官不撤）。",
     },
     {
         "id": "PEASANT",
         "name": "贫农",
         "skill": "政治正确",
-        "description": "成分过硬，别人放黑料挡不住你——政治攻击不能让你的政绩升职暂缓。",
+        "description": (
+            "成分过硬，一个人放黑料挡不住你——只有一个人政治攻击你时，"
+            "你的政绩升职不会被暂缓；两个人以上一起攻击就躲不过。"
+        ),
     },
     {
         "id": "GRINDER",
-        "name": "小镇做题家·技术员",
-        "skill": "卷王",
-        "description": f"没背景就靠干活：埋头工作的点数 +{ORIGIN_GRINDER_WORK_BONUS}。",
+        "name": "卷王",
+        "skill": "加班",
+        "description": (
+            f"没背景就靠加班：同一轮打出两张埋头工作，这两张的政绩最后 ×{ORIGIN_GRINDER_OVERTIME_MULTIPLIER}，"
+            f"再拿 {ORIGIN_GRINDER_OVERTIME_MULTIPLIER} 倍工资的加班费（合法收入）；"
+            f"发牌保底至少 {ORIGIN_GRINDER_MIN_WORK} 张埋头工作（不够才补，不会多发）。"
+        ),
     },
     {
         "id": "ACCOUNTANT",
@@ -680,6 +720,7 @@ class Config:
     report_reward_major_takes_all: bool = REPORT_REWARD_MAJOR_TAKES_ALL
     report_reward_split_evenly: bool = REPORT_REWARD_SPLIT_EVENLY
     report_reward_ratio: Fraction = REPORT_REWARD_RATIO
+    bribe_forfeit_ratio: Fraction = BRIBE_FORFEIT_RATIO
 
     event_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(e) for e in EVENT_DEFINITIONS]
@@ -695,8 +736,10 @@ class Config:
     origins_enabled: bool = ORIGINS_ENABLED
     origin_choices_offered: int = ORIGIN_CHOICES_OFFERED
     origin_old_money_start: int = ORIGIN_OLD_MONEY_START
+    origin_rich_free_redraws: int = ORIGIN_RICH_FREE_REDRAWS
+    origin_grinder_overtime_multiplier: int = ORIGIN_GRINDER_OVERTIME_MULTIPLIER
+    origin_grinder_min_work: int = ORIGIN_GRINDER_MIN_WORK
     origin_patronage_merit_ratio: Fraction = ORIGIN_PATRONAGE_MERIT_RATIO
-    origin_grinder_work_bonus: int = ORIGIN_GRINDER_WORK_BONUS
     origin_accountant_launder_ratio: Fraction = ORIGIN_ACCOUNTANT_LAUNDER_RATIO
     origin_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(o) for o in ORIGIN_DEFINITIONS]

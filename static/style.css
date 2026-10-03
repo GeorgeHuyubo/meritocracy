@@ -397,3 +397,9 @@ details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
   font-size: .78em;
   white-space: nowrap;
 }
+
+/* 官二代「透风」：选牌时看到的本轮事件 */
+.hintline.tipoff { color: var(--gold); background: var(--panel2); border-radius: 6px; padding: 6px 8px; }
+
+/* 红二代「一纸调令」：摆在手牌后面的那张特殊牌 */
+.card.family { border: 1px dashed var(--gold); }

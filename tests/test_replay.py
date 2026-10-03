@@ -17,6 +17,7 @@ import analysis  # noqa: E402
 import replay  # noqa: E402
 from config import DEFAULT_CONFIG  # noqa: E402
 from game import Game  # noqa: E402
+from models import Origin  # noqa: E402
 from storage import GameStore  # noqa: E402
 
 CFG = DEFAULT_CONFIG
@@ -27,23 +28,22 @@ def play_like_the_server(store: GameStore, seed: int, human_redraws: bool = True
     """照 server.py 的流程打一局：1 个真人（脚本出牌）+ 2 个 AI，每一步都存库。
 
     AI 的 rng 用固定 seed，复盘时传同一个 seed 就该逐位复现。
-    真人每轮付得起就换一次牌，顺带覆盖"换牌扣钱"那条路。
+    真人每轮付得起就换一次牌，顺带覆盖"换牌扣钱"那条路；
+    老张是富二代，覆盖"免费换牌"（库里存的是换完那手，不花钱、流水账里也没有）。
     """
     game = Game(game_id=f"g{seed}", cfg=CFG, rng=random.Random(seed))
     game.add_player("真人")
     game.add_player("老张", is_ai=True)
     game.add_player("老李", is_ai=True)
+    game.players[2].origin = Origin.RICH
+    game.players[3].origin = Origin.OFFICIAL  # 官二代 AI 会用到「透风」，复盘时也得一样
     game.start_game()
     store.save(game)
     pool = ai.AgentPool(cfg=CFG, rng=random.Random(AI_SEED))
     human_rng = random.Random(seed + 100)
     while not game.is_over:
         for pid in game.ai_player_ids():
-            for _ in range(ai.MAX_PANIC_REDRAWS):
-                if not ai.wants_redraw(game, pid, pool):
-                    break
-                game.redraw(pid)
-            game.select_actions(pid, ai.choose(game, pid, pool))
+            game.select_actions(pid, ai.turn(game, pid, pool))
             game.lock_action(pid)
             store.save(game)
         human = 1
@@ -104,20 +104,21 @@ class TestReplay(unittest.TestCase):
         self.assertEqual(res.drifts, [])
 
     def test_override_changes_the_outcome(self):
-        """反事实：把某人升职那一轮的出牌换成什么都不打，他就升不上去。"""
+        """反事实：把某人靠牌升职那一轮的出牌换成什么都不打，那次升职就没了。"""
         game = play_like_the_server(self.store, seed=5)
         history = self.store.history(game.game_id)
         promoted = next(
             (r["round"], p["player_id"])
             for r in history["archive"]
             for p in r["players"]
-            if p["promotion"] != "NONE"
+            if p["promotion"] in ("MERIT", "MONEY", "BOTH")  # 工龄晋升不靠牌，换了也拦不住
         )
         res = replay.replay(history, CFG, overrides={promoted: []})
         self.assertTrue(res.overridden)
         self.assertEqual(res.final["round"], promoted[0])
         name = history["players"][promoted[1] - 1]["name"]
-        self.assertEqual(res.final["players"][name]["promotion"], "NONE")
+        # 靠牌的那次升职没了（同一轮工龄刚好到了的话，可能改成工龄晋升）
+        self.assertNotIn(res.final["players"][name]["promotion"], ("MERIT", "MONEY", "BOTH"))
 
     def test_only_requested_rounds_are_recorded(self):
         game = play_like_the_server(self.store, seed=5)

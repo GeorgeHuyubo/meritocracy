@@ -25,6 +25,8 @@ class Card(str, Enum):
     PROMOTE_MERIT = "PROMOTE_MERIT"  # 政绩升职
     PROMOTE_MONEY = "PROMOTE_MONEY"  # 贿赂升职
     PROMOTE_ANY = "PROMOTE_ANY"  # 通用升职：政绩或金钱，哪条够走哪条
+    # 红二代「一纸调令」：每局一次、不在牌库里。政绩优先其次金钱，攻击举报都拦不住，不能升主席
+    PROMOTE_FAMILY = "PROMOTE_FAMILY"
 
     @property
     def needs_target(self) -> bool:
@@ -32,7 +34,9 @@ class Card(str, Enum):
 
     @property
     def is_promotion(self) -> bool:
-        return self in (Card.PROMOTE_MERIT, Card.PROMOTE_MONEY, Card.PROMOTE_ANY)
+        return self in (
+            Card.PROMOTE_MERIT, Card.PROMOTE_MONEY, Card.PROMOTE_ANY, Card.PROMOTE_FAMILY
+        )
 
     @property
     def is_production(self) -> bool:
@@ -45,11 +49,11 @@ class Card(str, Enum):
 
     @property
     def can_use_merit(self) -> bool:
-        return self in (Card.PROMOTE_MERIT, Card.PROMOTE_ANY)
+        return self in (Card.PROMOTE_MERIT, Card.PROMOTE_ANY, Card.PROMOTE_FAMILY)
 
     @property
     def can_use_money(self) -> bool:
-        return self in (Card.PROMOTE_MONEY, Card.PROMOTE_ANY)
+        return self in (Card.PROMOTE_MONEY, Card.PROMOTE_ANY, Card.PROMOTE_FAMILY)
 
 
 class Origin(str, Enum):
@@ -63,7 +67,7 @@ class Origin(str, Enum):
     OFFICIAL = "OFFICIAL"  # 官二代 · 提携
     RED = "RED"  # 红二代 · 开后门
     PEASANT = "PEASANT"  # 贫农 · 政治正确
-    GRINDER = "GRINDER"  # 小镇做题家·技术员 · 卷王
+    GRINDER = "GRINDER"  # 卷王 · 加班
     ACCOUNTANT = "ACCOUNTANT"  # 小镇做题家·会计 · 做账
 
 
@@ -244,6 +248,13 @@ class PlayerRoundOutcome:
     warnings_after: int = 0  # 记完之后累计几次（降级后已清空）
     promotion_merit_decay: int = 0  # 晋升后政绩打折掉的量（贿赂升/熬工龄也有）
     redraw_spent: int = 0  # 本轮花在重新抽牌上的钱
+    redraw_count: int = 0  # 本轮换了几次牌（富二代免费的那次也算，花 0 元）
+    # 红二代「一纸调令」：这一轮用了家族升职卡并且升上去了；用钱升的话花了多少（算行贿）
+    family_promotion: bool = False
+    family_bribe: int = 0
+    attacker_count: int = 0  # 本轮有几个不同的人攻击他（不管公不公开署名都记）
+    overtime_merit: int = 0  # 卷王「加班」×倍数多出来的政绩（已含在 merit_gained 里）
+    overtime_pay: int = 0  # 卷王「加班费」：几倍工资，合法收入
     demotion: DemotionKind = DemotionKind.NONE
     money_confiscated: int = 0  # 被举报/被攻击起获而没收的赃款
     hush_money_paid: int = 0  # 被攻击后为压事花掉的打点费
@@ -297,8 +308,10 @@ class PlayerRoundOutcome:
                 rows.append({"label": label, "money": money, "merit": merit})
 
         add("合法工资", money=self.salary)
+        add("加班费", money=self.overtime_pay)
         if self.merit_gained:
-            add("干活所得", merit=self.merit_gained)
+            add("干活所得", merit=self.merit_gained - self.overtime_merit)
+        add("加班：两张工作翻倍多出来的", merit=self.overtime_merit)
         if self.money_gained:
             add("贪污进账", money=self.money_gained)
         if self.merit_from_attacks:
@@ -368,7 +381,11 @@ class PlayerRoundOutcome:
             "targets": list(self.targets),
             "base_values": list(self.base_values),
             "salary": self.salary,
+            "redraw_spent": self.redraw_spent,
             "merit_gained": self.merit_gained,
+            # 卷王「加班」多算那张的政绩（已含在 merit_gained 里，结算页单独列一行）
+            "overtime_merit": self.overtime_merit,
+            "overtime_pay": self.overtime_pay,
             "money_gained": self.money_gained,
             "corrupt_amount": self.corrupt_amount,
             "attacked": self.attacked,

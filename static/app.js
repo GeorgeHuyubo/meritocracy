@@ -14,7 +14,12 @@ const CARD_INFO = {
   PROMOTE_MERIT: { cn: "政绩升职", desc: "花政绩升官", target: false },
   PROMOTE_MONEY: { cn: "贿赂升职", desc: "花金钱升官", target: false },
   PROMOTE_ANY:   { cn: "通用升职", desc: "政绩优先，没了改用钱", target: false },
+  // 红二代「一纸调令」：不在手牌里，每局一次，单独摆在手牌后面
+  PROMOTE_FAMILY: { cn: "一纸调令", desc: "家族升职：政绩优先、其次金钱", target: false },
 };
+
+// 一纸调令在 local 里的下标（它不在手牌里）
+const FAMILY_INDEX = -1;
 
 const TOKEN_KEY = "meritocracy.token";
 const ROOM_KEY = "meritocracy.room";
@@ -34,6 +39,12 @@ const $ = (id) => document.getElementById(id);
 // 配置里的比例是 "1/2" 这种分数串，直接显示；没拿到配置时给个保守的说法
 function fracText(str) {
   return str == null ? "一部分" : String(str);
+}
+
+// 买官被举报查实时，行贿的钱打水漂多少（BRIBE_FORFEIT_RATIO）。全部打水漂时说"钱也要不回来"
+function bribeLossText() {
+  const r = cfgCache ? String(cfgCache.bribe_forfeit_ratio ?? "1") : "1";
+  return r === "1" ? "钱也要不回来" : `行贿的钱 ${r} 打水漂`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -154,6 +165,10 @@ function renderInner() {
     local = [];
     const used = new Set();
     (priv.picks || []).forEach((p) => {
+      if (p.action === "PROMOTE_FAMILY") {
+        local.push({ index: FAMILY_INDEX, card: p.action, target: null });
+        return;
+      }
       const i = priv.hand.findIndex((d, k) => d.card === p.action && !used.has(k));
       if (i >= 0) used.add(i);
       local.push({ index: i, card: p.action, target: p.target });
@@ -229,10 +244,12 @@ function renderOrder() {
   const np = priv.next_promotion || {};
   const meritEnough = np.merit_gap === 0;
   const card = promoAt >= 0 ? local[promoAt].card : null;
+  // 一纸调令不等举报结算，"刚贪的钱当轮花不出去"对它不适用
   const willSpendMoney =
-    card === "PROMOTE_MONEY" ||
-    (card === "PROMOTE_ANY" && !meritEnough) ||
-    (!!np.needs_both && card !== null);   // 最后一步钱和政绩一起花
+    card !== null && card !== "PROMOTE_FAMILY" &&
+    (card === "PROMOTE_MONEY" ||
+      (card === "PROMOTE_ANY" && !meritEnough) ||
+      !!np.needs_both);   // 最后一步钱和政绩一起花
   const dirtyBefore =
     promoAt > 0 &&
     willSpendMoney &&
@@ -242,7 +259,8 @@ function renderOrder() {
     .some((x) => ["WORK", "CORRUPT", "GRAFT"].includes(x.card));
   let hint = "排在前面的先结算。";
   if (promoAt >= 0) {
-    const usable = ((priv.card_preview || {})[local[promoAt].card] || {}).usable;
+    const previewKey = local[promoAt].card === "PROMOTE_FAMILY" ? "PROMOTE_ANY" : local[promoAt].card;
+    const usable = ((priv.card_preview || {})[previewKey] || {}).usable;
     if (usable && promoAt === 0 && producesAfter) {
       hint = "✓ 先升职再干活：这一轮的产出按<b>升职后</b>的官职倍率算，也不会被晋升的 /5 砍掉。";
     } else if (usable && promoAt > 0) {
@@ -296,7 +314,9 @@ function renderAction() {
         return Math.floor(Math.floor(v * r) * mult);
       };
       if (c === "WORK") {
-        effect = `政绩 <b>+${scaled(d.value)}</b>`;
+        effect = `政绩 <b>+${scaled(d.value)}</b>` +
+          (pv.overtime ? `<span class="subtle">（加班：同一轮打两张，这两张的政绩最后 ×${pv.overtime}，` +
+            `再拿 ${pv.overtime} 倍工资的加班费）</span>` : "");
       } else if (c === "CORRUPT") {
         const amt = scaled(d.value);
         effect = `金钱 <b>+${amt}</b>` +
@@ -308,7 +328,7 @@ function renderAction() {
       } else if (c.startsWith("PROMOTE")) {
         const COUNTER = {
           PROMOTE_MERIT: "花政绩 · 怕政治攻击（会被暂缓）",
-          PROMOTE_MONEY: "花金钱 · 怕举报（钱也要不回来）",
+          PROMOTE_MONEY: `花金钱 · 怕举报（${bribeLossText()}）`,
           PROMOTE_ANY: "政绩优先；被攻击就改花钱",
         };
         effect =
@@ -321,8 +341,9 @@ function renderAction() {
         const wmax = cfgCache ? cfgCache.warnings_before_demotion : 2;
         effect =
           `① 举报他<b>贪污受贿</b> → 赃款没收<br>` +
-          `② 举报他<b>贿赂升职</b> → 官没了，钱也要不回来<br>` +
-          `<b>抄到的钱 ${cut} 归我</b>，两样都记一次降职警告（满 ${wmax} 次降一级）<br>` +
+          `② 举报他<b>贿赂升职</b> → 官没了，${bribeLossText()}<br>` +
+          `<b>抄到的钱 ${cut} 归我</b>（几个人一起举报就平分这一份），` +
+          `两样都记一次降职警告（满 ${wmax} 次降一级）<br>` +
           `<span class="warn2">他这轮清白就白打 · 匿名，他不知道是我</span>`;
       } else if (c === "ATTACK") {
         // 关键是说清楚"抢来的政绩归我"——这是这张牌和纯破坏的根本区别，
@@ -352,7 +373,7 @@ function renderAction() {
         <div class="cn">${info.cn}</div>
         <div class="fx">${effect}</div>${tgt}</div>`;
     })
-    .join("");
+    .join("") + familyCardHtml();
 
   renderOrder();
 
@@ -385,12 +406,13 @@ function renderAction() {
   const used = priv.redraws_used_this_round || 0;
   const spent = priv.redraw_spent_this_round || 0;
   const again = used ? `（本轮第 ${used + 1} 次，已花 ${spent}）` : "";
-  rb.textContent =
-    cost <= 0
-      ? "这一级不能换牌"
-      : priv.redraw_affordable
-      ? `花 ${cost} 金钱换一手牌${again}`
-      : `换一手牌要 ${cost} 金钱，你不够${again}`;
+  rb.textContent = !priv.redraw_available
+    ? "这一级不能换牌"
+    : cost === 0
+    ? `免费换一手牌${again}`
+    : priv.redraw_affordable
+    ? `花 ${cost} 金钱换一手牌${again}`
+    : `换一手牌要 ${cost} 金钱，你不够${again}`;
 
   const waiting = pub.players.filter((p) => !pub.locked_players.includes(p.id));
   $("lockState").textContent = waiting.length
@@ -456,6 +478,26 @@ function bar(now, need, cls) {
      style="width:${pctv}%"></div></div>`;
 }
 
+// 红二代「一纸调令」：摆在手牌后面的一张特殊牌，每局一次
+function familyCardHtml() {
+  const fc = priv.family_card;
+  if (!fc) return "";
+  const order = local.findIndex((x) => x.index === FAMILY_INDEX);
+  const enough = ((priv.card_preview || {}).PROMOTE_ANY || {}).usable;
+  const status = !fc.usable
+    ? esc(fc.why)
+    : enough
+    ? "✓ 现在够门槛"
+    : ((priv.card_preview || {}).PROMOTE_ANY || {}).why || "资源不够，打了会白用";
+  const cls = ["card", "family", order >= 0 ? "sel" : "", priv.locked ? "locked" : "",
+    !fc.usable || !enough ? "dead" : "", fc.usable && enough ? "ready" : ""].join(" ");
+  const badge = order >= 0 ? `<div class="count">${order + 1}</div>` : "";
+  return `<div class="${cls}" data-index="${FAMILY_INDEX}">${badge}
+    <div class="cn">一纸调令 <span class="subtle">· 红二代每局一次</span></div>
+    <div class="fx">${status}<span class="warn2">政绩优先、其次金钱 · 攻击举报都拦不住 · 不能升主席 ·
+      打出去就算用掉</span></div></div>`;
+}
+
 function myPanelHtml() {
   const np = priv.next_promotion;
   if (!np) {
@@ -515,7 +557,13 @@ function myPanelHtml() {
             : `再熬 ${np.tenure_gap} 轮自动升`
         }</span>
       </div>
-    </div>
+    </div>${
+      // 官二代「透风」：选牌阶段就知道本轮全局事件（服务器只发给他自己）
+      priv.tipoff_event
+        ? `<div class="hintline tipoff">📞 家里来电话：本轮是【${esc(priv.tipoff_event.name)}】` +
+          `——${esc(priv.tipoff_event.description)}</div>`
+        : ""
+    }
     <div class="hintline">官职倍率 <b>x${(priv.card_preview || {}).rank_multiplier || 1}</b>
       · 贪钱或拿钱买官被举报查实 = ${launders ? "赃款没收<b>一半</b>" : "赃款没收"}
       + 记一次降职警告${shielded ? "（但你降不下来）" : ""}<br>${
@@ -604,6 +652,9 @@ function privateResultHtml() {
   // ---- 金钱流水：一笔一笔写清楚，别让人猜钱去哪了 ----
   const ledger = [];
   if (r.salary) ledger.push([`合法工资`, `+${r.salary}`, "good"]);
+  if (r.overtime_pay) ledger.push([`加班费`, `+${r.overtime_pay}`, "good"]);
+  // 换牌花的钱以前没列，几笔加起来和"本轮结束"对不上
+  if (r.redraw_spent) ledger.push([`重新抽牌`, `−${r.redraw_spent}`, "bad"]);
   if (r.money_gained) ledger.push([`贪污进账`, `+${r.money_gained}`, "good"]);
   if (r.money_from_reports) ledger.push([`分得赃款`, `+${r.money_from_reports}`, "good"]);
   if (r.money_confiscated) ledger.push([`赃款被没收`, `−${r.money_confiscated}`, "bad"]);
@@ -623,7 +674,9 @@ function privateResultHtml() {
 
   // ---- 政绩流水 ----
   const mled = [];
-  if (r.merit_gained) mled.push([`干活所得`, `+${r.merit_gained}`, "good"]);
+  const overtime = r.overtime_merit || 0;
+  if (r.merit_gained - overtime) mled.push([`干活所得`, `+${r.merit_gained - overtime}`, "good"]);
+  if (overtime) mled.push([`加班：两张工作翻倍多出来的`, `+${overtime}`, "good"]);
   if (r.merit_from_attacks) mled.push([`抢功所得`, `+${r.merit_from_attacks}`, "good"]);
   // 被抢走的和被戴帽子扣的是两回事，分开列
   const robbed = r.merit_stolen_by_attackers || 0;
@@ -927,26 +980,36 @@ function rulesHtml(c) {
         .slice(0, c.president_rank)
         .join(" / ")}），<b>同一轮里每换一次翻 ${c.redraw_cost_growth} 倍</b>
       （${[0, 1, 2].map((i) => c.redraw_costs[0] * c.redraw_cost_growth ** i).join(" → ")}…）。
-      基层一轮工资就够换一次，越往上越换不起，而且这笔钱和攒钱升职抢同一个钱包。</li>
+      基层一轮工资就够换一次，越往上越换不起，而且这笔钱和攒钱升职抢同一个钱包。${
+        c.origin_rich_free_redraws
+          ? `<br>富二代每轮前 ${c.origin_rich_free_redraws} 次免费，之后从底价开始照常翻倍。`
+          : ""
+      }</li>
   <li><b>这一轮刚贪来的钱，当轮花不出去。</b>晋升卡排在贪污牌后面的话，
       要等举报结算完、确认没被抄家，才会兑现。</li>
-  <li><b>被举报又确实贪了 = 停职待查，本轮晋升一律冻结。</b>
-      政绩升、贿赂升都挡得住，把晋升卡排到贪污前面也躲不掉。
+  <li><b>被举报查实 = 本轮花钱的晋升作废</b>（贿赂升职、通用升职走钱那条路），
+      ${bribeLossText()}；把晋升卡排到贪污前面也躲不掉——官会被撤回来。
+      <b>凭政绩升职不受影响</b>：政绩路线只怕政治攻击。
       （没人举报你，或者你这轮手脚干净，都不受影响。）</li>
 </ul>
 
 <h4>行动卡</h4>
 <ul class="rlist">
   <li><b>埋头工作</b>：加政绩。政绩是<b>公开</b>的 —— 好处是别人看得见，
-      坏处也是别人看得见：本轮产出的一半可能被政治攻击抢走。</li>
+      坏处也是别人看得见：本轮产出的 ${frac(c.attack_steal_fraction)} 可能被政治攻击抢走。</li>
   <li><b>中饱私囊</b>：加金钱。钱是<b>隐藏</b>的，别人只能靠坊间传闻猜，
       但这笔钱会被举报和反腐风暴盯上。期望收益是埋头工作的 3 倍。</li>
+  <li><b>坊间传闻</b>：每轮结算后点名<b>本轮到手钱最多</b>的人（不报金额）。
+      口径 = 工资 + 这轮贪的钱（打点费不扣；<b>被举报/风暴查实的那笔记 0</b>）。
+      <b>没人贪了钱还没被抓的那一轮不传</b> —— 所以只要有传闻，就说明这轮至少有人捞了还没被抓，
+      但被点名的不一定是他（官大的人光拿工资也可能上榜）。</li>
   <li><b>以权谋私</b>：钱为主（比中饱私囊少），顺带一点政绩 ——
       这点政绩<b>一定少于埋头工作</b>，只是顺手之作。钱同样算贪污。</li>
   <li><b>匿名举报（暗箭）</b>—— 专治走金钱路线的人，两种情况能抓：
       <br>① 他这轮<b>贪污受贿</b> → 本轮赃款全部没收（存款不动）
-      <br>② 他这轮<b>贿赂升职</b> → 官升不成，而且<b>行贿的钱也要不回来</b>
-      <br>两种抄到的钱都是<b>${frac(c.report_reward_ratio)} 归你、其余充公</b>；
+      <br>② 他这轮<b>贿赂升职</b> → 官升不成，而且<b>${bribeLossText()}</b>
+      <br>两种抄到的钱都是<b>${frac(c.report_reward_ratio)} 归你、其余充公</b>
+        （几个人一起举报同一个人，就平分这 ${frac(c.report_reward_ratio)}）；
         两种都给他记<b>一次降职警告</b>、工龄清零；
       警告攒满 <b>${c.warnings_before_demotion}</b> 次就降一级，然后警告清空重新记。
       <br>他这一轮要是清白的，这张牌就<b>白打</b>。
@@ -958,7 +1021,9 @@ function rulesHtml(c) {
         （只是暂缓，他<b>政绩一点不掉</b>）
       <br>③ <b>戴帽子</b>：他这轮<b>没干正事</b>（既没埋头工作、也没凭政绩升职，
         而是在捞钱 / 买官 / 搞别人）→ 给他扣一笔政绩，
-        按他的官职算（基层 4 / 县级 6 / 市级 8 / 省级 10）。
+        按他的官职算（${c.rank_names.slice(0, c.president_rank).map((n, r) =>
+          `${esc(n).replace(/公务员|干部/, "")} ${Math.floor(c.attack_merit_penalty * mult(c.rank_multipliers[r]))}`
+        ).join(" / ")}）。
         这笔是<b>罚款，你拿不到</b>
       <br><b>公开署名</b> —— 公报里点名写着是你干的，他下轮知道该找谁算账。
       <br><b>抢官大的人更值</b>：${(() => {
@@ -973,7 +1038,7 @@ function rulesHtml(c) {
   <thead><tr><th>升职方式</th><th>被政治攻击</th><th>被举报查实</th></tr></thead>
   <tbody>
     <tr><td>政绩升职</td><td><b>暂缓</b>（政绩保留）</td><td>不受影响</td></tr>
-    <tr><td>贿赂升职</td><td>不受影响</td><td><b>失败</b>，钱也要不回来</td></tr>
+    <tr><td>贿赂升职</td><td>不受影响</td><td><b>失败</b>，${bribeLossText()}</td></tr>
     <tr><td>通用升职</td><td>改走<b>贿赂</b>这条路</td><td>走政绩，不受影响</td></tr>
     <tr><td class="hererow">通用升职 + 两样都挨</td><td colspan="2" class="hererow">
       <b>失败，金钱损失，政绩保留</b></td></tr>
@@ -1037,11 +1102,13 @@ $("roomInput").addEventListener("keydown", (e) => {
 
 $("redrawBtn").onclick = () => {
   const cost = priv?.redraw_cost || 0;
-  const next = cost * (cfgCache?.redraw_cost_growth || 2);
+  // 下一次的价钱由服务器算：富二代免费那次之后是从底价开始，不是 0 x 2
+  const next = priv?.redraw_next_cost || 0;
   // 这笔钱和"攒钱升职"抢的是同一个钱包，而且越换越贵——别让人手滑
   if (
     !confirm(
-      `花 ${cost} 金钱重新抽一手牌？已经选好的牌会清空。\n` +
+      (cost === 0 ? "免费重新抽一手牌？" : `花 ${cost} 金钱重新抽一手牌？`) +
+        "已经选好的牌会清空。\n" +
         `本轮再换下一次要 ${next} 金钱。`
     )
   )
@@ -1084,7 +1151,11 @@ function syncPicks() {
 function readyPicks() {
   return local
     .filter((x) => !CARD_INFO[x.card].target || x.target !== null)
-    .map((x) => ({ index: x.index, target: x.target }));
+    .map((x) =>
+      x.index === FAMILY_INDEX
+        ? { action: "PROMOTE_FAMILY", target: null }
+        : { index: x.index, target: x.target }
+    );
 }
 
 $("lockBtn").onclick = () => {
@@ -1111,7 +1182,10 @@ $("hand").addEventListener("click", (e) => {
     if (pendingIndex === i) pendingIndex = null;
   } else {
     if (local.length >= pub.picks_per_round) return toast(`最多选 ${pub.picks_per_round} 张`);
-    const card = priv.hand[i].card;
+    if (i === FAMILY_INDEX && !(priv.family_card || {}).usable) {
+      return toast((priv.family_card || {}).why || "现在不能用一纸调令");
+    }
+    const card = i === FAMILY_INDEX ? "PROMOTE_FAMILY" : priv.hand[i].card;
     local.push({ index: i, card, target: null });
     pendingIndex = CARD_INFO[card].target ? i : null;
   }

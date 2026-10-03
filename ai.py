@@ -111,6 +111,22 @@ class Weights:
     # 老张手里有举报牌、明知真人要登顶，还是选了"贪污 + 基层升县级"（0.85 分）
     # 而不是举报他（0.32 分）——那一举报本来能拦下整局。
     endgame_economy_discount: float = 0.15
+    # 买官被举报查实时，打水漂的那笔钱值多少（单位：官职进度）。
+    # 正好是一级的金钱门槛 = 1.0。
+    bribe_caught_loss: float = 1.0
+    # 我去攻击贫农时，估计还有别人也在打他的概率（贫农只挡得住一个人）。
+    # 看不见别人出什么牌，取个中间值；快登顶的人往往被好几个人一起打，偏高一点也合理。
+    peasant_second_attacker: float = 0.5
+    # 官二代「透风」知道这轮是反腐风暴时，贪污被查的概率按多少算
+    tipoff_storm_caught: float = 0.7
+    # 红二代「一纸调令」：每局一次的卡，打出去的机会成本；用钱升被查实时记警告的代价
+    family_card_reserve: float = 0.2
+    # 干扰牌"自己拿到的好处"（抢功、分赃）按目标威胁加权时的下限：
+    # 打桌上威胁最大的人拿满，威胁最小的也至少算这么多
+    target_focus_floor: float = 0.15
+    # 威胁值里"本级进度"占多重（1 = 进度和官职一样算）。0.5 = 官职为主
+    threat_progress_weight: float = 0.5
+    family_warning_cost: float = 0.15
     # 拦一个这一轮就可能登顶的人，单靠一张牌能拦下的把握。
     # 省级 -> 主席那一级"走哪条路由卡决定"：攻击只按得住政绩升职，举报只抓得住贿赂升职，
     # 通用升职被攻击会改走金钱、还得再挨一张举报。他手里是哪张看不见，
@@ -344,6 +360,33 @@ class SmartAgent:
         """本轮被举报/事件查实了没有（公开事实：记了警告或者降了级）。"""
         return fact.get("warnings_issued", 0) > 0 or fact["demotion"] != "NONE"
 
+    def _hand_is_weak(self, private: dict[str, Any]) -> bool:
+        """这手牌烂不烂——只在换牌**免费**时用（富二代），所以判据可以宽一点。
+
+        真人会换的两种：
+          * 够门槛了，手里却没有用得上的晋升卡 —— 白白耽误一轮
+          * 一张生产牌都没有、也没有能用的晋升卡 —— 这一轮什么都推进不了
+        不碰 rng：复盘工具重演时不会调这里，碰了 rng 后面的决策就全错位。
+        """
+        cfg = self.cfg
+        cards = [Card(d["card"]) for d in private["hand"]]
+        rank, money, merit = private["rank"], private["money"], private["merit"]
+        mc, tc = self._costs(rank, private.get("origin"))
+        merit_ok = tc is not None and merit >= tc
+        money_ok = mc is not None and money >= mc
+        if cfg.needs_both(rank):
+            usable = merit_ok and money_ok and any(c.is_promotion for c in cards)
+            ready = merit_ok and money_ok
+        else:
+            usable = any(
+                (c.can_use_merit and merit_ok) or (c.can_use_money and money_ok)
+                for c in cards
+            )
+            ready = merit_ok or money_ok
+        if ready and not usable:
+            return True
+        return not usable and not any(c.is_production for c in cards)
+
     def _dirty_prior(self, fact, cur, prev) -> tuple[float, float]:
         """光看公开信息，他这轮捞钱的概率和金额先验 -> (证据量, 估计金额)。
 
@@ -407,16 +450,25 @@ class SmartAgent:
             return 1.0 - float(self.cfg.origin_accountant_launder_ratio)
         return 1.0
 
-    def _own_work_merit(self, value: int, rank: int, origin: str | None) -> float:
-        """我打这张 WORK 能拿多少政绩。小镇做题家·技术员「卷王」加在倍率之前。"""
-        bonus = (
-            self.cfg.origin_grinder_work_bonus
-            if (self.cfg.origin(origin) or {}).get("id") == "GRINDER"
-            else 0
-        )
+    def _own_work_merit(
+        self, value: int, rank: int, origin: str | None, event=None
+    ) -> float:
+        """我打这张 WORK 能拿多少政绩。出身不影响单张（卷王的加班看的是"连干两张"）。
+        `event` 只有官二代「透风」知道本轮事件时才传。"""
         if value > 0:
-            return float(rules.work_merit(value + bonus, rank, None, self.cfg))
-        return self._expected_work(rank) + bonus * float(self.cfg.work_multiplier(rank))
+            return float(rules.work_merit(value, rank, event, self.cfg))
+        if event is None:
+            return self._expected_work(rank)
+        dist = self.cfg.work_card_distribution
+        return sum(w * rules.work_merit(v, rank, event, self.cfg) for v, w in dist) / sum(
+            w for _, w in dist
+        )
+
+    def _overtime_merit(self, values: list[int], rank: int, event=None) -> float:
+        """卷王「加班」：两张埋头工作的政绩最后 ×倍数，多出来的 = (倍数 − 1) × 两张的政绩。
+        不扣可能被抢走的那份——出牌时不知道会不会挨打。"""
+        two = sum(self._own_work_merit(v, rank, None, event) for v in values[:2])
+        return (self.cfg.origin_grinder_overtime_multiplier - 1) * two
 
     def _costs(self, rank: int, origin: str | None) -> tuple[int | None, int | None]:
         """这个(官职, 出身)升下一级要多少钱和政绩。
@@ -452,7 +504,9 @@ class SmartAgent:
         差半级的人必须按住。
         """
         top = self.cfg.president_rank
-        steps_left = (top - rank) - progress
+        # 本级进度只算一半：威胁主要看官职。不然一个快升市级的县级，
+        # 会和刚到省级的人差不多吓人——真人看的是"谁官最大"。
+        steps_left = (top - rank) - progress * self.w.threat_progress_weight
         if steps_left <= 0:
             return 1.0
         closeness = max(0.0, 1.0 - steps_left / top)
@@ -498,6 +552,27 @@ class SmartAgent:
             return (merit_ready and money_reach) or (money_ready and merit_reach)
         return merit_reach or money_reach
 
+    def _target_focus(self, public: dict[str, Any], opp: dict[str, Any]) -> float:
+        """这个对手值不值得我花一张干扰牌：他的威胁 ÷ 桌上最大的威胁。
+
+        威胁主要看官职（_threat 用的是"离主席还差几级"），所以一个政绩一万的基层
+        也排不到前面。以前"抢功 / 分赃"那份自己的好处不看对象是谁，AI 就专挑
+        干活最多的人（卷王几乎每轮两张工作）去抢，放着省级的领跑者不管——
+        真人玩的时候也明显感觉到：别人都当上省级第一了，AI 还在打我。
+        """
+        def threat(o: dict[str, Any]) -> float:
+            m = self.models.get(o["id"], OpponentModel())
+            return self._threat(
+                o["rank"], self._progress(o["rank"], m.money_est, o["merit"], o.get("origin"))
+            )
+
+        others = [o for o in public["players"] if o["id"] != self.id]
+        top = max((threat(o) for o in others), default=0.0)
+        if top <= 0:
+            return 1.0
+        floor = self.w.target_focus_floor
+        return floor + (1.0 - floor) * threat(opp) / top
+
     def _endgame_stop_value(self, opp: dict[str, Any], model: "OpponentModel") -> float:
         """把一个这一轮就可能登顶的人**确定**拦下来值多少。
 
@@ -537,9 +612,12 @@ class SmartAgent:
         report = single
         if mc is not None and model.money_est < mc * self.w.endgame_money_doubt:
             report = max(report, self.w.endgame_cover_report_must_corrupt)
+        both = max(self.w.endgame_cover_both, single, report)
         if (self.cfg.origin(opp.get("origin")) or {}).get("id") == "PEASANT":
-            return 0.0, report, report
-        return single, report, max(self.w.endgame_cover_both, single, report)
+            # 贫农只挡得住一个人：有别人也打他（概率 k）时攻击照常管用，否则白打
+            k = self.w.peasant_second_attacker
+            return k * single, report, k * both + (1 - k) * report
+        return single, report, both
 
     def _cash_horizon(self, public: dict[str, Any]) -> float:
         """抄到手的一笔钱，现在还值几折。
@@ -679,6 +757,9 @@ class SmartAgent:
              int(d.get("value", 0)) if isinstance(d, dict) else 0)
             for d in private["hand"]
         ]
+        # 红二代「一纸调令」：不在手牌里，但能当一张晋升卡打（每局一次）
+        if (private.get("family_card") or {}).get("usable"):
+            dealt.append((Card.PROMOTE_FAMILY, 0))
         hand = [c for c, _ in dealt]
         values = [v for _, v in dealt]
         n_picks = min(int(public.get("picks_per_round", 1)), len(hand))
@@ -838,6 +919,9 @@ class SmartAgent:
         cfg = self.cfg
         rank, money, merit = private["rank"], private["money"], private["merit"]
         my_origin = private.get("origin")
+        # 官二代「透风」：已经知道本轮事件，产出直接按事件算（经济大好 ×2、重点项目 +4…）
+        tip = private.get("tipoff_event")
+        event = rules.event_by_id(tip["id"], cfg) if tip else None
         mc, tc = self._costs(rank, my_origin)
         here = self._progress(rank, money, merit, my_origin)
 
@@ -848,20 +932,29 @@ class SmartAgent:
         gain_merit = gain_money = 0.0
         for c, v in zip(cards, vals):
             if c is Card.WORK:
-                gain_merit += self._own_work_merit(v, rank, my_origin)
+                gain_merit += self._own_work_merit(v, rank, my_origin, event)
             elif c is Card.CORRUPT:
                 gain_money += (
-                    rules.corrupt_money(v, rank, None, cfg)
+                    rules.corrupt_money(v, rank, event, cfg)
                     if v > 0
                     else self._expected_corrupt(rank)
                 )
             elif c is Card.GRAFT:
                 if v > 0:
-                    gain_money += rules.corrupt_money(v, rank, None, cfg)
-                    gain_merit += rules.graft_merit(v, rank, None, cfg)
+                    gain_money += rules.corrupt_money(v, rank, event, cfg)
+                    gain_merit += rules.graft_merit(v, rank, event, cfg)
                 else:
                     gain_money += self._expected_graft_money(rank)
                     gain_merit += self._expected_graft_merit(rank)
+        # 卷王「加班」第二段：两张埋头工作一起打，额外一笔政绩
+        work_vals = [v for c, v in zip(cards, vals) if c is Card.WORK]
+        grinder_combo = (
+            (cfg.origin(my_origin) or {}).get("id") == "GRINDER" and len(work_vals) >= 2
+        )
+        if grinder_combo:
+            gain_merit += self._overtime_merit(work_vals, rank, event)
+            # 加班费：几倍工资的合法收入
+            gain_money += cfg.origin_grinder_overtime_multiplier * cfg.salary(rank)
         merit_after = merit + gain_merit
         money_after = money + gain_money
         # 工资不用在这里加：它在回合开头就发了，private["money"] 里已经含着了。
@@ -869,71 +962,103 @@ class SmartAgent:
 
         # 结算顺序是动态的：本来就够门槛的话会先升官、再按新倍率干活。
         # 这里照着重算一遍，否则 AI 会低估"WORK + 晋升卡"这套组合技。
-        early = _early_promotion_rank(cfg, rank, money, merit, cards, my_origin)
-        if early is not None:
-            new_rank, money, merit = early
-            gain_merit = gain_money = 0.0
-            for c, v in zip(cards, vals):
-                if c is Card.WORK:
-                    gain_merit += self._own_work_merit(v, new_rank, my_origin)
-                elif c is Card.CORRUPT:
-                    gain_money += (
-                        rules.corrupt_money(v, new_rank, None, cfg)
-                        if v > 0 else self._expected_corrupt(new_rank)
-                    )
-                elif c is Card.GRAFT:
-                    if v > 0:
-                        gain_money += rules.corrupt_money(v, new_rank, None, cfg)
-                        gain_merit += rules.graft_merit(v, new_rank, None, cfg)
-            merit_after = merit + gain_merit
-            money_after = money + gain_money  # 工资已在回合开头到账，别重复计
-            here_after = self._progress(new_rank, money_after, merit_after, my_origin)
-            return (
-                (1.0 - here) + self.w.promotion_bonus + here_after * 0.5,
-                new_rank >= cfg.president_rank,
-            )
-
         has_merit_card = any(c.can_use_merit for c in cards)
         has_money_card = any(c.can_use_money for c in cards)
         any_promo_card = any(c.is_promotion for c in cards)
         if not cfg.promotion_requires_card:
             has_merit_card = has_money_card = any_promo_card = True
 
-        promoted = False
-        if cfg.needs_both(rank):
-            # 双条件台阶：任意晋升卡都行，但钱和政绩要同时够
-            promoted = (
-                any_promo_card
-                and tc is not None and merit_after >= tc
-                and mc is not None and money_after >= mc
+        early = _early_promotion_rank(cfg, rank, money, merit, cards, my_origin)
+        if early is not None:
+            new_rank, money_left, merit_left = early
+            gain_merit = gain_money = 0.0
+            for c, v in zip(cards, vals):
+                if c is Card.WORK:
+                    gain_merit += self._own_work_merit(v, new_rank, my_origin, event)
+                elif c is Card.CORRUPT:
+                    gain_money += (
+                        rules.corrupt_money(v, new_rank, event, cfg)
+                        if v > 0 else self._expected_corrupt(new_rank)
+                    )
+                elif c is Card.GRAFT:
+                    if v > 0:
+                        gain_money += rules.corrupt_money(v, new_rank, event, cfg)
+                        gain_merit += rules.graft_merit(v, new_rank, event, cfg)
+            if grinder_combo:
+                gain_merit += self._overtime_merit(work_vals, new_rank, event)
+                gain_money += cfg.origin_grinder_overtime_multiplier * cfg.salary(new_rank)
+            merit_after = merit_left + gain_merit
+            money_after = money_left + gain_money  # 工资已在回合开头到账，别重复计
+            here_after = self._progress(new_rank, money_after, merit_after, my_origin)
+            score = (1.0 - here) + self.w.promotion_bonus + here_after * 0.5
+            promoted = True
+            # 走的是不是金钱那条路（行贿）：主席那一级由卡决定，其他台阶政绩够就走政绩
+            bribed = (
+                not has_merit_card if cfg.needs_both(rank) else money_left < money
             )
-        elif has_merit_card and tc is not None and merit_after >= tc:
-            promoted = True
-        elif has_money_card and mc is not None and money_after >= mc:
-            promoted = True
-
-        if promoted:
-            score = (1.0 - here) + self.w.promotion_bonus
         else:
-            score = self._progress(rank, money_after, merit_after, my_origin) - here
-            # 打了晋升卡却升不上去 = 这张牌白费
-            if any(c.is_promotion for c in cards):
-                score -= 0.03
+            promoted = False
+            if cfg.needs_both(rank):
+                # 双条件台阶：任意晋升卡都行，但钱和政绩要同时够
+                promoted = (
+                    any_promo_card
+                    and tc is not None and merit_after >= tc
+                    and mc is not None and money_after >= mc
+                )
+                bribed = promoted and not has_merit_card
+            elif has_merit_card and tc is not None and merit_after >= tc:
+                promoted, bribed = True, False
+            elif has_money_card and mc is not None and money_after >= mc:
+                promoted, bribed = True, True
+            else:
+                bribed = False
 
-        if n_corrupt or n_graft:
+            if promoted:
+                score = (1.0 - here) + self.w.promotion_bonus
+            else:
+                score = self._progress(rank, money_after, merit_after, my_origin) - here
+                # 打了晋升卡却升不上去 = 这张牌白费
+                if any(c.is_promotion for c in cards):
+                    score -= 0.03
+
+        family = Card.PROMOTE_FAMILY in cards
+        if family:
+            # 每局只有一次：手里有普通晋升卡能升的时候别浪费它
+            score -= self.w.family_card_reserve
+
+        # ---- 被举报查实的风险：贪污和行贿都算 ----
+        # 以前只有贪污/以权谋私才扣这一项，而且"先升官再干活"那条路整个跳过了。
+        # 可举报同样抓行贿（REPORT_CATCHES_BRIBERY）：查实了官作废、钱打水漂。
+        # AI 把买官当成零风险，钱越多越急着买——复盘：富二代开局从 10 块加到 15 块，
+        # 第 1、2 轮买官被查实的比例从 7% 涨到 17% / 23%，胜率反而掉了。
+        dirty = bool(n_corrupt or n_graft)
+        if dirty:
             # 被攻击撞上会被迫掏打点费，这也是贪污的成本之一
             if cfg.attack_mode == "denial" and cfg.attack_on_corruption == "merit_to_attacker":
                 p_hit = self._p_being_attacked()
                 score -= p_hit * float(cfg.attack_hush_money_ratio) * (
                     gain_money / mc if mc else 0.0
                 )
+        if dirty or (bribed and cfg.report_catches_bribery):
             p_caught = self._report_pressure(public, private)
-            gained = gain_money * self._exposed_share(my_origin)
-            major = gained >= cfg.major_corruption_threshold
-            loss = (rank * 1.0 + self._progress(rank, money_after, 0)) if major else \
-                self._progress(rank, gained, 0)
-            if promoted:
-                loss += self.w.promotion_bonus
+            if dirty and event is not None and event.flag("storm_report"):
+                # 知道这轮是反腐风暴：贪得最多的那 1/3 必被查，贪了基本跑不掉
+                p_caught = max(p_caught, self.w.tipoff_storm_caught)
+            loss = 0.0
+            if dirty:
+                gained = gain_money * self._exposed_share(my_origin)
+                major = gained >= cfg.major_corruption_threshold
+                loss += (rank * 1.0 + self._progress(rank, money_after, 0)) if major else \
+                    self._progress(rank, gained, 0)
+            if bribed and cfg.report_catches_bribery:
+                if family:
+                    # 一纸调令用钱升：查实只记警告（钱本来就花了），官不撤
+                    loss += self.w.family_warning_cost
+                else:
+                    # 买官的钱打水漂（按规则里打水漂的比例）
+                    loss += self.w.bribe_caught_loss * float(cfg.bribe_forfeit_ratio)
+            if promoted and not family:
+                loss += self.w.promotion_bonus  # 这一级也作废了（一纸调令不会被撤）
             score -= self.w.caught_dread * p_caught * loss
         return score, promoted and rank + 1 >= cfg.president_rank
 
@@ -1051,6 +1176,8 @@ class SmartAgent:
             if cfg.attack_mutual_cancels_gain and cfg.attack_mode == "negative_sum":
                 # 他要是也在打我，这一下就白费了
                 self_value *= 1.0 - self._p_being_attacked()
+        # 抢功的好处要看打的是谁：盯着一个基层抢政绩，等于放着官最大的那个不管
+        self_value *= self._target_focus(public, opp)
 
         # --- 对方的损失（好处全桌分，要打稀释折扣）---
         hush_hit = locals().get("hush_hit", 0.0)
@@ -1077,7 +1204,8 @@ class SmartAgent:
             else self.w.promotion_bonus
         )
         if (cfg.origin(t_origin) or {}).get("id") == "PEASANT":
-            block_value = 0.0  # 贫农「政治正确」：黑料挡不住他，这一项归零
+            # 贫农「政治正确」：一个人挡不住他，得有别人也一起打才按得住
+            block_value *= self.w.peasant_second_attacker
         deny += p_block * block_value * threat
 
         if cfg.attack_resets_tenure and cfg.tenure_required > 0:
@@ -1155,6 +1283,8 @@ class SmartAgent:
         cash_value = (my_cut / mc) * self._cash_horizon(public) if mc else 0.0
         if mc and my_money + my_cut >= mc:
             cash_value += self.w.promotion_bonus  # 这笔赃款直接把我送上去
+        # 分赃的好处同样看对象：举报一个兜里有钱的基层，不如去按住官最大的那个
+        cash_value *= self._target_focus(public, opp)
 
         # --- 打击面：冻结他这一轮的晋升 + 记一次警告（攒满就降级）---
         t_prog = self._progress(t_rank, model.money_est, opp["merit"], t_origin)
@@ -1241,10 +1371,13 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
     private = game.private_state(player_id)
     agent.observe(public, private)
 
-    if any(Card(d["card"]).needs_target for d in private["hand"]):
-        return False  # 手上已经有举报或攻击了
     if not private.get("redraw_affordable"):
         return False
+    # 富二代的免费换牌：不花钱，手牌烂就换，跟真人一样
+    if private.get("redraw_cost") == 0 and agent._hand_is_weak(private):
+        return True
+    if any(Card(d["card"]).needs_target for d in private["hand"]):
+        return False  # 手上已经有举报或攻击了
 
     for opp in public["players"]:
         if opp["id"] == player_id:
@@ -1261,6 +1394,20 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
             if prog >= 0.75:
                 return True
     return False
+
+
+def turn(game, player_id: int, pool: AgentPool) -> list[dict]:
+    """AI 的一整个回合：该换牌就换（可能连换几次），再挑牌。
+
+    服务器和所有平衡分析都走这一个入口。以前只有服务器会换牌，analysis.py 里的
+    对局从来不换——于是"换牌"相关的改动（比如富二代每轮一次免费换牌）
+    在平衡报告里的价值恒为 0，测了也白测。
+    """
+    for _ in range(MAX_PANIC_REDRAWS):
+        if not wants_redraw(game, player_id, pool):
+            break
+        game.redraw(player_id)
+    return choose(game, player_id, pool)
 
 
 def choose_origin(game, player_id: int, pool: AgentPool) -> str:

@@ -19,7 +19,7 @@ import rules  # noqa: E402
 from config import DEFAULT_CONFIG  # noqa: E402
 from game import Game, GameError  # noqa: E402
 from helpers import ScriptedRng  # noqa: E402
-from models import Card, DealtCard, Phase  # noqa: E402
+from models import Card, DealtCard, Origin, Phase  # noqa: E402
 
 CFG = DEFAULT_CONFIG
 PICKS = CFG.picks_per_round
@@ -741,6 +741,127 @@ class TestRedraw(unittest.TestCase):
         self.assertEqual(game.redraw(1), cost)
         self.assertEqual(game.players[1].money, 3)
         self.assertEqual(len(game.hands[1]), CFG.hand_size)
+
+    def test_official_hears_the_event_before_choosing(self):
+        """官二代「透风」：选牌阶段就看得到本轮事件；别人连这个键都没有；揭晓的就是透露的那个。"""
+        game = make_game(3)
+        game.players[1].origin = Origin.OFFICIAL
+        game.start_game()
+        tip = game.private_state(1).get("tipoff_event")
+        self.assertIsNotNone(tip)
+        self.assertNotIn("tipoff_event", game.private_state(2))
+        self.assertNotIn("tipoff_event", game.private_state(3))
+        self.assertIsNone(game.public_state()["current_event"])
+        self.assertNotIn(tip["name"], json.dumps(game.public_state(), ensure_ascii=False))
+        for pid in game.players:
+            game.select_actions(pid, [])
+            game.lock_action(pid)
+        revealed = game.reveal_event()
+        self.assertEqual(revealed.id, tip["id"])
+        self.assertNotIn("tipoff_event", game.private_state(1))  # 揭晓之后就不需要透风了
+
+    def test_the_tipoff_survives_a_restart(self):
+        """服务器重启后官二代听到的风声不能变。"""
+        game = make_game(2)
+        game.players[1].origin = Origin.OFFICIAL
+        game.start_game()
+        tip = game.private_state(1)["tipoff_event"]["id"]
+        restored = Game.from_snapshot(game.to_snapshot(), cfg=CFG)
+        self.assertEqual(restored.private_state(1)["tipoff_event"]["id"], tip)
+
+    def test_grinder_card_preview_flags_overtime(self):
+        """卷王手牌上要写出「加班」，牌面数字和普通人一样。"""
+        game = make_game(2)
+        game.players[1].origin = Origin.GRINDER
+        game.start_game()
+        mine, plain = (game.private_state(p)["card_preview"]["WORK"] for p in (1, 2))
+        self.assertEqual(mine["overtime"], CFG.origin_grinder_overtime_multiplier)
+        self.assertFalse(plain["overtime"])
+        self.assertEqual((mine["merit_lo"], mine["merit_hi"]), (plain["merit_lo"], plain["merit_hi"]))
+
+    def test_grinder_always_holds_two_works_even_after_a_redraw(self):
+        game = make_game(2)
+        game.players[1].origin = Origin.GRINDER
+        game.start_game()
+        works = lambda: sum(d.card is Card.WORK for d in game.hands[1])
+        self.assertGreaterEqual(works(), 2)
+        game.players[1].money = 50
+        game.redraw(1)
+        self.assertGreaterEqual(works(), 2)
+
+    def test_red_has_a_one_shot_family_card(self):
+        """一纸调令：只有红二代有；不在手牌里也能选；打出去就算用掉（没升成也一样）。"""
+        game = make_game(2)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        self.assertTrue(game.private_state(1)["family_card"]["usable"])
+        self.assertIsNone(game.private_state(2)["family_card"])
+        with self.assertRaises(GameError):
+            game.select_actions(2, [{"action": "PROMOTE_FAMILY"}])
+        game.players[1].merit = game.players[1].money = 0  # 资源不够：会白用
+        game.select_actions(1, [{"action": "PROMOTE_FAMILY"}])
+        for pid in game.players:
+            game.lock_action(pid)
+        game.reveal_event()
+        game.resolve()
+        self.assertIn(1, game.family_used)
+        self.assertIsNone(game.private_state(1)["family_card"])  # 用掉就没了
+        if not game.is_over:
+            game.advance_round()
+            with self.assertRaises(GameError):
+                game.select_actions(1, [{"action": "PROMOTE_FAMILY"}])
+
+    def test_family_card_is_not_offered_on_the_last_step(self):
+        game = make_game(2)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        game.players[1].rank = CFG.president_rank - 1
+        info = game.private_state(1)["family_card"]
+        self.assertFalse(info["usable"])
+        self.assertIn("主席", info["why"])
+        with self.assertRaises(GameError):
+            game.select_actions(1, [{"action": "PROMOTE_FAMILY"}])
+
+    def test_family_card_use_survives_a_restart(self):
+        game = make_game(2)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        game.family_used.add(1)
+        restored = Game.from_snapshot(game.to_snapshot(), cfg=CFG)
+        self.assertIn(1, restored.family_used)
+
+    def test_rich_redraws_once_free_then_pays_the_base_price(self):
+        """富二代每轮第一次免费，第二次才像别人一样从底价开始；下一轮重新免费。"""
+        game = make_game(2)
+        game.players[1].origin = Origin.RICH
+        game.start_game()
+        game.players[1].money = 0
+        priv = game.private_state(1)
+        self.assertTrue(priv["redraw_available"])
+        self.assertEqual(priv["redraw_cost"], 0)
+        self.assertEqual(priv["redraw_next_cost"], CFG.redraw_cost(0))
+        self.assertTrue(priv["redraw_affordable"], "一分钱没有也能免费换")
+        self.assertEqual(game.redraw(1), 0)
+        self.assertEqual(game.players[1].money, 0)
+        self.assertFalse(game.private_state(1)["redraw_affordable"])  # 第二次要钱了
+        game.players[1].money = 10
+        self.assertEqual(game.redraw(1), CFG.redraw_cost(0))
+        # 免费那次不进流水账（0 元），也不影响普通人
+        self.assertEqual(game.private_state(2)["redraw_cost"], CFG.redraw_cost(0))
+
+    def test_free_redraw_resets_every_round(self):
+        game = make_game(2)
+        game.players[1].origin = Origin.RICH
+        game.start_game()
+        game.redraw(1)
+        for pid in game.players:
+            game.select_actions(pid, [])
+            game.lock_action(pid)
+        game.reveal_event()
+        game.resolve()
+        if not game.is_over:
+            game.advance_round()
+            self.assertEqual(game.private_state(1)["redraw_cost"], 0)
 
     def test_cannot_afford_means_cannot_redraw(self):
         game = make_game(2)

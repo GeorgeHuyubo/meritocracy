@@ -176,11 +176,8 @@ class Hub:
                     # 换一次还是没摸到干扰牌就接着换：他登顶游戏就结束了，
                     # 这时候省下来的钱一分都花不出去。价格逐次翻倍，
                     # 付不起时 wants_redraw 自己会转 False，不会换个没完。
-                    for _ in range(ai.MAX_PANIC_REDRAWS):
-                        if not ai.wants_redraw(game, pid, room.pool):
-                            break
-                        game.redraw(pid)
-                    game.select_actions(pid, ai.choose(game, pid, room.pool))
+                    # 富二代还有每轮一次的免费换牌，手牌烂就换。都在 ai.turn 里。
+                    game.select_actions(pid, ai.turn(game, pid, room.pool))
                     game.lock_action(pid)
                     moved = True
                 except GameError as exc:  # AI 出了非法牌不能拖垮整局
@@ -452,6 +449,8 @@ async def api_config() -> JSONResponse:
             "promotion_money_costs": cfg.promotion_money_costs,
             "promotion_merit_costs": cfg.promotion_merit_costs,
             "report_reward_ratio": str(cfg.report_reward_ratio),
+            "bribe_forfeit_ratio": str(cfg.bribe_forfeit_ratio),
+            "origin_rich_free_redraws": cfg.origin_rich_free_redraws,
             "redraw_costs": list(cfg.redraw_costs),
             "redraw_cost_growth": cfg.redraw_cost_growth,
             "warnings_before_demotion": cfg.warnings_before_demotion,
