@@ -403,3 +403,14 @@ details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 
 /* 红二代「一纸调令」：摆在手牌后面的那张特殊牌 */
 .card.family { border: 1px dashed var(--gold); }
+
+/* 规则速查最上面的「一图看懂」：攻击 / 举报各克一条路线 */
+.rulesbox .quick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0; }
+.rulesbox .qbox { background: var(--panel2); border-radius: 8px; padding: 8px 10px; border-top: 3px solid var(--line); }
+.rulesbox .qbox.atk { border-top-color: var(--red); }
+.rulesbox .qbox.rpt { border-top-color: var(--blue); }
+.rulesbox .qhead { color: var(--text); font-weight: 700; }
+.rulesbox .qsub { color: var(--dim); font-weight: 400; font-size: 11px; }
+.rulesbox .qarrow { color: var(--gold); font-size: 12px; margin: 2px 0 4px; }
+.rulesbox .qitem { font-size: 12px; margin-bottom: 2px; }
+@media (max-width: 520px) { .rulesbox .quick { grid-template-columns: 1fr; } }

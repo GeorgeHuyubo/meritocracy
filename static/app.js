@@ -873,6 +873,51 @@ function renderRules() {
   document.querySelectorAll(".rulesbox").forEach((el) => { el.innerHTML = html; });
 }
 
+// 「一图看懂」：试玩反馈说规则太长，先给一张克制关系图 + 升职卡怎么用，细节放后面
+function quickRulesHtml(c) {
+  const top = c.president_rank - 1;
+  const lastMoney = c.promotion_money_costs[top];
+  const lastMerit = c.promotion_merit_costs[top];
+  const steal = fracText(c.attack_steal_fraction);
+  return `
+<h4>一图看懂</h4>
+<div class="quick">
+  <div class="qbox atk">
+    <div class="qhead">⚔ 政治攻击 <span class="qsub">明枪 · 公报署名</span></div>
+    <div class="qarrow">克 ↓ 政绩路线</div>
+    <div class="qitem"><b>埋头工作</b> → 这轮功劳 ${steal} 被抢走</div>
+    <div class="qitem"><b>政绩升职</b> → 这轮升不上去（政绩不掉）</div>
+    <div class="qitem"><b>没干正事</b>（捞钱/买官/搞人）→ 戴帽子扣政绩</div>
+  </div>
+  <div class="qbox rpt">
+    <div class="qhead">🕵 匿名举报 <span class="qsub">暗箭 · 没人知道是谁</span></div>
+    <div class="qarrow">克 ↓ 金钱路线</div>
+    <div class="qitem"><b>中饱私囊 / 以权谋私</b> → 本轮赃款没收</div>
+    <div class="qitem"><b>贿赂升职</b> → 官升不成，${bribeLossText()}</div>
+    <div class="qitem">两种都记一次<b>降职警告</b>（满 ${c.warnings_before_demotion} 次降一级）</div>
+  </div>
+</div>
+<p class="rsub">政绩是公开的、钱是暗的。<b>走政绩只怕攻击，走钱只怕举报</b>；
+工资谁都碰不到。举报打到这轮清白的人 = 白打；攻击总能落下一样（抢功 / 挡升职 / 戴帽子）。</p>
+
+<table class="rtab">
+  <thead><tr><th>升职卡</th><th>花什么</th><th>被攻击</th><th>被举报查实</th></tr></thead>
+  <tbody>
+    <tr><td><b>政绩升职</b></td><td>政绩</td><td>暂缓，政绩不掉</td><td>不受影响</td></tr>
+    <tr><td><b>贿赂升职</b></td><td>钱</td><td>不受影响</td><td>失败，${bribeLossText()}</td></tr>
+    <tr><td><b>通用升职</b></td><td>先政绩，不够用钱</td><td>改走钱这条路</td><td>走钱时失败</td></tr>
+    <tr><td><b>一纸调令</b><br><span class="qsub">红二代 · 每局一次</span></td><td>先政绩，不够用钱</td>
+        <td>拦不住</td><td>拦不住（用钱那笔记警告）</td></tr>
+  </tbody>
+</table>
+<p class="rsub"><b>升国家主席</b>（${esc(c.rank_names[top])}→${esc(c.rank_names[top + 1])}）：
+钱 <b>${lastMoney}</b> 和政绩 <b>${lastMerit}</b> <b>都要够、都要花</b>。
+怕谁由你打的卡决定：政绩升职只怕攻击（被拦只是暂缓、一分不亏），贿赂升职只怕举报，
+通用升职被攻击就改走钱、两样都挨就失败。工龄和一纸调令都升不到主席；
+同一轮多人登顶只留家底最厚的那个。</p>
+`;
+}
+
 function rulesHtml(c) {
   const rank = priv ? priv.rank : null;
   const frac = (str) => {
@@ -945,6 +990,7 @@ function rulesHtml(c) {
   const tiebreak = (c.final_ranking_keys || []).map((k) => rankKeyCn[k] || k).join(" > ");
 
   return `
+${quickRulesHtml(c)}
 <p class="rsub">每轮发 ${c.hand_size} 张牌，秘密选 ${c.picks_per_round} 张；所有人锁定后才揭示
 全局事件，然后统一结算。最多 ${c.max_rounds} 轮。</p>
 
@@ -954,7 +1000,8 @@ function rulesHtml(c) {
   <tbody>${steps}</tbody>
 </table>
 <ul class="rlist">
-  <li><b>升职必须打出晋升卡</b>：政绩升职 / 贿赂升职 / 通用升职（通用两种都能用）。</li>
+  <li><b>升职必须打出晋升卡</b>：政绩升职 / 贿赂升职 / 通用升职（通用两种都能用）。
+      红二代另有每局一次的「一纸调令」。</li>
   <li>一轮最多升一级。同一官职连续待满 ${c.tenure_required} 轮自动按工龄升一级
       （工龄升不到主席）。</li>
   <li>升职会<b>花掉</b>门槛那部分资源（贿赂升职花钱，政绩升职花政绩）。</li>
@@ -990,9 +1037,10 @@ function rulesHtml(c) {
           : ""
       }</li>
   <li><b>这一轮刚贪来的钱，当轮花不出去。</b>晋升卡排在贪污牌后面的话，
-      要等举报结算完、确认没被抄家，才会兑现。</li>
+      要等举报结算完、确认没被查实，才会兑现。</li>
   <li><b>被举报查实 = 本轮花钱的晋升作废</b>（贿赂升职、通用升职走钱那条路），
-      ${bribeLossText()}；把晋升卡排到贪污前面也躲不掉——官会被撤回来。
+      ${bribeLossText()}；把晋升卡排到贪污前面也躲不掉——官会被撤回来
+      （红二代的一纸调令例外：官不撤，只记警告）。
       <b>凭政绩升职不受影响</b>：政绩路线只怕政治攻击。
       （没人举报你，或者你这轮手脚干净，都不受影响。）</li>
 </ul>
