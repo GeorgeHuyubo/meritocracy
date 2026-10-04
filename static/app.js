@@ -13,7 +13,7 @@ const CARD_INFO = {
   ATTACK:        { cn: "政治攻击", desc: "抢他这轮的功劳归我（明枪）", target: true },
   PROMOTE_MERIT: { cn: "政绩升职", desc: "花政绩升官", target: false },
   PROMOTE_MONEY: { cn: "贿赂升职", desc: "花金钱升官", target: false },
-  PROMOTE_ANY:   { cn: "通用升职", desc: "政绩优先，没了改用钱", target: false },
+  PROMOTE_ANY:   { cn: "通用升职", desc: "政绩升职，失败就再试贿赂升职", target: false },
   // 红二代「一纸调令」：不在手牌里，每局一次，单独摆在手牌后面
   PROMOTE_FAMILY: { cn: "一纸调令", desc: "家族升职：政绩优先、其次金钱", target: false },
 };
@@ -333,7 +333,7 @@ function renderAction() {
         const COUNTER = {
           PROMOTE_MERIT: "花政绩 · 怕政治攻击（会被暂缓）",
           PROMOTE_MONEY: `花金钱 · 怕举报（${bribeLossText()}）`,
-          PROMOTE_ANY: "政绩优先；被攻击就改花钱",
+          PROMOTE_ANY: "= 政绩升职；政绩不够或被攻击挡下，就再试一次贿赂升职",
         };
         effect =
           (pv.usable ? "✓ 现在可用" : pv.why || "资源不够") +
@@ -905,7 +905,8 @@ function quickRulesHtml(c) {
   <tbody>
     <tr><td><b>政绩升职</b></td><td>政绩</td><td>暂缓，政绩不掉</td><td>不受影响</td></tr>
     <tr><td><b>贿赂升职</b></td><td>钱</td><td>不受影响</td><td>失败，${bribeLossText()}</td></tr>
-    <tr><td><b>通用升职</b></td><td>先政绩，不够用钱</td><td>改走钱这条路</td><td>走钱时失败</td></tr>
+    <tr><td><b>通用升职</b></td><td colspan="3">= 政绩升职；政绩升职失败（政绩不够、或被攻击挡下）
+        就再试一次贿赂升职——走到贿赂那一步就怕举报</td></tr>
     <tr><td><b>一纸调令</b><br><span class="qsub">红二代 · 每局一次</span></td><td>先政绩，不够用钱</td>
         <td>拦不住</td><td>拦不住（用钱那笔记警告）</td></tr>
   </tbody>
@@ -913,7 +914,7 @@ function quickRulesHtml(c) {
 <p class="rsub"><b>升国家主席</b>（${esc(c.rank_names[top])}→${esc(c.rank_names[top + 1])}）：
 钱 <b>${lastMoney}</b> 和政绩 <b>${lastMerit}</b> <b>都要够、都要花</b>。
 怕谁由你打的卡决定：政绩升职只怕攻击（被拦只是暂缓、一分不亏），贿赂升职只怕举报，
-通用升职被攻击就改走钱、两样都挨就失败。工龄和一纸调令都升不到主席；
+通用升职先按政绩升职算、被攻击挡下就再试贿赂升职，两样都挨就失败。工龄和一纸调令都升不到主席；
 同一轮多人登顶只留家底最厚的那个。</p>
 `;
 }
@@ -1000,7 +1001,8 @@ ${quickRulesHtml(c)}
   <tbody>${steps}</tbody>
 </table>
 <ul class="rlist">
-  <li><b>升职必须打出晋升卡</b>：政绩升职 / 贿赂升职 / 通用升职（通用两种都能用）。
+  <li><b>升职必须打出晋升卡</b>：政绩升职 / 贿赂升职 / 通用升职
+      （通用升职 = 政绩升职，失败就再试贿赂升职）。
       红二代另有每局一次的「一纸调令」。</li>
   <li>一轮最多升一级。同一官职连续待满 ${c.tenure_required} 轮自动按工龄升一级
       （工龄升不到主席）。</li>
@@ -1091,7 +1093,7 @@ ${quickRulesHtml(c)}
   <tbody>
     <tr><td>政绩升职</td><td><b>暂缓</b>（政绩保留）</td><td>不受影响</td></tr>
     <tr><td>贿赂升职</td><td>不受影响</td><td><b>失败</b>，${bribeLossText()}</td></tr>
-    <tr><td>通用升职</td><td>改走<b>贿赂</b>这条路</td><td>走政绩，不受影响</td></tr>
+    <tr><td>通用升职</td><td>政绩升职失败，再试<b>贿赂升职</b></td><td>走政绩那条就不受影响</td></tr>
     <tr><td class="hererow">通用升职 + 两样都挨</td><td colspan="2" class="hererow">
       <b>失败，金钱损失，政绩保留</b></td></tr>
   </tbody>
