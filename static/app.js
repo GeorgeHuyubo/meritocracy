@@ -303,12 +303,6 @@ function renderAction() {
       let effect = info.desc;
       let dead = false;
       const mult = Number(priv.card_preview.mult_num) / Number(priv.card_preview.mult_den);
-      // 只有开着"大案额外记警告"时，这条提示才是真的。
-      // 默认关着（任何一次查实都只记一次警告），不判断的话这行会到处乱报。
-      const bigCaseHurts = (cfgCache?.major_corruption_warnings || 1) > 1;
-      const line = bigCaseHurts
-        ? priv.card_preview.major_corruption_threshold
-        : Infinity;
       const scaled = (v) => Math.floor(v * mult);
       // 镜像 rules.graft_merit：先按比例折牌面，再走官职倍率。
       // 这里以前写死了 /2，配置改成 1/4 之后牌面上的政绩就一直是错的。
@@ -323,12 +317,10 @@ function renderAction() {
             `再拿 ${pv.overtime} 倍工资的加班费）</span>` : "");
       } else if (c === "CORRUPT") {
         const amt = scaled(d.value);
-        effect = `金钱 <b>+${amt}</b>` +
-          (amt >= line ? `<span class="warn">⚠这一笔就是大案</span>` : "");
+        effect = `金钱 <b>+${amt}</b>`;
       } else if (c === "GRAFT") {
         const amt = scaled(d.value);
-        effect = `钱 <b>+${amt}</b> 政绩 <b>+${graftMerit(d.value)}</b>` +
-          (amt >= line ? `<span class="warn">⚠这一笔就是大案</span>` : "");
+        effect = `钱 <b>+${amt}</b> 政绩 <b>+${graftMerit(d.value)}</b>`;
       } else if (c.startsWith("PROMOTE")) {
         const COUNTER = {
           PROMOTE_MERIT: "花政绩 · 怕政治攻击（会被暂缓）",
@@ -668,7 +660,6 @@ function privateResultHtml() {
   if (r.money_confiscated) ledger.push([`赃款被没收`, `−${r.money_confiscated}`, "bad"]);
   // 做账保住的那部分本来也要被抄。不写出来，玩家根本看不出技能帮了多少
   if (r.laundered) ledger.push([`做账保住的`, `(+${r.laundered})`, "good"]);
-  if (r.hush_money_paid) ledger.push([`上下打点压事`, `−${r.hush_money_paid}`, "bad"]);
   if (r.promotion_money_cost) {
     ledger.push([`晋升花掉`, `−${r.promotion_money_cost}`, "bad"]);
   }
@@ -730,8 +721,6 @@ function privateResultHtml() {
       '<div class="line good">降职警告记满了 —— 上头有人打了招呼，' +
         "你的位子纹丝不动。</div>"
     );
-  if (r.tenure_reset_by_attack)
-    L.push(`<div class="line bad">资历被搅黄，${r.tenure_reset_by_attack} 轮工龄清零</div>`);
   (r.notes || []).forEach((n) => L.push(`<div class="line subtle">${esc(n)}</div>`));
   L.push(
     `<div class="line">当前：${esc(priv.rank_name)} · 金钱 ${r.money_after} · 政绩 ${
@@ -1034,7 +1023,7 @@ ${quickRulesHtml(c)}
       ÷${c.merit_overflow_divisor}。</li>
   <li>「生产牌 → 晋升卡」：先干活，产出按<b>现在</b>的倍率算，多出来的还要被砍。</li>
   <li>门槛还没够就把晋升卡排前面 = <b>白打</b>，系统不会帮你重排。</li>
-  <li>晋升卡排在<b>举报/攻击后面</b>，才能花到这轮抄来的赃款和封口费。</li>
+  <li>晋升卡排在<b>举报后面</b>，才能花到这轮举报分来的赃款。</li>
   <li><b>换牌要花钱</b>：底价按当前官职定（${c.redraw_costs
         .slice(0, c.president_rank)
         .join(" / ")}），<b>同一轮里每换一次翻 ${c.redraw_cost_growth} 倍</b>
@@ -1060,7 +1049,7 @@ ${quickRulesHtml(c)}
   <li><b>中饱私囊</b>：加金钱。钱是<b>隐藏</b>的，别人只能靠坊间传闻猜，
       但这笔钱会被举报和反腐风暴盯上。期望收益是埋头工作的 3 倍。</li>
   <li><b>坊间传闻</b>：每轮结算后点名<b>本轮到手钱最多</b>的人（不报金额）。
-      口径 = 工资 + 这轮贪的钱（打点费不扣；<b>被举报/风暴查实的那笔记 0</b>）。
+      口径 = 工资 + 这轮贪的钱（<b>被举报/风暴查实的那笔记 0</b>）。
       <b>没人贪了钱还没被抓的那一轮不传</b> —— 所以只要有传闻，就说明这轮至少有人捞了还没被抓，
       但被点名的不一定是他（官大的人光拿工资也可能上榜）。</li>
   <li><b>以权谋私</b>：钱为主（比中饱私囊少），顺带一点政绩 ——

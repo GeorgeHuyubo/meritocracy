@@ -714,7 +714,6 @@ class Game:
         for key, label in (
             ("merit_stolen_from_me", "政绩被人抢走"),
             ("money_confiscated", "赃款被举报没收"),
-            ("tenure_wrecked", "资历被搅黄"),
             ("wasted_report", "举报扑空"),
             ("wasted_attack", "攻击扑空"),
             ("wasted_promotion_card", "晋升卡没用上"),
@@ -925,20 +924,11 @@ class Game:
         graft_merit_lo = rules.graft_merit(glo, rank, None, cfg)
         graft_merit_hi = rules.graft_merit(ghi, rank, None, cfg)
 
-        line = cfg.major_corruption_threshold
         # 我去打别人、对方无所事事时扣他多少（按**我**看不到的对方官职算不了，
         # 这里给的是"打同级的人"的参考值，UI 只用来说明量级）
         idle_penalty = rules.work_merit(cfg.attack_merit_penalty, rank, None, cfg)
         # 戴帽子扣成了我自己记几点功（按**我的**官职）
         hat_reward = rules.work_merit(cfg.attack_hat_reward, rank, None, cfg)
-
-        def risk(lo: int, hi: int) -> str:
-            """这一笔会不会踩到重大贪腐线（踩到 = 被举报直接打回基层）。"""
-            if lo >= line:
-                return "major"      # 必然重大
-            if hi >= line:
-                return "maybe"      # 运气不好会重大
-            return "minor"          # 只会降一级
 
         def promo(uses_merit: bool, uses_money: bool) -> dict[str, Any]:
             ok_merit = uses_merit and tc is not None and player.merit >= tc
@@ -961,14 +951,12 @@ class Game:
             "CORRUPT": {
                 "money_lo": corrupt_lo,
                 "money_hi": corrupt_hi,
-                "risk": risk(corrupt_lo, corrupt_hi),
             },
             "GRAFT": {
                 "money_lo": graft_money_lo,
                 "money_hi": graft_money_hi,
                 "merit_lo": graft_merit_lo,
                 "merit_hi": graft_merit_hi,
-                "risk": risk(graft_money_lo, graft_money_hi),
             },
             "rank_multiplier": str(cfg.work_multiplier(rank)),
             "idle_penalty": idle_penalty,
@@ -978,7 +966,6 @@ class Game:
             "PROMOTE_MERIT": promo(True, False),
             "PROMOTE_MONEY": promo(False, True),
             "PROMOTE_ANY": promo(True, True),
-            "major_corruption_threshold": line,
         }
 
     def _next_promotion_info(self, player: PlayerState) -> dict[str, Any] | None:

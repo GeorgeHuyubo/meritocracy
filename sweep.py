@@ -57,6 +57,16 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "hat1": {"attack_hat_reward": 1},
     "hat2": {"attack_hat_reward": 2},
     "hat3": {"attack_hat_reward": 3},
+    # ---- 牌库比例（举报一律保持 2 张）----
+    "atk3": {"card_deal_distribution": deck(ATTACK=3)},
+    "atk3_c2": {"card_deal_distribution": deck(ATTACK=3, CORRUPT=2)},
+    "atk3_g1": {"card_deal_distribution": deck(ATTACK=3, GRAFT=1)},
+    "c2": {"card_deal_distribution": deck(CORRUPT=2)},
+    "w5": {"card_deal_distribution": deck(WORK=5)},
+    "atk3_w5_c2": {"card_deal_distribution": deck(ATTACK=3, WORK=5, CORRUPT=2)},
+    # ---- 出身 ----
+    "rich18": {"origin_old_money_start": 18},   # 富二代开局钱（默认 15）
+    "rich20": {"origin_old_money_start": 20},
 }
 
 

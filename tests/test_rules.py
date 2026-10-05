@@ -457,10 +457,35 @@ class TestAttackStealMerit(unittest.TestCase):
         cfg = dataclasses.replace(STEAL_ATTACK_CFG, attack_steal_fraction=Fraction(1, 10))
         target = player(1, merit=100)  # 只抢掉一成，仍然够 18 的门槛
         attacker = player(2)
-        out = self.resolve([target, attacker], {2: Action(Card.ATTACK, 1)}, cfg=cfg)
+        out = self.resolve(
+            [target, attacker],
+            {1: Action(Card.PROMOTE_MERIT), 2: Action(Card.ATTACK, 1)},
+            cfg=cfg,
+        )
         self.assertTrue(out.outcomes[1].merit_promotion_blocked)
         self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
         self.assertEqual(target.rank, 0)
+
+    def test_no_promotion_card_means_nothing_was_blocked(self):
+        """没打晋升卡就没有"被挡下"这回事：挨了攻击、资源又够门槛，结算页也不该说"本轮晋升被阻止"。
+
+        踩过（对局 TX3B 第 3 轮）：真人打的是举报 + 贪污，挨了一刀又被反腐风暴查办，
+        规则书原版"够了自动升"那套判定照跑，结算页显示"本轮晋升被阻止"。
+        """
+        target = player(1, merit=100, money=50)
+        attacker = player(2)
+        reporter = player(3)
+        out = resolve(
+            [target, attacker, reporter],
+            {1: [Action(Card.CORRUPT, value=16)], 2: [Action(Card.ATTACK, 1)],
+             3: [Action(Card.REPORT, 1)]},
+            cfg=REAL_CFG,
+        )
+        o = out.outcomes[1]
+        self.assertTrue(o.attacked and o.report_effective)
+        self.assertFalse(o.merit_promotion_blocked)
+        self.assertFalse(o.promotion_blocked_by_attack_report)
+        self.assertFalse(o.private_view()["promotion_blocked"])
 
     def test_stable_event_still_disables_it(self):
         target = player(1, merit=15)  # 15 < 18，不会因为晋升干扰观察

@@ -1413,7 +1413,16 @@ def resolve_round(
 
     # 记录"没收与降级之前"的晋升资格。规则书第 12 节（攻击阻断政绩晋升）和
     # 第 16 节（攻击 + 举报）都是按这个时点判定的。
+    #
+    # **只在"够了自动升"的规则书原版里用**（PROMOTION_REQUIRES_CARD=False）。
+    # 现在升职必须打晋升卡，"被挡下"由那张卡自己结算时判定（_resolve_promotion_card，
+    # 认得贫农只挡一个人、一纸调令拦不住）。以前这段在出牌制下照跑：只要挨了攻击、
+    # 资源又够门槛，就算一张晋升卡都没打也记成"晋升被阻止"——
+    # 结算页对没想升的人显示"本轮晋升被阻止"；而且它跑在延后结算的晋升卡之前，
+    # 会把只挨了一个人攻击的贫农错误地按住。
     for p in ordered:
+        if cfg.promotion_requires_card:
+            break
         o = outcome.outcomes[p.id]
         elig_money_pre = can_promote_by_money(p, cfg)
         elig_merit_pre = can_promote_by_merit(p, cfg)
