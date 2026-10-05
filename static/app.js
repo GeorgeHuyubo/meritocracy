@@ -227,28 +227,25 @@ function renderOrder() {
     .map((x, i) => {
       const info = CARD_INFO[x.card] || { cn: x.card };
       const to = x.target !== null ? `<span class="to">→ ${esc(nameOf(x.target))}</span>` : "";
-      const step = `<div class="step"><span class="num">${i + 1}</span>${esc(info.cn)}${to}</div>`;
+      // 每张都能左右移（一纸调令也一样，结算严格照这个顺序）
+      const left = i > 0 ? `<span class="mv" data-i="${i}" data-d="-1" title="往前挪">◀</span>` : "";
+      const right = i < local.length - 1
+        ? `<span class="mv" data-i="${i}" data-d="1" title="往后挪">▶</span>` : "";
+      const step = `<div class="step">${left}<span class="num">${i + 1}</span>` +
+        `${esc(info.cn)}${to}${right}</div>`;
       const arrow = i ? `<span class="arrow">→</span>` : "";
       return arrow + step;
     })
-    .join("") + `<button class="swap" id="swapBtn">⇄ 调换顺序</button>`;
-
-  $("swapBtn").onclick = () => {
-    // 一纸调令永远最先结算，只调换手牌那几张
-    const fam = local.filter((x) => x.index === FAMILY_INDEX);
-    local = fam.concat(local.filter((x) => x.index !== FAMILY_INDEX).reverse());
-    syncPicks();
-    render();
-  };
+    .join("");
 
   // 晋升卡摆在哪里，这轮的产出就按哪个官职算——说清楚
   const promoAt = local.findIndex((x) => x.card.startsWith("PROMOTE"));
-  // 只有**实际要掏钱**的晋升才会被"刚贪的钱当轮花不出去"拖住。
+  // 只有**实际要掏钱**的晋升才会被"刚贪的钱被举报就抄走"影响。
   // 政绩升职一分钱不用出，排在贪污后面照样当场兑现——别吓唬人。
   const np = priv.next_promotion || {};
   const meritEnough = np.merit_gap === 0;
   const card = promoAt >= 0 ? local[promoAt].card : null;
-  // 一纸调令不等举报结算，"刚贪的钱当轮花不出去"对它不适用
+  // 一纸调令被查实也不撤官，单独提示（见下面 familyDirty）
   const willSpendMoney =
     card !== null && card !== "PROMOTE_FAMILY" &&
     (card === "PROMOTE_MONEY" ||
@@ -261,6 +258,10 @@ function renderOrder() {
   const producesAfter = local
     .slice(promoAt + 1)
     .some((x) => ["WORK", "CORRUPT", "GRAFT"].includes(x.card));
+  const famAt = local.findIndex((x) => x.card === "PROMOTE_FAMILY");
+  const familyDirty =
+    famAt > 0 && !meritEnough &&
+    local.slice(0, famAt).some((x) => ["CORRUPT", "GRAFT"].includes(x.card));
   let hint = "排在前面的先结算。";
   if (promoAt >= 0) {
     const previewKey = local[promoAt].card === "PROMOTE_FAMILY" ? "PROMOTE_ANY" : local[promoAt].card;
@@ -277,8 +278,13 @@ function renderOrder() {
   }
   if (dirtyBefore) {
     hint +=
-      " 另外：晋升卡排在贪污后面，花的是<b>这一轮刚捞的钱</b>，" +
-      "要等举报结算完才兑现——万一被举报，这张晋升卡就作废了。";
+      " 另外：晋升卡排在贪污后面，花的是<b>这一轮刚捞的钱</b>——" +
+      "这一轮被举报查实的话，赃款当场抄走，这张晋升卡也作废。";
+  }
+  if (familyDirty) {
+    hint +=
+      " 一纸调令排在贪污后面，可以花<b>这一轮刚捞的钱</b>——" +
+      "但这一轮被举报查实的话，赃款当场抄走，剩下的钱不够就升不上去（调令照样用掉）。";
   }
   $("orderHint").innerHTML = hint;
 }
@@ -494,7 +500,8 @@ function familyCardHtml() {
   const badge = order >= 0 ? `<div class="count">${order + 1}</div>` : "";
   return `<div class="${cls}" data-index="${FAMILY_INDEX}">${badge}
     <div class="cn">一纸调令 <span class="subtle">· 红二代每局一次</span></div>
-    <div class="fx">${status}<span class="warn2">不占出牌位，用的那一轮最先结算 ·
+    <div class="fx">${status}<span class="warn2">不占出牌位，结算顺序在下面自己排 ·
+      排在干活后面能用上这一轮的政绩，排在贪污后面能花这一轮的赃款（被举报查实就抄走了，花不了） ·
       政绩优先、其次金钱 · 攻击举报都拦不住 · 不能升主席 · 打出去就算用掉</span></div></div>`;
 }
 
@@ -1033,8 +1040,8 @@ ${quickRulesHtml(c)}
           ? `<br>富二代每轮前 ${c.origin_rich_free_redraws} 次免费，之后从底价开始照常翻倍。`
           : ""
       }</li>
-  <li><b>这一轮刚贪来的钱，当轮花不出去。</b>晋升卡排在贪污牌后面的话，
-      要等举报结算完、确认没被查实，才会兑现。</li>
+  <li><b>行动卡按你排的顺序一张一张结算，举报当场生效。</b>晋升卡排在贪污后面，
+      能花这一轮刚贪的钱——前提是这一轮没被举报查实；查实了赃款当场抄走，这笔钱就没了。</li>
   <li><b>被举报查实 = 本轮花钱的晋升作废</b>（贿赂升职、通用升职走钱那条路），
       ${bribeLossText()}；把晋升卡排到贪污前面也躲不掉——官会被撤回来
       （红二代的一纸调令例外：官不撤，只记警告）。
@@ -1049,8 +1056,8 @@ ${quickRulesHtml(c)}
   <li><b>中饱私囊</b>：加金钱。钱是<b>隐藏</b>的，别人只能靠坊间传闻猜，
       但这笔钱会被举报和反腐风暴盯上。期望收益是埋头工作的 3 倍。</li>
   <li><b>坊间传闻</b>：每轮结算后点名<b>本轮到手钱最多</b>的人（不报金额）。
-      口径 = 工资 + 这轮贪的钱（<b>被举报/风暴查实的那笔记 0</b>）。
-      <b>没人贪了钱还没被抓的那一轮不传</b> —— 所以只要有传闻，就说明这轮至少有人捞了还没被抓，
+      口径 = 工资 + 这轮贪的钱（<b>被举报/风暴查实的那笔记 0</b>）+ 举报分到的赃款。
+      <b>这轮没人有工资以外的进账就不传</b> —— 所以只要有传闻，就说明这轮有人捞了钱没被抓、或者举报分到了赃款，
       但被点名的不一定是他（官大的人光拿工资也可能上榜）。</li>
   <li><b>以权谋私</b>：钱为主（比中饱私囊少），顺带一点政绩 ——
       这点政绩<b>一定少于埋头工作</b>，只是顺手之作。钱同样算贪污。</li>
@@ -1254,6 +1261,18 @@ $("hand").addEventListener("click", (e) => {
     local.push({ index: i, card, target: null });
     pendingIndex = CARD_INFO[card].target ? i : null;
   }
+  syncPicks();
+  render();
+});
+
+// 结算顺序栏：◀ ▶ 把这张牌往前 / 往后挪一位
+$("orderList").addEventListener("click", (e) => {
+  const el = e.target.closest(".mv");
+  if (!el || priv?.locked) return;
+  const i = Number(el.dataset.i);
+  const j = i + Number(el.dataset.d);
+  if (j < 0 || j >= local.length) return;
+  [local[i], local[j]] = [local[j], local[i]];
   syncPicks();
   render();
 });

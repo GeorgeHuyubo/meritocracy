@@ -1148,10 +1148,10 @@ class TestReportReward(unittest.TestCase):
         self.assertEqual(other.money, 0)
 
     def test_reward_is_not_corruption(self):
-        """分到的赃款不算贪污：不上财富广播，也不会让举报人被举报查实。
+        """分到的赃款不算贪污：不会让举报人被举报查实（但坊间传闻照样算进去）。
 
-        场上安排：1 号贪了被 2 号举报查实（贪污那项记 0，不上广播），
-        4 号也贪了但没人管——广播该点 4 号，绝不该点分到赃款的 2 号。
+        场上安排：1 号贪了 10 被 2 号举报查实（贪污那项记 0），2 号分到 5；
+        4 号贪了 10 没人管——4 号到手比 2 号多，广播点 4 号。
         """
         caught = player(1, rank=0, money=20, merit=0)
         reporter = player(2)
@@ -1171,10 +1171,8 @@ class TestReportReward(unittest.TestCase):
         self.assertEqual(out.outcomes[2].corrupt_amount, 0)
         self.assertTrue(out.outcomes[2].reported)
         self.assertFalse(out.outcomes[2].report_effective)  # 他本轮没贪污
-        # 1 号被查实 -> 记 0 -> 不上广播；4 号安然无恙 -> 上广播
         self.assertTrue(out.outcomes[1].report_effective)
         self.assertEqual(out.wealth_top_ids, [4])
-        self.assertNotIn("玩家2", out.wealth_broadcast[0])
 
     def test_mutual_reports_settle_simultaneously(self):
         a = player(1, rank=0, money=5, merit=0)
@@ -1352,8 +1350,8 @@ class TestWealthBroadcast(unittest.TestCase):
         self.assertIn("玩家1", out.wealth_broadcast[0])  # 20 > 10
         self.assertNotIn("玩家2", out.wealth_broadcast[0])
 
-    def test_caught_corruption_is_not_broadcast(self):
-        """被举报查实的人贪污那项记 0。全场只有他贪了 -> 只剩工资可比，不广播。"""
+    def test_caught_corruption_is_not_broadcast_but_the_reporters_share_is(self):
+        """被举报查实的人贪污那项记 0；但举报人分到的赃款算进传闻——照样有传闻，点举报人。"""
         caught = player(1, rank=0)
         reporter = player(2, rank=0)
         out = resolve(
@@ -1364,8 +1362,9 @@ class TestWealthBroadcast(unittest.TestCase):
         self.assertGreater(out.outcomes[1].corrupt_amount, 0)   # 确实贪了
         self.assertGreater(out.outcomes[1].money_confiscated, 0)  # 但被没收了
         self.assertTrue(out.outcomes[1].report_effective)
-        self.assertEqual(out.wealth_broadcast, [])
-        self.assertEqual(out.wealth_top_ids, [])
+        self.assertGreater(out.outcomes[2].money_from_reports, 0)
+        self.assertEqual(out.wealth_top_ids, [2])
+        self.assertIn("玩家2", out.wealth_broadcast[0])
 
     def test_storm_victim_is_not_broadcast_but_the_survivor_is(self):
         """榜首被反腐风暴查办了，贪污那项记 0，广播改播躲过一劫的那个。"""
@@ -2801,6 +2800,73 @@ class TestOrigins(unittest.TestCase):
         self.assertEqual(red.money, 3)  # 只花了一次门槛
         self.assertGreater(out.outcomes[2].money_from_reports, 0)
         self.assertTrue(any("调令" in m for m in out.public_messages))
+
+    def test_family_card_after_work_uses_this_rounds_merit(self):
+        """排在干活后面：这一轮的政绩算数。"""
+        tc = REAL_CFG.merit_cost(0)
+        red = player(1, rank=0, merit=tc - 5, origin=Origin.RED)
+        out = resolve(
+            [red, player(2)],
+            {1: [Action(Card.WORK, value=8), Action(Card.PROMOTE_FAMILY)]},
+            cfg=REAL_CFG,
+        )
+        self.assertTrue(out.outcomes[1].family_promotion)
+        self.assertEqual(red.rank, 1)
+
+    def test_family_card_can_spend_this_rounds_loot_unless_caught(self):
+        """排在贪污后面用钱升：这一轮刚贪的钱能花，但要等举报结算完——
+        没被抓就升；被抓了赃款整笔没收，钱不够就升不了（不能先贪再洗进官位）。"""
+        mc = REAL_CFG.money_cost(0)
+
+        def run(reported):
+            red = player(1, rank=0, merit=0, money=0, origin=Origin.RED)
+            reporter = player(2, rank=0)
+            acts = {1: [Action(Card.CORRUPT, value=18), Action(Card.PROMOTE_FAMILY)]}
+            if reported:
+                acts[2] = [Action(Card.REPORT, 1)]
+            out = resolve([red, reporter], acts, cfg=REAL_CFG)
+            return red, out.outcomes[1]
+
+        red, o = run(reported=False)
+        self.assertTrue(o.family_promotion, "没被抓：用这一轮的赃款升上去")
+        self.assertEqual(red.rank, 1)
+        red, o = run(reported=True)
+        self.assertTrue(o.report_effective)
+        self.assertEqual(o.money_confiscated, o.corrupt_amount, "赃款整笔没收，没被洗走")
+        self.assertFalse(o.family_promotion)
+        self.assertEqual(red.rank, 0)
+        self.assertGreater(mc, 0)
+
+    def test_last_step_merit_card_cannot_launder_this_rounds_loot(self):
+        """主席那一级政绩升职也要花钱：这一轮刚贪的钱得等举报结算完才能花。
+
+        对局 D7TE 第 10 轮：老李开局 14 块，以权谋私拿了 27 当场凑够 37 升主席，
+        反腐风暴来抄时兜里只剩 4——赃款大半被"洗"进了官位。
+        """
+        top = REAL_CFG.president_rank - 1
+        tc, mc = REAL_CFG.merit_cost(top), REAL_CFG.money_cost(top)
+
+        def run(clean_money, reported):
+            p1 = player(1, rank=top, merit=tc, money=clean_money)
+            reporter = player(2, rank=0)
+            acts = {1: [Action(Card.CORRUPT, value=18), Action(Card.PROMOTE_MERIT)]}
+            if reported:
+                acts[2] = [Action(Card.REPORT, 1)]
+            out = resolve([p1, reporter], acts, cfg=REAL_CFG)
+            return p1, out.outcomes[1]
+
+        # 被抓：赃款整笔没收（不会只剩个零头可抄），干净的钱不够 -> 升不上去
+        p1, o = run(clean_money=10, reported=True)
+        self.assertEqual(o.money_confiscated, o.corrupt_amount)
+        self.assertEqual(o.promotion, PromotionKind.NONE)
+        self.assertEqual(p1.rank, top)
+        # 没被抓：等结算完赃款还在，照样升
+        p1, o = run(clean_money=10, reported=False)
+        self.assertEqual(o.promotion, PromotionKind.BOTH)
+        # 被抓但干净的钱本来就够：举报冻不住政绩路线，照样升
+        p1, o = run(clean_money=mc, reported=True)
+        self.assertTrue(o.report_effective)
+        self.assertEqual(o.promotion, PromotionKind.BOTH)
 
     def test_family_card_cannot_make_president(self):
         top = REAL_CFG.president_rank - 1

@@ -22,6 +22,7 @@ from models import (
     Origin,
     Phase,
     PlayerState,
+    PromotionKind,
     RoundOutcome,
     Selection,
 )
@@ -355,8 +356,8 @@ class Game:
                 target_id = None
             parsed.append(Action(card=card, target_id=target_id, value=dealt.value))
 
-        # 一纸调令永远最先结算，不管提交时排在哪
-        sel.picks = sorted(parsed, key=lambda a: a.card is not Card.PROMOTE_FAMILY)
+        # 结算严格按提交的顺序走（一纸调令也一样，玩家自己排）
+        sel.picks = parsed
 
     # 兼容旧签名：一次只提交一张牌（追加到已选里）
     def select_action(
@@ -591,7 +592,10 @@ class Game:
             ],
         })
         for pid, o in outcome.outcomes.items():
-            rows = o.ledger_lines(self.cfg.rank_name(o.rank_after))
+            # 晋升那一行写升到的那一级（rank_after 可能已经被同一轮的降级改回去了）
+            rows = o.ledger_lines(self.cfg.rank_name(
+                o.rank_before + 1 if o.promotion is not PromotionKind.NONE else o.rank_after
+            ))
             if rows:
                 self.ledger.setdefault(pid, []).append(
                     {"round": rnd, "rows": rows,

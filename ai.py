@@ -240,7 +240,7 @@ class SmartAgent:
             self._times_attacked += 1
         top_ids = set(result.get("wealth_top_ids") or [])
         # 全场最高工资。传闻排的是"工资 + 没被查实的贪污款项（毛额，打点不扣；
-        # 被查实的贪污记 0）"，
+        # 被查实的贪污记 0）+ 举报分到的赃款"，
         # 而工资人人算得出来，所以这个数是下面两条边界的基准。
         top_salary = max(
             (self.cfg.salary(f["rank_before"]) for f in facts.values()), default=0
@@ -251,7 +251,7 @@ class SmartAgent:
         if mine:
             my_income = int(mine.get("salary", 0)) + (
                 0 if mine.get("report_effective") else int(mine.get("corrupt_amount", 0))
-            )
+            ) + int(mine.get("money_from_reports", 0))
         # 能证实的最高收入：每个人至少拿到自己那份工资，而我自己的是精确值
         known_income = max(top_salary, my_income)
 
@@ -318,6 +318,13 @@ class SmartAgent:
                     gained = max(gained, floor_dirty, self._expected_corrupt(rank_before))
                     evidence = 1.0
                     model.last_seen_corrupting = result["round"]
+                else:
+                    # 证明不了，但有传闻就说明这轮**确实有人**捞了钱没被抓（光拿工资不传），
+                    # 而被点名的就是到手最多的那个——真人一般就认定是他了。
+                    # 以前这里什么都不做，只留先验里那 0.45 × 期望：复盘 5A9J 里
+                    # 真人以权谋私连着被点名，AI 每次只给他记三四块，存款越估越少。
+                    gained = max(gained, self._expected_graft_money(rank_before))
+                    evidence = max(evidence, 0.7)
             else:
                 # 上界：他没被点名，所以 他的工资+脏钱 <= 榜首的工资+脏钱
                 #    => 他的脏钱 <= 榜首脏钱 + (榜首工资 - 他的工资)
@@ -348,9 +355,15 @@ class SmartAgent:
 
             # --- 晋升对钱的影响 ---
             if fact["promotion"] == "MONEY":
-                cost = self.cfg.money_cost(rank_before) or 0
+                # 买得起说明他手里至少有门槛那么多；花掉门槛之后余额**全留**
+                # （money_overflow_divisor 默认 1）。以前误用了老规则书的 overflow_divisor=5，
+                # 每次有人花钱升职，AI 就把他的存款估成五分之一——复盘 5A9J：
+                # 真人两次买官后实有 31，AI 估 2，到他凑齐钱登顶那轮谁也没拦。
+                cost = self._costs(rank_before, cur.get("origin"))[0] or 0
                 model.money_est = max(model.money_est, float(cost))
-                model.money_est = math.ceil((model.money_est - cost) / self.cfg.overflow_divisor)
+                model.money_est = math.ceil(
+                    (model.money_est - cost) / self.cfg.money_overflow_divisor
+                )
                 model.money_est = max(0.0, model.money_est)
 
         self._prev_players = players
@@ -724,9 +737,6 @@ class SmartAgent:
 
         chosen = list(best_combo or hand[:n_picks])
         chosen = self._order_picks(private, chosen)
-        if Card.PROMOTE_FAMILY in chosen:  # 一纸调令永远最先结算
-            chosen.remove(Card.PROMOTE_FAMILY)
-            chosen.insert(0, Card.PROMOTE_FAMILY)
 
         opponents = [p for p in public["players"] if p["id"] != self.id]
         picks: list[tuple[str, int | None]] = []
@@ -933,6 +943,7 @@ class SmartAgent:
         event = rules.event_by_id(tip["id"], cfg) if tip else None
         mc, tc = self._costs(rank, my_origin)
         here = self._progress(rank, money, merit, my_origin)
+        family_needs_loot = False  # 一纸调令排在后面、要花这一轮的赃款才凑够钱
 
         # 点数在发牌时就摇好了，所以这里用**确定值**算，不再用期望值猜
         vals = values or [0] * len(cards)
@@ -1001,15 +1012,16 @@ class SmartAgent:
             here_after = self._progress(new_rank, money_after, merit_after, my_origin)
             score = (1.0 - here) + self.w.promotion_bonus + here_after * 0.5
             promoted = True
-            # 一纸调令最先结算：组合里有它、又能"先升官"，升职就是它带来的
+            # 组合里有一纸调令、又能"先升官"：它排在最前面，升职就是它带来的
             via_family = Card.PROMOTE_FAMILY in cards
             # 走的是不是金钱那条路（行贿）：主席那一级由卡决定，其他台阶政绩够就走政绩
             bribed = (
                 not has_merit_card if cfg.needs_both(rank) else money_left < money
             )
         else:
-            # 没能"先升官"——一纸调令只在最先结算时才有用，这一轮赚到的赶不上它，
-            # 下面算"干完活再升"时不能把它当晋升卡（以前算了，AI 资源不够也照打，94% 白用）
+            # 没能"先升官"：下面按普通晋升卡算"干完活再升"时先不算一纸调令
+            # （它不能花这一轮贪的钱，只能靠政绩，单独在后面判断；
+            #   以前不分这么细，AI 资源不够也照打，94% 白用）
             via_family = False
             if Card.PROMOTE_FAMILY in cards:
                 rest = [c for c in cards if c is not Card.PROMOTE_FAMILY]
@@ -1032,6 +1044,21 @@ class SmartAgent:
             else:
                 bribed = False
 
+            # 一纸调令排在干活后面：用这一轮赚到的凑够门槛就能升——政绩照算；
+            # 这一轮贪的钱也能花，但要等举报结算完，被抓了钱就没了、官也升不成（下面风险里算）
+            if (
+                not promoted
+                and Card.PROMOTE_FAMILY in cards
+                and not any(c.is_promotion for c in cards if c is not Card.PROMOTE_FAMILY)
+                and not cfg.needs_both(rank)
+                and rank + 1 < cfg.president_rank
+            ):
+                if tc is not None and merit_after >= tc:
+                    promoted, bribed, via_family = True, False, True
+                elif mc is not None and money_after >= mc:
+                    promoted, bribed, via_family = True, True, True
+                    family_needs_loot = True
+
             if promoted:
                 score = (1.0 - here) + self.w.promotion_bonus
             else:
@@ -1040,7 +1067,7 @@ class SmartAgent:
                 if any(c.is_promotion for c in cards):
                     score -= 0.03
 
-        family = via_family  # 只有真是它把人送上去的，才按它的规矩算风险（官不撤）
+        family = via_family and not family_needs_loot  # 真是它送上去、又不靠赃款，才是"官不撤"
         if Card.PROMOTE_FAMILY in cards:
             # 每局只有一次：手里有普通晋升卡能升的时候别浪费它；
             # 打了却不是它送上去的 = 纯浪费（修之前 AI 会配着贿赂升职一起打，
@@ -1071,7 +1098,8 @@ class SmartAgent:
                 major = gained >= cfg.major_corruption_threshold
                 loss += (rank * 1.0 + self._progress(rank, money_after, 0)) if major else \
                     self._progress(rank, gained, 0)
-            if bribed and cfg.report_catches_bribery:
+            if bribed and cfg.report_catches_bribery and not family_needs_loot:
+                # （靠赃款的一纸调令被抓时只是没升成，钱的损失已经算在上面的贪污里了）
                 if family:
                     # 一纸调令用钱升：查实只记警告（钱本来就花了），官不撤
                     loss += self.w.family_warning_cost

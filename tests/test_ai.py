@@ -89,6 +89,45 @@ class TestTargetingIsUnbiased(unittest.TestCase):
         self.assertLess(picked[1] / total, 0.30, "1 号被针对得太多了")
 
 
+class TestMoneyEstimateAfterPublicEvents(unittest.TestCase):
+    """对手的钱是暗的，但几条公开事实足够把估计钉住（复盘 5A9J）。"""
+
+    def _observe(self, agent, fact_overrides, top_ids, merit_after=0, rank_after=None):
+        before = {"id": 2, "rank": 1, "merit": 0, "origin": None}
+        agent.observe({"players": [{"id": 1, "rank": 0, "merit": 0, "origin": None}, before],
+                       "last_result": None})
+        fact = {"player_id": 2, "attacked": False, "attack_merit_loss": 0,
+                "promotion": "NONE", "demotion": "NONE", "warnings_issued": 0,
+                "rank_before": 1, "rank_after": 1}
+        fact.update(fact_overrides)
+        after = dict(before, merit=merit_after, rank=fact["rank_after"])
+        agent.observe({
+            "players": [{"id": 1, "rank": 0, "merit": 0, "origin": None}, after],
+            "last_result": {"round": 1, "wealth_top_ids": top_ids, "player_facts": [
+                fact,
+                {"player_id": 1, "attacked": False, "attack_merit_loss": 0, "promotion": "NONE",
+                 "demotion": "NONE", "warnings_issued": 0, "rank_before": 0, "rank_after": 0},
+            ]},
+        })
+        return agent.models[2].money_est
+
+    def test_buying_a_promotion_keeps_the_change(self):
+        """花钱升职只扣门槛，余额全留——以前误按 /5 算，买过官的人存款被估成零头。"""
+        agent = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        agent.models[2] = ai.OpponentModel(money_est=CFG.money_cost(1) + 20)
+        est = self._observe(agent, {"promotion": "MONEY", "rank_after": 2}, [])
+        self.assertGreaterEqual(est, 20)
+
+    def test_being_named_by_the_gossip_counts_as_dirty_money(self):
+        """有传闻 = 这轮确实有人捞了没被抓，被点名的就是到手最多的——至少记一笔以权谋私。"""
+        quiet = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        named = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        # 政绩涨了（看起来在干活），我自己只拿工资，证明不了他贪了
+        base = self._observe(quiet, {}, [], merit_after=5)
+        est = self._observe(named, {}, [2], merit_after=5)
+        self.assertGreaterEqual(est - base, named._expected_graft_money(1) * 0.5)
+
+
 class TestAgentOnlySeesPublicInfo(unittest.TestCase):
     def test_choose_runs_off_the_same_payload_a_browser_gets(self):
         game = Game(game_id="t", cfg=CFG, rng=random.Random(5))
@@ -237,7 +276,7 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
         picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
         self.assertIn("PROMOTE_FAMILY", picks)
-        self.assertEqual(picks[0], "PROMOTE_FAMILY", "一纸调令最先结算")
+        self.assertEqual(picks[0], "PROMOTE_FAMILY", "开局就够门槛：排最前面先升官")
         self.assertEqual(len([p for p in picks if p != "PROMOTE_FAMILY"]), 2, "不占出牌位：两张手牌照样打满")
         game.hands[1] = [DealtCard(card=Card.PROMOTE_MERIT)] + [DealtCard(card=Card.WORK, value=6)] * 5
         picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
@@ -269,9 +308,11 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         self.assertLess(agent._target_focus(public, opp[2]), 0.5)
         self.assertAlmostEqual(agent._target_focus(public, opp[3]), 1.0)
 
-    def test_red_does_not_waste_the_family_card_before_reaching_the_threshold(self):
-        """一纸调令最先结算，这一轮的埋头工作赶不上它。门槛差一点、要靠这轮干活才够时，
-        AI 不能打它（修之前 94% 的一纸调令都是这样白用的）。"""
+    def test_red_places_the_family_card_after_the_work_that_reaches_the_threshold(self):
+        """门槛差一点、这一轮干活才够：一纸调令要排在干活**后面**，用这一轮的政绩升上去。
+
+        （它最先结算时是赶不上这一轮产出的——修之前那版 AI 资源不够也照打，94% 白用。）
+        """
         game = Game(game_id="red2", cfg=CFG, rng=random.Random(3))
         for name in ("我", "甲", "乙"):
             game.add_player(name)
@@ -281,8 +322,18 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         me.rank, me.merit, me.money = 0, CFG.merit_cost(0) - 4, 0
         game.hands[1] = [DealtCard(card=Card.WORK, value=8)] * CFG.hand_size
         pool = ai.AgentPool(cfg=CFG, rng=random.Random(3))
-        picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
-        self.assertNotIn("PROMOTE_FAMILY", picks)
+        picks = ai.choose(game, 1, pool)
+        actions = [pk["action"] for pk in picks]
+        self.assertIn("PROMOTE_FAMILY", actions)
+        self.assertEqual(actions[-1], "PROMOTE_FAMILY", "要排在干活后面")
+        game.select_actions(1, picks)
+        for pid in game.players:
+            if pid != 1:
+                game.select_actions(pid, [])
+            game.lock_action(pid)
+        game.reveal_event()
+        out = game.resolve()
+        self.assertTrue(out.outcomes[1].family_promotion, "用这一轮的政绩升上去了")
 
     def test_family_card_is_not_tagged_along_with_another_promotion(self):
         """升职靠的是普通晋升卡时，一纸调令配着打只是浪费。修之前 AI 会这么干：
@@ -298,7 +349,10 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
                          + [DealtCard(card=Card.REPORT)] * 4)
         pool = ai.AgentPool(cfg=CFG, rng=random.Random(4))
         picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
-        self.assertNotIn("PROMOTE_FAMILY", picks)
+        # 一纸调令和别的晋升卡一起打 = 浪费（一轮只升一级）。
+        # 用一纸调令顶替贿赂升职、腾出位子多打一张，是合法而且更好的打法。
+        others = [p for p in picks if p.startswith("PROMOTE") and p != "PROMOTE_FAMILY"]
+        self.assertFalse("PROMOTE_FAMILY" in picks and others, picks)
 
     def test_attacking_a_peasant_is_worth_less(self):
         """贫农免疫穿小鞋，所以"挡住他晋升"那份价值不该算进去。"""

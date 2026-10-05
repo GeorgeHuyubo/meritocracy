@@ -175,12 +175,6 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .ordlist .step .to { color: var(--red); font-size: 11px; }
 .ordlist .arrow { color: var(--dim); }
-.ordlist .swap {
-  margin-left: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
-  border: 1px solid var(--line); border-radius: 5px;
-  background: transparent; color: var(--text);
-}
-.ordlist .swap:hover { border-color: var(--gold); color: var(--gold); }
 .ordhint { margin-top: 6px; font-size: 12px; line-height: 1.5; }
 
 /* 目标 */
@@ -414,3 +408,7 @@ details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .rulesbox .qarrow { color: var(--gold); font-size: 12px; margin: 2px 0 4px; }
 .rulesbox .qitem { font-size: 12px; margin-bottom: 2px; }
 @media (max-width: 520px) { .rulesbox .quick { grid-template-columns: 1fr; } }
+
+/* 结算顺序栏里每张牌两边的 ◀ ▶：点一下往前 / 往后挪一位 */
+.ordlist .step .mv { cursor: pointer; color: var(--gold); padding: 0 4px; user-select: none; }
+.ordlist .step .mv:hover { color: var(--text); }

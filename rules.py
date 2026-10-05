@@ -304,6 +304,9 @@ def _resolve_promotion_card(
         if cfg.needs_both(player.rank) or player.rank + 1 >= cfg.president_rank:
             outcome.private_notes.append("一纸调令不能用来升国家主席，这张卡白用了。")
             return
+        # 玩家可以把它排在任何位置（排在干活后面能用上这一轮的政绩）。
+        # 要花这一轮刚贪的钱的话，会延后到举报结算完再走到这里（见第 2 步），
+        # 被抄走了钱自然就不够——所以这里照常按兜里的钱判断就行。
         if not (merit_ok or money_ok):
             outcome.private_notes.append("一纸调令用了，可惜政绩和金钱都不够门槛——白用了。")
             return
@@ -912,7 +915,8 @@ def resolve_round(
     #   2. 排在贪污后面 —— 这一轮刚捞的钱当轮花不出去，得先熬过举报才算落袋。
     #      少了这一条，"贪一笔立刻洗成官职"就能躲开没收：举报人查实了却分不到钱，
     #      而且升一级又被降一级，官职净变化为零，等于举报白打。
-    deferred_promotions: list[tuple[PlayerState, Card]] = []
+    # (玩家, 晋升卡, 是不是行贿) —— 行贿的查实了就冻结；不是行贿的只是等钱到位再算
+    deferred_promotions: list[tuple[PlayerState, Card, bool]] = []
     # 卷王「加班」：这一轮两张埋头工作的政绩（攻击结算完之后再 ×倍数，见第 3b 步）
     overtime_base: dict[int, int] = {}
     for p in ordered:
@@ -961,9 +965,14 @@ def resolve_round(
             elif card in (Card.REPORT, Card.ATTACK):
                 interfered_yet = True
             elif card is Card.PROMOTE_FAMILY:
-                # 一纸调令不等举报、不怕攻击，按玩家排的顺序当场结算，查实了也不撤
+                # 一纸调令不怕攻击、查实了也不撤，按玩家排的顺序结算。
+                # 唯一要等的情况：政绩不够、得花这一轮刚贪（或刚分来）的钱——
+                # 和普通买官一样等举报结算完，没被抄走才花得出去（不然就是先贪再洗进官位）。
                 if has_merit_for_promotion(p, cfg):
                     o.tried_merit_promotion = True
+                elif corrupted_yet or interfered_yet:
+                    deferred_promotions.append((p, card, False))
+                    continue
                 _resolve_promotion_card(
                     p, card, o, cfg, names, promo_msgs, already=o.promotion
                 )
@@ -1000,13 +1009,24 @@ def resolve_round(
                 # 它就绕过了本轮的查实（出牌时谁也不知道反腐风暴会不会落到自己
                 # 头上），所以记个标记，查实了之后在第 5 步把官撤回来。
                 o.bought_rank_this_round = may_need_money
+                # 主席那一级钱和政绩都要花：哪怕打的是政绩升职（不算行贿、举报冻不住），
+                # 这一轮刚贪的钱也一样花不出去，要等举报结算完、确认没被抄走才算。
+                # 不等的话就是洗钱：对局 D7TE 第 10 轮，老李开局只有 14 块，
+                # 以权谋私拿了 27 当场凑够 37 升了主席，反腐风暴来抄时兜里只剩 4。
+                spends_dirty_on_last_step = (
+                    not may_need_money and cfg.needs_both(p.rank)
+                    and (corrupted_yet or interfered_yet)
+                )
                 if may_need_money and (targeted or interfered_yet or corrupted_yet):
                     if has_money_for_promotion(p, cfg):
                         # 礼已经备好了：查实的话钱照样没了，官却升不成
                         o.pending_bribe = max(
                             o.pending_bribe, money_cost_for(p, cfg) or 0
                         )
-                    deferred_promotions.append((p, card))
+                    deferred_promotions.append((p, card, True))
+                    continue
+                if spends_dirty_on_last_step:
+                    deferred_promotions.append((p, card, False))
                     continue
                 _resolve_promotion_card(
                     p, card, o, cfg, names, promo_msgs, already=o.promotion
@@ -1619,9 +1639,9 @@ def resolve_round(
                 o_actor.private_notes.append("你的举报查实了，但没有分到赃款。")
 
     # ---- 5a. 补结算：排在举报/攻击后面的晋升卡 ------------------------------
-    for p, card in deferred_promotions:
+    for p, card, bribery in deferred_promotions:
         o = outcome.outcomes[p.id]
-        if o.report_effective:
+        if o.report_effective and bribery:
             # 查实了就升不了：光记警告没降级也一样，钱还白花了
             o.promotion_card_played = True
             o.promotion_frozen_by_report = True
@@ -1750,16 +1770,17 @@ def resolve_round(
         o.merit_after = p.merit
 
     # ---- 坊间传闻 --------------------------------------------------------
-    # 排的是「本轮经手多少钱」= 合法工资 + 没被查实的贪污款项（毛额）。
+    # 排的是「本轮经手多少钱」= 合法工资 + 没被查实的贪污款项（毛额）+ 分到的赃款。
     #   * 被举报查实（含反腐风暴等事件查办）的，贪污那项记 0 ——
     #     公开通报里已经点过他的名了，坊间不会再传他发财
     #   * 没被查的按毛额算，打点出去的不扣 —— 花钱消灾压不住风声
     #   * 工资也算进来，所以清白的高官照样可能上榜 —— 这是有意的，
     #     它让"他是升了官还是受了贿"变得分不清，给真正贪的人打掩护
-    #   * 但没人贪了钱还没被查（大家都只有工资可比）就不传 —— 光拿工资不算新闻
+    #   * 举报查实分到的赃款也算 —— 钱进了谁的口袋，坊间就传谁
+    #   * 但没有这些"外快"（大家都只有工资可比）就不传 —— 光拿工资不算新闻
     salaries = salaries or {}
     gossip_graft = {
-        pid: 0 if o.report_effective else o.corrupt_amount
+        pid: (0 if o.report_effective else o.corrupt_amount) + o.money_from_reports
         for pid, o in outcome.outcomes.items()
     }
     if any(gossip_graft.values()):
