@@ -29,6 +29,7 @@ python3 analysis.py --section triangle               # 鹬蚌相争的目标动�
 python3 analysis.py --section ablation               # 每张牌的因果价值（带置信区间）
 python3 analysis.py --section funnel                 # 金钱/政绩两条路线的端到端漏斗
 python3 analysis.py --section replay --rounds 8-10   # 复盘库里最新一局：AI 每轮怎么想的
+python3 sweep.py --variants base,hat2,blk4           # 规则变体对比实验（消融 + 六身份混战，并行）
 ```
 
 > 目录本应放在 `/meritocracy`。macOS 的系统完整性保护不允许在根目录下新建目录，

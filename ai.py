@@ -789,7 +789,9 @@ class SmartAgent:
 
         # 1) 干扰牌：各自挑好最优目标，算出独立分
         solo: dict[Card, tuple[float, int | None]] = {}
-        for card in set(hand):
+        # 固定顺序（不用 set）：set 的遍历顺序随进程的哈希种子变，而打平挑目标会消耗 rng，
+        # 顺序一变后面全错位——同一个 seed 两次跑能差 ±2 个点，平衡实验根本比不出来
+        for card in dict.fromkeys(hand):
             if card is Card.ATTACK and self.allow_attack and opponents:
                 solo[card] = self._best_target(
                     [self._score_attack(public, private, o) for o in opponents]
@@ -1123,6 +1125,12 @@ class SmartAgent:
             gap = t_rank - self._my_rank
             if gap > 0 and cfg.attack_steal_rank_bonus:
                 gain += math.floor(Fraction(gain) * cfg.attack_steal_rank_bonus * gap)
+            if cfg.attack_hat_reward:
+                # 他没在干活就扣得成帽子，我自己记一点功
+                gain += int(
+                    (1 - model.work_rate)
+                    * rules.work_merit(cfg.attack_hat_reward, self._my_rank, None, cfg)
+                )
             return damage, gain
         # merit_penalty：只扣不拿，而且 WORK 玩家免疫
         if cfg.attack_spares_workers:
@@ -1222,6 +1230,12 @@ class SmartAgent:
             if cfg.attack_wipes_merit_on_block
             else self.w.promotion_bonus
         )
+        if not cfg.attack_wipes_merit_on_block:
+            # 挡下时他还要掉一部分政绩（比例 + 固定值）：按他的门槛折成进度
+            block_value += (
+                float(cfg.attack_block_merit_loss) * t_merit
+                + rules.work_merit(cfg.attack_block_merit_penalty, t_rank, None, cfg)
+            ) / tc
         if (cfg.origin(t_origin) or {}).get("id") == "PEASANT":
             # 贫农「政治正确」：一个人挡不住他，得有别人也一起打才按得住
             block_value *= self.w.peasant_second_attacker
@@ -1295,7 +1309,7 @@ class SmartAgent:
         seized_bribe = p_bribe * (mc_t or 0)
         pool = (haul + seized_bribe) * float(cfg.report_reward_ratio)
         expected_split = 1.0 + 0.25 * max(0, len(public["players"]) - 2)
-        my_cut = pool / expected_split
+        my_cut = max(0.0, pool / expected_split - cfg.report_reward_fee)
 
         mc = cfg.money_cost(my_rank)
         # 攒着的钱要按"还来不来得及花"打折；能当场换成一级官职的那部分不打折。

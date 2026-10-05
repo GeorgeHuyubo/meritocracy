@@ -40,6 +40,8 @@ CFG = dataclasses.replace(
     # 本文件里的用例都在断言精确金额，工资会把它们全打乱；
     # 工资本身另有 TestSalary 专门测。
     rank_salary=[0, 0, 0, 0, 0],
+    # 举报跑腿费同理：分赃金额的用例按"赃款 x 比例"断言，跑腿费另有专门的用例
+    report_reward_fee=0,
 )
 REAL_CFG = DEFAULT_CONFIG
 CALM = rules.event_by_id("CALM")
@@ -889,7 +891,7 @@ class TestBriberyIsReportable(unittest.TestCase):
         self.assertGreater(o.bribe_lost, 0)
         self.assertEqual(o.money_confiscated, 0)  # 这轮没贪，没有赃款
         self.assertGreater(mine.money_from_reports, 0)
-        self.assertEqual(mine.money_from_reports, o.bribe_lost // 2)
+        self.assertEqual(mine.money_from_reports, o.bribe_lost // 2 - REAL_CFG.report_reward_fee)
 
     def test_the_final_step_counts_as_bribery_too(self):
         """最后一步算不算行贿，取决于**打的是哪张卡**，不取决于钱花没花。
@@ -1640,7 +1642,8 @@ class TestDirtyMoneyCannotBeSpentSameRound(unittest.TestCase):
         )
         self.assertEqual(o.promotion, PromotionKind.NONE)  # 晋升卡没兑现
         self.assertEqual(o.money_confiscated, o.corrupt_amount)  # 赃款一分不少地离开他
-        self.assertEqual(mine.money_from_reports, o.corrupt_amount // 2)  # 举报人拿一半
+        # 举报人拿一半，再扣跑腿费
+        self.assertEqual(mine.money_from_reports, o.corrupt_amount // 2 - REAL_CFG.report_reward_fee)
         self.assertEqual(tgt.rank, 2)  # 没升上去（也还没到降级线）
         self.assertEqual(tgt.warnings, 1)
 
@@ -2182,12 +2185,17 @@ class TestIdleTargetPenalty(unittest.TestCase):
                 loss, rules.work_merit(REAL_CFG.attack_merit_penalty, r, CALM, REAL_CFG)
             )
 
-    def test_the_attacker_gets_none_of_it(self):
-        """这是处罚不是转移 —— 不然互攻就不再两败俱伤了。"""
+    def test_the_fine_is_not_transferred(self):
+        """罚款是处罚不是转移 —— 不然互攻就不再两败俱伤了。
+
+        攻击者只拿到 ATTACK_HAT_REWARD 那一小笔"记功"（按自己的官职），和罚了多少无关。
+        """
         _, o_t, o_a = self._hit()
         self.assertGreater(o_t.attack_merit_loss, 0)
-        self.assertEqual(o_a.merit_from_attacks, 0)
         self.assertEqual(o_t.merit_stolen_by_attackers, 0)
+        reward = rules.work_merit(REAL_CFG.attack_hat_reward, 0, None, REAL_CFG)
+        self.assertEqual(o_a.merit_from_attacks, reward)
+        self.assertLess(o_a.merit_from_attacks, o_t.attack_merit_loss)
 
     def test_it_cannot_push_merit_below_zero(self):
         tgt, o, _ = self._hit(target_merit=1)
@@ -2299,7 +2307,10 @@ class TestIdleTargetPenalty(unittest.TestCase):
             target_picks=[Action(Card.CORRUPT, value=18)],
         )
         self.assertGreater(o.attack_merit_loss, 0)
-        self.assertEqual(o_a.merit_from_attacks, 0)  # 但攻击者还是什么都没拿到
+        # 攻击者只拿那一小笔记功，罚款本身不归他
+        self.assertEqual(
+            o_a.merit_from_attacks, rules.work_merit(REAL_CFG.attack_hat_reward, 0, None, REAL_CFG)
+        )
 
     def test_mutual_attacks_still_let_the_builder_win(self):
         """加了罚款之后，互攻只会更惨 —— 渔翁得利这条更稳。"""
@@ -2774,6 +2785,66 @@ class TestOrigins(unittest.TestCase):
         self.assertEqual(red.rank, top)
 
     # ---- 贫农 · 政治正确 ----
+
+    def test_block_can_cost_part_of_the_merit(self):
+        """ATTACK_BLOCK_MERIT_LOSS：被穿小鞋挡下时掉这一比例的政绩；默认 0 一点不掉。"""
+        tc = REAL_CFG.merit_cost(1)
+        for ratio, expect_loss in ((Fraction(0), 0), (Fraction(1, 5), (tc + 10) // 5)):
+            cfg = dataclasses.replace(REAL_CFG, attack_block_merit_loss=ratio)
+            target = player(1, rank=1, merit=tc + 10)
+            attacker = player(2, rank=1)
+            out = resolve(
+                [target, attacker],
+                {1: [Action(Card.PROMOTE_MERIT)], 2: [Action(Card.ATTACK, 1)]},
+                cfg=cfg,
+            )
+            self.assertTrue(out.outcomes[1].merit_promotion_blocked)
+            self.assertEqual(target.merit, tc + 10 - expect_loss)
+            self.assertEqual(out.outcomes[1].merit_wiped_by_attack, expect_loss)
+
+    def test_block_penalty_scales_with_rank(self):
+        """ATTACK_BLOCK_MERIT_PENALTY：穿小鞋再扣几点，按目标官职倍率折算（和戴帽子一样）。"""
+        cfg = dataclasses.replace(REAL_CFG, attack_block_merit_penalty=2)
+        for rank in range(cfg.president_rank - 1):
+            tc = cfg.merit_cost(rank)
+            target, attacker = player(1, rank=rank, merit=tc), player(2, rank=rank)
+            out = resolve(
+                [target, attacker],
+                {1: [Action(Card.PROMOTE_MERIT)], 2: [Action(Card.ATTACK, 1)]},
+                cfg=cfg,
+            )
+            self.assertTrue(out.outcomes[1].merit_promotion_blocked)
+            self.assertEqual(target.merit, tc - rules.work_merit(2, rank, None, cfg))
+
+    def test_report_fee_comes_off_each_reporters_share(self):
+        """REPORT_REWARD_FEE：举报收益 = 赃款/2 - 1（每人扣，扣掉的充公，不会扣成负数）。"""
+        cfg = dataclasses.replace(REAL_CFG, report_reward_fee=1)
+        for n_reporters in (1, 2):
+            thief = player(1, rank=0)
+            reporters = [player(i, rank=0) for i in range(2, 2 + n_reporters)]
+            actions = {1: [Action(Card.CORRUPT, value=18)]}
+            for r in reporters:
+                actions[r.id] = [Action(Card.REPORT, 1)]
+            out = resolve([thief, *reporters], actions, cfg=cfg)
+            gross = out.outcomes[1].corrupt_amount
+            share = (gross // 2) // n_reporters - 1
+            for r in reporters:
+                self.assertEqual(out.outcomes[r.id].money_from_reports, max(0, share))
+
+    def test_hat_reward_goes_to_each_attacker(self):
+        """ATTACK_HAT_REWARD：戴帽子扣成了，每个攻击者按自己官职记一点功；默认 0 不给。"""
+        for reward in (0, 2):
+            cfg = dataclasses.replace(REAL_CFG, attack_hat_reward=reward)
+            idler = player(1, rank=1, merit=20)
+            a1, a2 = player(2, rank=0, merit=0), player(3, rank=2, merit=0)
+            out = resolve(
+                [idler, a1, a2],
+                {1: [Action(Card.REPORT, 2)], 2: [Action(Card.ATTACK, 1)], 3: [Action(Card.ATTACK, 1)]},
+                cfg=cfg,
+            )
+            self.assertGreater(out.outcomes[1].attack_merit_loss, 0, "帽子扣成了")
+            self.assertEqual(a1.merit, rules.work_merit(reward, 0, None, cfg))
+            self.assertEqual(a2.merit, rules.work_merit(reward, 2, None, cfg))
 
     def test_peasant_ignores_the_smear(self):
         tc = REAL_CFG.merit_cost(0)

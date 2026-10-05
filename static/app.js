@@ -346,7 +346,8 @@ function renderAction() {
         effect =
           `① 举报他<b>贪污受贿</b> → 赃款没收<br>` +
           `② 举报他<b>贿赂升职</b> → 官没了，${bribeLossText()}<br>` +
-          `<b>抄到的钱 ${cut} 归我</b>（几个人一起举报就平分这一份），` +
+          `<b>抄到的钱 ${cut} 归我</b>（几个人一起举报就平分这一份` +
+          (cfgCache?.report_reward_fee ? `，再扣 ${cfgCache.report_reward_fee} 块跑腿费` : "") + `），` +
           `两样都记一次降职警告（满 ${wmax} 次降一级）<br>` +
           `<span class="warn2">他这轮清白就白打 · 匿名，他不知道是我</span>`;
       } else if (c === "ATTACK") {
@@ -357,7 +358,10 @@ function renderAction() {
         effect =
           `① <b>抢功</b>：他埋头工作 → 他这轮挣的政绩 ${f} 归我<br>` +
           `② <b>穿小鞋</b>：他政绩升职 → 放黑料挡住他（他政绩不掉）<br>` +
-          `③ <b>戴帽子</b>：他没干正事 → 扣他 ${fine || "一笔"} 政绩（我拿不到）<br>` +
+          `③ <b>戴帽子</b>：他没干正事 → 扣他 ${fine || "一笔"} 政绩` +
+          ((priv.card_preview || {}).hat_reward
+            ? `，我自己记 ${priv.card_preview.hat_reward} 点功<br>`
+            : `（我拿不到）<br>`) +
           `<span class="warn2">明枪：公报点名说是我干的</span>`;
       }
       const cls = [
@@ -681,7 +685,7 @@ function privateResultHtml() {
   const overtime = r.overtime_merit || 0;
   if (r.merit_gained - overtime) mled.push([`干活所得`, `+${r.merit_gained - overtime}`, "good"]);
   if (overtime) mled.push([`加班：两张工作翻倍多出来的`, `+${overtime}`, "good"]);
-  if (r.merit_from_attacks) mled.push([`抢功所得`, `+${r.merit_from_attacks}`, "good"]);
+  if (r.merit_from_attacks) mled.push([`攻击所得（抢功 / 记功）`, `+${r.merit_from_attacks}`, "good"]);
   // 被抢走的和被戴帽子扣的是两回事，分开列
   const robbed = r.merit_stolen_by_attackers || 0;
   const fined = (r.attack_merit_loss || 0) - robbed;
@@ -887,7 +891,9 @@ function quickRulesHtml(c) {
     <div class="qarrow">克 ↓ 政绩路线</div>
     <div class="qitem"><b>埋头工作</b> → 这轮功劳 ${steal} 被抢走</div>
     <div class="qitem"><b>政绩升职</b> → 这轮升不上去（政绩不掉）</div>
-    <div class="qitem"><b>没干正事</b>（捞钱/买官/搞人）→ 戴帽子扣政绩</div>
+    <div class="qitem"><b>没干正事</b>（捞钱/买官/搞人）→ 戴帽子扣政绩${
+      c.attack_hat_reward ? "，你记一点功" : ""
+    }</div>
   </div>
   <div class="qbox rpt">
     <div class="qhead">🕵 匿名举报 <span class="qsub">暗箭 · 没人知道是谁</span></div>
@@ -1063,7 +1069,9 @@ ${quickRulesHtml(c)}
       <br>① 他这轮<b>贪污受贿</b> → 本轮赃款全部没收（存款不动）
       <br>② 他这轮<b>贿赂升职</b> → 官升不成，而且<b>${bribeLossText()}</b>
       <br>两种抄到的钱都是<b>${frac(c.report_reward_ratio)} 归你、其余充公</b>
-        （几个人一起举报同一个人，就平分这 ${frac(c.report_reward_ratio)}）；
+        （几个人一起举报同一个人，就平分这 ${frac(c.report_reward_ratio)}）${
+          c.report_reward_fee ? `，每人到手再扣 ${c.report_reward_fee} 块跑腿费` : ""
+        }；
         两种都给他记<b>一次降职警告</b>、工龄清零；
       警告攒满 <b>${c.warnings_before_demotion}</b> 次就降一级，然后警告清空重新记。
       <br>他这一轮要是清白的，这张牌就<b>白打</b>。
@@ -1078,7 +1086,13 @@ ${quickRulesHtml(c)}
         按他的官职算（${c.rank_names.slice(0, c.president_rank).map((n, r) =>
           `${esc(n).replace(/公务员|干部/, "")} ${Math.floor(c.attack_merit_penalty * mult(c.rank_multipliers[r]))}`
         ).join(" / ")}）。
-        这笔是<b>罚款，你拿不到</b>
+        这笔是<b>罚款，你拿不到</b>${
+          c.attack_hat_reward
+            ? `；但抓到他不务正业，你自己记一点功（按你的官职：${c.rank_names.slice(0, c.president_rank).map((n, r) =>
+                `${esc(n).replace(/公务员|干部/, "")} ${Math.floor(c.attack_hat_reward * mult(c.rank_multipliers[r]))}`
+              ).join(" / ")}）`
+            : ""
+        }
       <br><b>公开署名</b> —— 公报里点名写着是你干的，他下轮知道该找谁算账。
       <br><b>抢官大的人更值</b>：${(() => {
         const top = c.rank_names.length - 2;  // 主席不参与对局

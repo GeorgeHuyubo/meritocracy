@@ -335,6 +335,17 @@ def _resolve_promotion_card(
                 f"{player.merit} 点政绩付诸东流。"
             )
             player.merit = 0
+        elif (cfg.attack_block_merit_loss > 0 or cfg.attack_block_merit_penalty > 0) and player.merit:
+            # 不清零，但也不只是暂缓：掉一部分政绩（比例 + 按官职折算的固定值，攻击者拿不到）
+            lost = min(
+                player.merit,
+                math.floor(Fraction(player.merit) * cfg.attack_block_merit_loss)
+                + work_merit(cfg.attack_block_merit_penalty, player.rank, None, cfg),
+            )
+            if lost:
+                outcome.merit_wiped_by_attack = lost
+                outcome.attack_merit_loss += lost
+                player.merit -= lost
         merit_ok = False
         money_ok = card.can_use_money and has_money_for_promotion(player, cfg)
 
@@ -1228,6 +1239,15 @@ def resolve_round(
                 if penalty > 0:
                     target.merit -= penalty
                     o_target.attack_merit_loss += penalty
+                    # 抓到不务正业：每个攻击者自己记一点功（按自己的官职），和罚款是两笔账
+                    for aid in attacker_ids:
+                        reward = work_merit(cfg.attack_hat_reward, by_id[aid].rank, None, cfg)
+                        if reward > 0:
+                            by_id[aid].merit += reward
+                            outcome.outcomes[aid].merit_from_attacks += reward
+                            outcome.outcomes[aid].private_notes.append(
+                                f"抓到 {names[target_id]} 不务正业，你记了 {reward} 点功。"
+                            )
 
                 # penalty == 0 有三种完全不同的原因，不能都说成"他政绩本来就是 0"：
                 #   a) 他在忙着凭政绩升职 -> 豁免帽子，但穿小鞋那一下是命中的
@@ -1565,6 +1585,7 @@ def resolve_round(
         gross = o_victim.corrupt_amount + o_victim.bribe_lost + family
         payout = min(taken, math.floor(Fraction(gross) * cfg.report_reward_ratio))
         share = payout // len(actors) if cfg.report_reward_split_evenly else payout
+        share = max(0, share - cfg.report_reward_fee)  # 每人再扣跑腿费（充公）
         if share <= 0:
             continue
         for actor_id in actors:

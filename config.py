@@ -244,6 +244,17 @@ ATTACK_MODE: str = "steal_work"
 # merit_penalty / denial 模式：见上面的模式说明。
 ATTACK_MERIT_PENALTY: int = 4
 
+# 戴帽子扣成了的话，每个攻击者自己也记一点功（"抓到不务正业"）：
+# 牌面点数，走**攻击者**官职的 WORK 倍率（1 = 基层 1 / 县级 1 / 市级 2 / 省级 2）。
+# 0 = 关（罚款纯充公，攻击者拿不到）。
+# 正式口径对照（20000 局消融 + 3000 局六身份混战，另有 6000 局独立复核身份平衡）：
+#            攻击Δ   举报Δ   贪污Δ   身份差（3000 / 6000 局）  主席率
+#   0       +1.07   -1.75   -1.56   2.38 / 2.66（贫农偏高）   73.1%
+#   1       +1.06   -1.59   -0.73   1.63 / 0.85              73.5%
+# 攻击本身的定价没变，但身份最平衡、贪污不再偏强。更大的值（2、3）攻击能好一点，
+# 身份就没这么平了；「穿小鞋也扣政绩」那条路会把贫农抬上去（他挡得住一个人）。
+ATTACK_HAT_REWARD: int = 1
+
 # 规则书第 12 节写了"WORK 玩家不会受到这个处罚"。仅 merit_penalty 模式生效。
 # 这条豁免让纯政绩路线对攻击完全免疫，是个很强的平衡杠杆，所以做成开关。
 ATTACK_SPARES_WORKERS: bool = True
@@ -296,6 +307,13 @@ ATTACK_SMEAR_RUMORS: list[str] = [
 # 开着的话这是全游戏最大的一次性破坏（一刀能削 43 点）而且攻击者一分不拿，
 # 纯利他 —— 攻击的收益现在全部来自抢功那一半，破坏这块降到最小。
 ATTACK_WIPES_MERIT_ON_BLOCK: bool = False
+# 不清零时，被穿小鞋挡下政绩升职要掉多少比例的政绩（0 = 只是暂缓，一点不掉）。
+# 清零太狠（一刀能削 43 点），只暂缓又太轻：攻击消融 +1.26（不用反而多赢）。
+# 这个是两者之间的旋钮，攻击者拿不到这一份。
+ATTACK_BLOCK_MERIT_LOSS: Fraction = Fraction(0)
+# 被穿小鞋挡下时再扣这么多政绩：**牌面点数，走目标官职的倍率**，和戴帽子一个算法
+# （基数 2 = 基层 2 / 县级 3 / 市级 4 / 省级 5）。和上面的比例可以叠加；0 = 关。
+ATTACK_BLOCK_MERIT_PENALTY: int = 0
 # denial 模式：撞上目标本轮贪污时怎么处理。
 #   "confiscate_to_attacker" —— 没收赃款并归攻击者（和匿名举报重复，实测把贪污路线打死了）
 #   "merit_to_attacker"      —— 当前默认：钱不动，攻击者自己拿到少量政绩
@@ -391,6 +409,10 @@ REPORT_REWARD_SPLIT_EVENLY: bool = True
 # 举报同时还会**冻结对方本轮的晋升**（贿赂升职也挡得住），光靠降级+没收
 # 这张牌就已经很强了，所以拿钱的部分要收一收。
 REPORT_REWARD_RATIO: Fraction = Fraction(1, 2)
+# 每个举报人分到手之后再扣这么多（"跑腿费"，扣掉的充公；不会扣成负数；0 = 关）。
+# 举报消融 -2.56（偏强）时加的旋钮：不减举报牌，只削"举报还能赚钱"那一块。
+# 12000 局消融：fee 0 -> 1，举报 -2.56 -> -0.96，主席率 70.9% -> 73.1%，身份差 3.6 -> 2.7。
+REPORT_REWARD_FEE: int = 1
 
 # --------------------------------------------------------------------------
 # 全局事件
@@ -703,6 +725,9 @@ class Config:
     )
     attack_resets_tenure: bool = ATTACK_RESETS_TENURE
     attack_wipes_merit_on_block: bool = ATTACK_WIPES_MERIT_ON_BLOCK
+    attack_block_merit_loss: Fraction = ATTACK_BLOCK_MERIT_LOSS
+    attack_block_merit_penalty: int = ATTACK_BLOCK_MERIT_PENALTY
+    attack_hat_reward: int = ATTACK_HAT_REWARD
     attack_on_corruption: str = ATTACK_ON_CORRUPTION
     attack_corruption_merit_ratio: Fraction = ATTACK_CORRUPTION_MERIT_RATIO
     attack_hush_money_ratio: Fraction = ATTACK_HUSH_MONEY_RATIO
@@ -720,6 +745,7 @@ class Config:
     report_reward_major_takes_all: bool = REPORT_REWARD_MAJOR_TAKES_ALL
     report_reward_split_evenly: bool = REPORT_REWARD_SPLIT_EVENLY
     report_reward_ratio: Fraction = REPORT_REWARD_RATIO
+    report_reward_fee: int = REPORT_REWARD_FEE
     bribe_forfeit_ratio: Fraction = BRIBE_FORFEIT_RATIO
 
     event_definitions: list[dict[str, Any]] = field(

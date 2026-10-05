@@ -929,6 +929,8 @@ class Game:
         # 我去打别人、对方无所事事时扣他多少（按**我**看不到的对方官职算不了，
         # 这里给的是"打同级的人"的参考值，UI 只用来说明量级）
         idle_penalty = rules.work_merit(cfg.attack_merit_penalty, rank, None, cfg)
+        # 戴帽子扣成了我自己记几点功（按**我的**官职）
+        hat_reward = rules.work_merit(cfg.attack_hat_reward, rank, None, cfg)
 
         def risk(lo: int, hi: int) -> str:
             """这一笔会不会踩到重大贪腐线（踩到 = 被举报直接打回基层）。"""
@@ -970,6 +972,7 @@ class Game:
             },
             "rank_multiplier": str(cfg.work_multiplier(rank)),
             "idle_penalty": idle_penalty,
+            "hat_reward": hat_reward,
             "mult_num": cfg.work_multiplier(rank).numerator,
             "mult_den": cfg.work_multiplier(rank).denominator,
             "PROMOTE_MERIT": promo(True, False),
