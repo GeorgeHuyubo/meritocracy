@@ -413,6 +413,9 @@ REPORT_REWARD_RATIO: Fraction = Fraction(1, 2)
 # 举报消融 -2.56（偏强）时加的旋钮：不减举报牌，只削"举报还能赚钱"那一块。
 # 12000 局消融：fee 0 -> 1，举报 -2.56 -> -0.96，主席率 70.9% -> 73.1%，身份差 3.6 -> 2.7。
 REPORT_REWARD_FEE: int = 1
+# 查实后没收本轮赃款的比例（1 = 全部没收）。不管设多少，举报人那份
+# （赃款 × REPORT_REWARD_RATIO）一定照抄——少抄的只是充公那份，举报人一分不少。
+REPORT_SEIZE_RATIO: Fraction = Fraction(1)
 
 # --------------------------------------------------------------------------
 # 全局事件
@@ -747,6 +750,7 @@ class Config:
     report_reward_split_evenly: bool = REPORT_REWARD_SPLIT_EVENLY
     report_reward_ratio: Fraction = REPORT_REWARD_RATIO
     report_reward_fee: int = REPORT_REWARD_FEE
+    report_seize_ratio: Fraction = REPORT_SEIZE_RATIO
     bribe_forfeit_ratio: Fraction = BRIBE_FORFEIT_RATIO
 
     event_definitions: list[dict[str, Any]] = field(

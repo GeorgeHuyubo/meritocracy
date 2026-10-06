@@ -529,6 +529,11 @@ class Game:
                         self.players[pid].rank = self.cfg.president_rank - 1
                         if pid in outcome.outcomes:
                             outcome.outcomes[pid].rank_after = self.players[pid].rank
+                        # 本轮存档（_accumulate_stats）在这之前就写好了，跟着改，
+                        # 不然复盘工具重演到这一轮会报"官职对不上"
+                        for rec in self.archive[-1]["players"]:
+                            if rec["player_id"] == pid:
+                                rec["rank_after"] = self.players[pid].rank
                 candidates = "、".join(self.players[pid].name for pid in outcome.presidents)
                 verdict = (
                     f"{names} 家底更厚，成功当选国家主席"

@@ -319,7 +319,8 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         game.players[1].origin = Origin.RED
         game.start_game()
         me = game.players[1]
-        me.rank, me.merit, me.money = 0, CFG.merit_cost(0) - 4, 0
+        # 市级：基层升县级用这张每局一次的卡不划算（AI 会留着），市级升省级才值得
+        me.rank, me.merit, me.money = 2, CFG.merit_cost(2) - 4, 0
         game.hands[1] = [DealtCard(card=Card.WORK, value=8)] * CFG.hand_size
         pool = ai.AgentPool(cfg=CFG, rng=random.Random(3))
         picks = ai.choose(game, 1, pool)
@@ -779,3 +780,103 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         game.hands[ids[0]] = [DealtCard(card=Card.WORK, value=10)] * CFG.hand_size
         pool = ai.AgentPool(cfg=CFG, rng=random.Random(3))
         self.assertFalse(ai.wants_redraw(game, ids[0], pool))
+
+
+class TestAuditFixes(unittest.TestCase):
+    """audit.py 体检查出来的几处 AI 毛病，每处一条回归测试。"""
+
+    def _game(self, n=3, seed=1):
+        game = Game(game_id="fix", cfg=CFG, rng=random.Random(seed))
+        for i in range(n):
+            game.add_player(f"P{i + 1}")
+        game.start_game()
+        return game
+
+    def test_noise_never_swaps_work_for_a_dead_promotion_card(self):
+        """噪声只决定打什么干扰；同一种干扰搭配里，经济牌永远挑最好的。"""
+        game = self._game()
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0),
+                            weights=ai.Weights(noise=0.05))
+        agent = pool.get(1)
+        game.hands[1] = [DealtCard(Card.REPORT, 0), DealtCard(Card.WORK, 6),
+                         DealtCard(Card.PROMOTE_MERIT, 0)] + [DealtCard(Card.WORK, 5)] * 3
+        fixed = [(0.300, [Card.REPORT, Card.WORK]), (0.295, [Card.REPORT, Card.PROMOTE_MERIT])]
+        agent.score_combos = lambda public, private: list(fixed)
+        for _ in range(50):
+            picks = agent.decide(game.public_state(), game.private_state(1))
+            self.assertNotIn("PROMOTE_MERIT", [c for c, _ in picks])
+
+    def test_second_report_is_scored_on_the_second_best_target(self):
+        """第二张举报会换一个人打，只能算第二好的目标，不能再按最好的算一遍。"""
+        game = self._game(n=4)
+        agent = ai.AgentPool(cfg=CFG, rng=random.Random(0)).get(1)
+        game.hands[1] = [DealtCard(Card.REPORT, 0)] * 2 + [DealtCard(Card.PASS, 0)] * 4 \
+            if hasattr(Card, "PASS") else [DealtCard(Card.REPORT, 0)] * 2 + [DealtCard(Card.WORK, 0)] * 4
+        pub, priv = game.public_state(), game.private_state(1)
+        agent.observe(pub, priv)
+        targets = sorted((agent._score_report(pub, priv, o)[0]
+                          for o in pub["players"] if o["id"] != 1), reverse=True)
+        scored = dict((tuple(c.value for c in cards), s)
+                      for s, cards in agent.score_combos(pub, priv))
+        both = scored[("REPORT", "REPORT")]
+        econ, _ = agent._score_economy(pub, priv, [Card.REPORT, Card.REPORT], [0, 0])
+        self.assertAlmostEqual(both - econ, targets[0] + targets[1], places=6)
+
+    def test_work_still_counts_when_money_is_ready_but_buying_is_risky(self):
+        """钱够了不等于能升（买官会被查实）：以前进度取 max(钱, 政绩)，埋头工作被估成 0 分。"""
+        game = self._game()
+        me = game.players[1]
+        me.rank, me.money, me.merit = 1, CFG.money_cost(1) + 5, 0
+        agent = ai.AgentPool(cfg=CFG, rng=random.Random(0)).get(1)
+        pub, priv = game.public_state(), game.private_state(1)
+        work, _ = agent._score_economy(pub, priv, [Card.WORK], [6])
+        self.assertGreater(work, 0.05)
+
+    def test_a_persistent_corruptor_reads_as_more_likely_to_corrupt(self):
+        """个人档案：每轮都被传闻点名的人，比一般人更可能这轮还在贪。"""
+        game = self._game()
+        agent = ai.AgentPool(cfg=CFG, rng=random.Random(0)).get(1)
+        pub = game.public_state()
+        opp = next(o for o in pub["players"] if o["id"] == 2)
+        clean = ai.OpponentModel(observed_rounds=6, dirty_rounds=0)
+        dirty = ai.OpponentModel(observed_rounds=6, dirty_rounds=5)
+        self.assertGreater(agent._read(pub, opp, dirty)[0], 2 * agent._read(pub, opp, clean)[0])
+
+    def test_i_know_when_i_look_suspicious(self):
+        """别人眼里的我比全桌平均可疑，我自己被查实的风险就该更高。"""
+        game = self._game()
+        agent = ai.AgentPool(cfg=CFG, rng=random.Random(0)).get(1)
+        pub, priv = game.public_state(), game.private_state(1)
+        agent.observe(pub, priv)
+        base = agent._report_pressure(pub, priv)
+        agent.self_model = ai.OpponentModel(observed_rounds=6, dirty_rounds=6)
+        for o in pub["players"]:
+            if o["id"] != 1:
+                agent.models[o["id"]] = ai.OpponentModel(observed_rounds=6, dirty_rounds=0)
+        self.assertGreater(agent._report_pressure(pub, priv), base * 1.3)
+
+    def test_the_one_who_is_already_ready_is_stopped_first(self):
+        """几个人同时可能登顶：两样都已经够了的人，比还要靠一张好牌的人更该先按住。"""
+        top = CFG.president_rank - 1
+        agent = ai.AgentPool(cfg=CFG, rng=random.Random(0)).get(1)
+        mc, tc = CFG.money_cost(top), CFG.merit_cost(top)
+        ready = {"id": 2, "rank": top, "merit": tc, "origin": None}
+        close = {"id": 3, "rank": top, "merit": tc - 12, "origin": None}
+        model = ai.OpponentModel(money_est=mc)
+        self.assertGreater(agent._p_reach(ready, model), agent._p_reach(close, model))
+
+    def test_the_runner_up_blocks_harder_than_the_backmarker(self):
+        """拦下快登顶的人，对紧跟着的第二名值一整局；远远落后的人拦下来自己也赢不了。"""
+        top = CFG.president_rank - 1
+        game = self._game(n=3)
+        leader, me = game.players[2], game.players[1]
+        leader.rank, leader.merit = top, CFG.merit_cost(top)
+        game.players[3].rank = top - 1
+        values = {}
+        for my_rank in (top, 0):  # 我是第二名 / 我在基层
+            me.rank = my_rank
+            agent = ai.AgentPool(cfg=CFG, rng=random.Random(0)).get(1)
+            agent.observe(game.public_state(), game.private_state(1))
+            values[my_rank] = agent._contender(2)
+        self.assertAlmostEqual(values[top], 1.0)
+        self.assertLess(values[0], 0.1)

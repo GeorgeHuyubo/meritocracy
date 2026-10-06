@@ -65,6 +65,15 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "w5": {"card_deal_distribution": deck(WORK=5)},
     "atk3_w5_c2": {"card_deal_distribution": deck(ATTACK=3, WORK=5, CORRUPT=2)},
     # ---- 出身 ----
+    # 金钱路线拉回来（AI 估钱修好后贪污变成负收益）
+    "c20": {"corrupt_card_distribution": [(18, 1), (19, 2), (20, 2), (21, 2), (22, 1)],
+            "graft_card_distribution": [(9, 1), (10, 2), (11, 2), (12, 2), (13, 1)]},
+    "c22": {"corrupt_card_distribution": [(20, 1), (21, 2), (22, 2), (23, 2), (24, 1)],
+            "graft_card_distribution": [(10, 1), (11, 2), (12, 2), (13, 2), (14, 1)]},
+    "seize23": {"report_seize_ratio": Fraction(2, 3)},   # 查实只没收本轮赃款的 2/3
+    "seize12": {"report_seize_ratio": Fraction(1, 2)},   # 只没收举报人那份
+    "mc90": {"promotion_money_costs": [14, 20, 27, 33]},
+    "mc80": {"promotion_money_costs": [12, 18, 24, 30]},
     "rich18": {"origin_old_money_start": 18},   # 富二代开局钱（默认 15）
     "rich20": {"origin_old_money_start": 20},
 }

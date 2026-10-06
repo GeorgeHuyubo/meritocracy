@@ -1495,18 +1495,17 @@ def resolve_round(
         o = outcome.outcomes[p.id]
         if not o.report_effective or not cfg.report_reward_enabled:
             continue
-        # 本轮贪的全部吐出来（存款不动——那是以前"重大贪腐抄家"的活）
-        seize = o.corrupt_amount
+        # 本轮贪的按 report_seize_ratio 吐出来（默认全部；存款不动——那是以前"重大贪腐抄家"的活）
+        seize = math.ceil(Fraction(o.corrupt_amount) * cfg.report_seize_ratio)
         if o.laundered:
-            # 会计「做账」：洗白的那部分抄不走。但**分赃池不减半** ——
-            # 洗白只能吃掉"充公"那一份，举报人该拿的一分不少：
-            #     普通人： 贪 40 -> 没收 40 -> 举报人 20 + 充公 20
-            #     会计：   贪 40 -> 没收 20 -> 举报人 20 + 充公  0
-            # 不这么写的话，抓会计的回本比抓别人少，就没人愿意抓他了。
-            reporter_cut = math.floor(
-                Fraction(o.corrupt_amount) * cfg.report_reward_ratio
-            )
-            seize = max(reporter_cut, o.corrupt_amount - o.laundered)
+            # 会计「做账」：洗白的那部分抄不走。
+            seize = min(seize, o.corrupt_amount - o.laundered)
+        # 但**分赃池不减** —— 少抄只能吃掉"充公"那一份，举报人该拿的一分不少：
+        #     普通人： 贪 40 -> 没收 40 -> 举报人 20 + 充公 20
+        #     会计：   贪 40 -> 没收 20 -> 举报人 20 + 充公  0
+        # 不这么写的话，抓会计的回本比抓别人少，就没人愿意抓他了。
+        reporter_cut = math.floor(Fraction(o.corrupt_amount) * cfg.report_reward_ratio)
+        seize = max(reporter_cut, seize)
         confiscated[p.id] = min(seize, p.money)
 
     for p in ordered:
@@ -1564,7 +1563,8 @@ def resolve_round(
         how = _report_source_phrase(o)
         bits = []
         if taken:
-            bits.append(f"赃款 {taken} 全部没收")
+            bits.append(f"赃款 {taken} 全部没收" if taken >= o.corrupt_amount
+                        else f"赃款 {o.corrupt_amount} 被没收 {taken}")
         if bribe:
             bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
         if family:

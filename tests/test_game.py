@@ -235,6 +235,9 @@ class TestPresidentEndsGameImmediately(unittest.TestCase):
         self.assertEqual(game.players[1].money, game.players[3].money + 8)
         self.assertEqual(game.last_outcome.presidents, [2])
         self.assertEqual(game.last_outcome.outcomes[1].rank_after, top - 1)
+        # 本轮存档也要跟着改（复盘工具拿它校对，不改就报"官职对不上"）
+        archived = {r["player_id"]: r["rank_after"] for r in game.archive[-1]["players"]}
+        self.assertEqual(archived, {1: top - 1, 2: top, 3: top - 1})
 
     def test_simultaneous_presidents_fall_back_to_merit(self):
         game = make_game(2)

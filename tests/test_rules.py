@@ -1174,6 +1174,17 @@ class TestReportReward(unittest.TestCase):
         self.assertTrue(out.outcomes[1].report_effective)
         self.assertEqual(out.wealth_top_ids, [4])
 
+    def test_partial_seize_keeps_the_reporters_cut(self):
+        """report_seize_ratio < 1：被抓的人留下一部分赃款，但举报人分到的一分不少。"""
+        for ratio, kept in ((Fraction(2, 3), 4), (Fraction(1, 2), 6), (Fraction(1, 3), 6)):
+            cfg = dataclasses.replace(CFG, report_seize_ratio=ratio)
+            caught, reporter = player(1, rank=0), player(2)
+            out = resolve([caught, reporter, player(3)],
+                          {1: Action(Card.CORRUPT), 2: Action(Card.REPORT, 1)},
+                          script=[corrupt_roll(12)], cfg=cfg)
+            self.assertEqual(out.outcomes[2].money_from_reports, 6, ratio)  # 12 的一半
+            self.assertEqual(caught.money - out.outcomes[1].salary, kept, ratio)
+
     def test_mutual_reports_settle_simultaneously(self):
         a = player(1, rank=0, money=5, merit=0)
         b = player(2, rank=0, money=7, merit=0)
