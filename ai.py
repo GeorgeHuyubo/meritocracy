@@ -36,6 +36,18 @@ from models import Card
 
 EXPECTED_CARD_VALUE = 10  # 兜底用的牌面期望（正常情况下用发牌时摇好的真实点数）
 
+# "这桌最近的风气"的起始值和衰减（见 SmartAgent._update_table）。
+# 起始值取 AI 混战里的平均水平；每轮新观察占 1 - TABLE_DECAY，越近的轮次分量越重。
+TABLE_DECAY = 0.6
+TABLE_PRIOR = {
+    "rep": 0.25,      # 每轮有多大比例的人被玩家举报（没查实也公开）
+    "atk": 0.25,      # 每轮有多大比例的人挨了攻击
+    "corrupt": 0.3,   # 有人贪了没被抓（传闻响了）/ 有人被查实
+    "work": 0.6,      # 每轮有多大比例的人政绩在涨（攻击能抢到东西的人）
+    "me_atk": 0.2,    # 我自己最近挨打的频率
+    "me_rep": 0.2,    # 我自己最近被举报的频率
+}
+
 # 「他这一轮在贪 / 在掏钱升职」的估计：按数据拟合，不再拍脑袋。
 # 来源：400 局六 AI 混战，每轮每一对（观察者, 对手）记一条——AI 看得到的特征
 # vs 对手这一轮实际干了什么（`python3 audit.py --features 400`，混脚本打法加 --bots）。
@@ -267,6 +279,10 @@ class SmartAgent:
         self.est_corrupt_attempts = 0.0  # 估计发生过多少次贪污
         # 别人眼里的我：只用公开信息、按和对手一样的规则更新
         self.self_model = OpponentModel()
+        self.table: dict[str, float] = dict(TABLE_PRIOR)
+        self.want_features = False  # LearnedAgent 打开：score_combos 顺便产出每个组合的特征
+        self.last_features: list[dict[str, float]] = []
+        self._econ_detail: dict[str, float] = {}
         self._seen_public: dict[str, Any] | None = None
         self._seen_private: dict[str, Any] | None = None
         # 上一轮出牌时，我估的每个对手"这一轮在贪"的概率；下一轮看到结算后累加进上面那个数
@@ -303,6 +319,7 @@ class SmartAgent:
         self._last_round_seen = result["round"]
 
         facts = {f["player_id"]: f for f in result.get("player_facts", [])}
+        self._update_table(facts, players, result)
         self._rounds_seen += 1
         # 全场这轮大概贪了几次：用出牌时那份校准过的估计，而不是事后的先验证据
         # （事后证据里"没干活 = 0.45 次贪污"这种先验把分母吹大，被查实的概率就被摊薄了）
@@ -445,6 +462,29 @@ class SmartAgent:
                 model.money_est = max(0.0, model.money_est)
 
         self._prev_players = players
+
+    def _update_table(self, facts, players, result) -> None:
+        """这桌最近的风气：举报多凶、攻击多凶、有多少人在贪、多少人在干活、我自己挨了多少。"""
+        if not facts:
+            return
+        n = len(facts)
+        caught = sum(1 for f in facts.values() if self._caught(f))
+        working = 0
+        for pid, f in facts.items():
+            cur, prev = players.get(pid), self._prev_players.get(pid)
+            if cur and prev and cur["merit"] - prev["merit"] + f["attack_merit_loss"] > 0:
+                working += 1
+        mine = facts.get(self.id, {})
+        obs = {
+            "rep": sum(1 for f in facts.values() if f.get("reported_by_player")) / n,
+            "atk": sum(1 for f in facts.values() if f.get("attacked")) / n,
+            "corrupt": min(1.0, 0.5 * bool(result.get("wealth_top_ids")) + caught / n),
+            "work": working / n,
+            "me_atk": float(bool(mine.get("attacked"))),
+            "me_rep": float(bool(mine.get("reported_by_player"))),
+        }
+        for k, x in obs.items():
+            self.table[k] = TABLE_DECAY * self.table[k] + (1 - TABLE_DECAY) * x
 
     @staticmethod
     def _caught(fact) -> bool:
@@ -925,9 +965,11 @@ class SmartAgent:
             if best_score is None or score > best_score:
                 best_score, best_combo = score, cards
 
-        chosen = list(best_combo or hand[:n_picks])
-        chosen = self._order_picks(private, chosen)
+        return self._finish(public, private, list(best_combo or hand[:n_picks]))
 
+    def _finish(self, public, private, chosen: list[Card]) -> list[tuple[str, int | None]]:
+        """选好了出哪组牌之后：排出场顺序、给干扰牌挑目标、留下复盘/体检要的记录。"""
+        chosen = self._order_picks(private, chosen)
         opponents = [p for p in public["players"] if p["id"] != self.id]
         picks: list[tuple[str, int | None]] = []
         used_targets: set[int] = set()
@@ -1041,6 +1083,8 @@ class SmartAgent:
 
         # 2) 枚举所有出牌组合（按手牌下标，所以同名牌能出两张）
         scored: list[tuple[float, list[Card]]] = []
+        feats: list[dict[str, float]] = []
+        contender = max((self._contender(o["id"]) for o in killers), default=0.0)
         variants = [[]] + ([[Card.PROMOTE_FAMILY]] if family_ok else [])
         for combo, extra in (
             (combo, extra)
@@ -1053,8 +1097,10 @@ class SmartAgent:
             score, i_win = self._score_economy(
                 public, private, cards, [0] * len(extra) + [values[i] for i in combo]
             )
+            econ = score
             if rival_closing and not i_win:
                 score *= closing_discount
+            econ_scored = score
             seen: Counter = Counter()
             for c in cards:
                 if c in (Card.ATTACK, Card.REPORT):
@@ -1065,10 +1111,60 @@ class SmartAgent:
                     ranked = solo[c]
                     score += ranked[seen[c]] if seen[c] < len(ranked) else 0.0
                     seen[c] += 1
-            if rival_closing and seen[Card.ATTACK] and seen[Card.REPORT]:
+            both = rival_closing and seen[Card.ATTACK] and seen[Card.REPORT]
+            if both:
                 score += both_bonus
             scored.append((score, cards))
+            if self.want_features:
+                feats.append(self._combo_features(
+                    cards, score, econ, score - econ_scored, both, rival_closing, contender, public
+                ))
+        self.last_features = feats
         return scored
+
+    def _combo_features(self, cards, total, econ, intf, both, closing, contender, public):
+        """一个出牌组合的特征（给 LearnedAgent 学"怎么权衡"用）。
+
+        状态本身的量（这桌最近举报多凶）对所有组合都一样，放进 softmax 会被约掉，
+        所以都和组合的属性交叉：贪不贪 × 这桌举报强度、干活多少 × 我最近挨打的频率……
+        靠这些交叉项，线性策略才学得会"没人举报就去贪，大家都在抢功就别闷头干活"。
+        """
+        d = self._econ_detail
+        t = self.table
+        n_atk = float(cards.count(Card.ATTACK))
+        n_rep = float(cards.count(Card.REPORT))
+        rnd = int(public.get("round", 1))
+        late = rnd / max(1, int(public.get("max_rounds", 12)))
+        merit_risk = self.cfg.attack_steal_fraction if self.cfg.attack_mode == "steal_work" else 0
+        return {
+            "hand": total,
+            "econ": econ,
+            "intf": intf,
+            "promote": d["promote"],
+            "promote_money": d["promote_money"],
+            "promote_merit": d["promote_merit"],
+            "dirty": d["dirty"],
+            "merit_gain": d["merit_gain"],
+            "money_gain": d["money_gain"],
+            "risk": d["risk"],
+            "n_attack": n_atk,
+            "n_report": n_rep,
+            "both": float(both),
+            "family": float(Card.PROMOTE_FAMILY in cards),
+            # ---- 看桌子：组合属性 × 这桌最近的风气 ----
+            "dirty_x_rep": d["dirty"] * (t["rep"] - TABLE_PRIOR["rep"]),
+            "dirty_x_merep": d["dirty"] * (t["me_rep"] - TABLE_PRIOR["me_rep"]),
+            "bribe_x_merep": d["promote_money"] * (t["me_rep"] - TABLE_PRIOR["me_rep"]),
+            "work_x_atk": d["merit_gain"] * (t["atk"] - TABLE_PRIOR["atk"]),
+            "work_x_meatk": d["merit_gain"] * float(merit_risk) * t["me_atk"],
+            "meritpromo_x_meatk": d["promote_merit"] * t["me_atk"],
+            "report_x_corrupt": n_rep * (t["corrupt"] - TABLE_PRIOR["corrupt"]),
+            "attack_x_work": n_atk * (t["work"] - TABLE_PRIOR["work"]),
+            "intf_x_contender": (n_atk + n_rep) * contender,
+            "intf_x_closing": (n_atk + n_rep) * float(closing),
+            "econ_x_late": econ * late,
+            "dirty_x_late": d["dirty"] * late,
+        }
 
     def explain(self, public: dict[str, Any], private: dict[str, Any]) -> list[dict[str, Any]]:
         """我眼里的每个对手：给复盘工具看 AI 当时是怎么想的。只读，不碰 rng。"""
@@ -1309,6 +1405,7 @@ class SmartAgent:
         # AI 把买官当成零风险，钱越多越急着买——复盘：富二代开局从 10 块加到 15 块，
         # 第 1、2 轮买官被查实的比例从 7% 涨到 17% / 23%，胜率反而掉了。
         dirty = bool(n_corrupt or n_graft)
+        risk = 0.0
         if dirty:
             # 被攻击撞上会被迫掏打点费，这也是贪污的成本之一
             if cfg.attack_mode == "denial" and cfg.attack_on_corruption == "merit_to_attacker":
@@ -1340,7 +1437,18 @@ class SmartAgent:
                     loss += self.w.bribe_caught_loss * float(cfg.bribe_forfeit_ratio)
             if promoted and not family:
                 loss += self.w.promotion_bonus  # 这一级也作废了（一纸调令不会被撤）
-            score -= self.w.caught_dread * p_caught * loss
+            risk = self.w.caught_dread * p_caught * loss
+            score -= risk
+        # 学习型 AI 拿这些当特征（见 score_combos / LearnedAgent）
+        self._econ_detail = {
+            "promote": float(promoted),
+            "promote_money": float(promoted and bribed),
+            "promote_merit": float(promoted and not bribed),
+            "dirty": float(dirty),
+            "merit_gain": gain_merit / tc if tc else 0.0,
+            "money_gain": gain_money / mc if mc else 0.0,
+            "risk": risk,
+        }
         return score, promoted and rank + 1 >= cfg.president_rank
 
     # -- 干扰牌的期望收益（单位：官职；生产牌走 _score_economy） --------
@@ -1628,6 +1736,102 @@ class SmartAgent:
         return self.w.interfere_report * p_hit * (cash_value + setback), pid
 
 
+class LearnedAgent(SmartAgent):
+    """学习型 AI：眼睛和手写 AI 一样（同一套观察、同一套组合打分拆出来的特征），
+    怎么权衡这些特征由自我对局学出来（learn.py）。
+
+    出牌 = 对每个组合的特征做线性打分，softmax 随机抽一个——天然是混合策略：
+    这游戏是石头剪刀布，每次都出同一手的人会被看穿。
+    权重里 "hand"（手写 AI 的总分）那一项初始化成 1/温度、其他为 0，第 0 代就约等于手写 AI。
+    `record=True` 时把每次决策的 ∇log π 记进 trace，learn.py 按输赢回传。
+    """
+
+    def __init__(self, *args, theta: dict[str, float], record: bool = False, **kw) -> None:
+        super().__init__(*args, **kw)
+        self.theta = theta
+        self.record = record
+        self.trace: list[dict[str, float]] = []
+        self.chosen_stats: Counter = Counter()  # 选中的组合里各特征的累计（learn.py 看打法怎么变）
+        self.want_features = True
+        # 对照实验用：我是头号挑战者、有人要登顶、手里有干扰牌时，只许在带干扰牌的组合里挑
+        self.force_block = False
+
+    def decide(self, public, private):
+        self.observe(public, private)
+        hand = [Card(d["card"]) if isinstance(d, dict) else Card(d) for d in private["hand"]]
+        n_picks = min(int(public.get("picks_per_round", 1)), len(hand))
+        if not hand or n_picks <= 0:
+            self.last_scores = []
+            return []
+        scored = self.score_combos(public, private)
+        self.last_scores = scored
+        feats = self.last_features
+        if not scored:
+            return self._finish(public, private, hand[:n_picks])
+        if self.force_block:
+            opps = [o for o in public["players"] if o["id"] != self.id]
+            killers = [o for o in opps
+                       if self._about_to_win(o, self.models.get(o["id"], OpponentModel()))]
+            if killers and max(self._contender(o["id"]) for o in killers) > 0.69:
+                keep = [i for i, (_, cards) in enumerate(scored)
+                        if Card.ATTACK in cards or Card.REPORT in cards]
+                if keep:
+                    scored = [scored[i] for i in keep]
+                    feats = [feats[i] for i in keep]
+        logits = [sum(self.theta.get(k, 0.0) * v for k, v in f.items()) for f in feats]
+        top = max(logits)
+        weights = [math.exp(min(0.0, x - top)) for x in logits]
+        total = sum(weights)
+        probs = [w / total for w in weights]
+        r, acc, idx = self.rng.random(), 0.0, len(probs) - 1
+        for i, p in enumerate(probs):
+            acc += p
+            if r < acc:
+                idx = i
+                break
+        for k in ("dirty", "n_report", "n_attack", "promote", "promote_money", "family"):
+            self.chosen_stats[k] += feats[idx].get(k, 0.0)
+        if self.record:
+            # softmax 线性策略：∇log π(a) = φ(a) − Σ π(b) φ(b)
+            keys = feats[idx].keys()
+            self.trace.append({
+                k: feats[idx][k] - sum(p * f[k] for p, f in zip(probs, feats)) for k in keys
+            })
+        return self._finish(public, private, list(scored[idx][1]))
+
+
+def load_policy(path: str) -> dict[str, float]:
+    import json
+
+    with open(path, encoding="utf-8") as fh:
+        return dict(json.load(fh)["theta"])
+
+
+_POLICY_CACHE: dict[str, dict[str, float]] = {}
+
+
+def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
+              **flags: Any) -> "AgentPool":
+    """按 cfg.ai_policy 决定是手写 AI 还是学习型 AI（权重文件不在就退回手写）。
+
+    服务器和平衡分析（analysis.py / sweep.py 里的 "smart"）都走这里，
+    所以平衡报告测的永远是服务器上实际在用的那个 AI。
+    """
+    from pathlib import Path
+
+    policy = None
+    if cfg.ai_policy:
+        path = Path(cfg.ai_policy)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
+        if path.exists():
+            key = str(path)
+            if key not in _POLICY_CACHE:
+                _POLICY_CACHE[key] = load_policy(key)
+            policy = _POLICY_CACHE[key]
+    return AgentPool(cfg=cfg, rng=rng or random.Random(), policy=policy, **flags)
+
+
 # --------------------------------------------------------------------------
 # 给分析/模拟用的适配层
 # --------------------------------------------------------------------------
@@ -1644,17 +1848,22 @@ class AgentPool:
     allow_report: bool = True
     allow_corrupt: bool = True
     agents: dict[int, SmartAgent] = field(default_factory=dict)
+    policy: dict[str, float] | None = None  # 给了就用学习型 AI（LearnedAgent）
+    record: bool = False
 
     def get(self, player_id: int) -> SmartAgent:
         if player_id not in self.agents:
-            self.agents[player_id] = SmartAgent(
-                player_id,
+            kw = dict(
                 cfg=self.cfg,
                 weights=self.weights,
                 rng=self.rng,
                 allow_attack=self.allow_attack,
                 allow_report=self.allow_report,
                 allow_corrupt=self.allow_corrupt,
+            )
+            self.agents[player_id] = (
+                LearnedAgent(player_id, theta=self.policy, record=self.record, **kw)
+                if self.policy is not None else SmartAgent(player_id, **kw)
             )
         return self.agents[player_id]
 

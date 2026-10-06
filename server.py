@@ -72,11 +72,11 @@ class Room:
         self.connections: dict[WebSocket, int | None] = {}
         self.lock = asyncio.Lock()
         self.reveal_task: asyncio.Task | None = None
-        self.pool = ai.AgentPool(cfg=cfg, rng=random.SystemRandom())
+        self.pool = ai.make_pool(cfg, random.SystemRandom())
 
     def reset_brains(self) -> None:
         """新开一局时 AI 的记忆要清空，不能跨局。"""
-        self.pool = ai.AgentPool(cfg=self.cfg, rng=random.SystemRandom())
+        self.pool = ai.make_pool(self.cfg, random.SystemRandom())
 
 
 class Hub:

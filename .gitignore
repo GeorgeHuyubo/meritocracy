@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.db
 .venv/
+policies/latest.json
+policies/*.tmp

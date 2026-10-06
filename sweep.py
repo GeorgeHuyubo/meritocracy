@@ -74,6 +74,16 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "seize12": {"report_seize_ratio": Fraction(1, 2)},   # 只没收举报人那份
     "mc90": {"promotion_money_costs": [14, 20, 27, 33]},
     "mc80": {"promotion_money_costs": [12, 18, 24, 30]},
+    "mc110": {"promotion_money_costs": [17, 24, 33, 41]},   # 反方向：AI 变强后局结束得太快
+    # 节奏：AI 变强后主席率 93%，门槛整体抬高
+    "mt110": {"promotion_merit_costs": [20, 30, 40, 50]},
+    "both110": {"promotion_merit_costs": [20, 30, 40, 50],
+                "promotion_money_costs": [17, 24, 33, 41]},
+    "both120": {"promotion_merit_costs": [22, 32, 43, 54],
+                "promotion_money_costs": [18, 26, 36, 44]},
+    # 身份：官二代、卷王偏强
+    "off34": {"origin_patronage_merit_ratio": Fraction(3, 4)},
+    "grind3": {"origin_grinder_overtime_multiplier": 3},
     "rich18": {"origin_old_money_start": 18},   # 富二代开局钱（默认 15）
     "rich20": {"origin_old_money_start": 20},
 }

@@ -417,6 +417,11 @@ REPORT_REWARD_FEE: int = 1
 # （赃款 × REPORT_REWARD_RATIO）一定照抄——少抄的只是充公那份，举报人一分不少。
 REPORT_SEIZE_RATIO: Fraction = Fraction(1)
 
+# 服务器上的 AI 用哪个："" = 手写 AI（ai.SmartAgent）；填权重文件路径（相对仓库根目录）
+# = 自我对局训练出来的学习型 AI（ai.LearnedAgent，见 learn.py）。文件不存在时退回手写 AI。
+# 2026-10：第一轮训练 66 万局自我对局，1 学 5 手写 17.5%、1 手写 5 学 7.4%，各种脚本打法都 ≤ 2.6%。
+AI_POLICY: str = "policies/best.json"
+
 # --------------------------------------------------------------------------
 # 全局事件
 # --------------------------------------------------------------------------
@@ -751,6 +756,7 @@ class Config:
     report_reward_ratio: Fraction = REPORT_REWARD_RATIO
     report_reward_fee: int = REPORT_REWARD_FEE
     report_seize_ratio: Fraction = REPORT_SEIZE_RATIO
+    ai_policy: str = AI_POLICY
     bribe_forfeit_ratio: Fraction = BRIBE_FORFEIT_RATIO
 
     event_definitions: list[dict[str, Any]] = field(

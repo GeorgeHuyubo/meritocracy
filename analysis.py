@@ -289,7 +289,7 @@ def _smart_factory(**flags):
     """每局要给 AI 一个新的 AgentPool（记忆不能跨局）。"""
 
     def make(cfg: Config, rng: random.Random):
-        pool = ai.AgentPool(cfg=cfg, rng=rng, **flags)
+        pool = ai.make_pool(cfg, rng, **flags)  # 跟着 cfg.ai_policy：服务器用哪个 AI，就测哪个
 
         def strategy(game, me, hand, others, _rng):
             # 和服务器一样走 ai.turn：该换牌就先换（含富二代的免费换牌）

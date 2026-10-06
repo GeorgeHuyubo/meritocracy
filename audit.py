@@ -31,6 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai  # noqa: E402
 import analysis  # noqa: E402
 from config import DEFAULT_CONFIG, Config  # noqa: E402
+
+# 体检里说"手写 AI / 思考型 AI"就是手写的那个：不跟着 cfg.ai_policy 切到学习型
+HAND_CFG = dataclasses.replace(DEFAULT_CONFIG, ai_policy="")
 from game import Game  # noqa: E402
 from models import Card, Origin, PromotionKind  # noqa: E402
 
@@ -109,9 +112,10 @@ def _can_promote_now(cfg: Config, rank: int, money: int, merit: int, origin, car
     return ""
 
 
-def audit_games(args: tuple[int, int, int]) -> dict[str, Any]:
-    start, n_games, seed = args
-    cfg = DEFAULT_CONFIG
+def audit_games(args: tuple) -> dict[str, Any]:
+    start, n_games, seed = args[:3]
+    policy = ai.load_policy(args[3]) if len(args) > 3 and args[3] else None
+    cfg = HAND_CFG
     t = Tally()
     for g in range(start, start + n_games):
         rng = random.Random(seed * 100003 + g)
@@ -122,7 +126,7 @@ def audit_games(args: tuple[int, int, int]) -> dict[str, Any]:
         rng.shuffle(pool_ids)
         for pid, oid in zip(sorted(game.players), pool_ids):
             game.players[pid].origin = Origin(oid)
-        pool = ai.AgentPool(cfg=cfg, rng=rng)
+        pool = ai.AgentPool(cfg=cfg, rng=rng, policy=policy)
         game.start_game()
         t.count["games"] += 1
 
@@ -157,7 +161,11 @@ def audit_games(args: tuple[int, int, int]) -> dict[str, Any]:
                     cb = ("头号挑战者" if behind < 0.25 else "落后约半级" if behind < 0.75
                           else "落后约一级" if behind < 1.5 else "落后两级以上")
                     t.cal_add(f"拦人|{cb}", c, hit)
+                    runner_up_miss = lead if place == 2 and not hit else None
+                else:
+                    runner_up_miss = None
                 decisions[pid] = {
+                    "runner_up_miss": runner_up_miss,
                     "picks": picks, "hand": hand, "family": fam,
                     "pred": dict(agent.last_prediction),
                     "believed_closing": believed_closing,
@@ -174,6 +182,27 @@ def audit_games(args: tuple[int, int, int]) -> dict[str, Any]:
                 if p.rank >= top and before[pid][0] < top
             ]
             leader_key = max(ranks_now.values())
+
+            # ---- 第二名有牌却没拦：为什么 ----
+            for pid, d in decisions.items():
+                lead = d.get("runner_up_miss")
+                if lead is None:
+                    continue
+                played = [Card(p["action"]) for p in d["picks"]]
+                others_hit = any(p.get("target") == lead
+                                 for q, dd in decisions.items() if q != pid for p in dd["picks"])
+                lead_won = lead in winners_now
+                if before[pid][0] == top - 1 and any(c.is_promotion for c in played):
+                    why = "我自己也在冲主席"
+                elif any(c.is_promotion for c in played):
+                    why = "我在用晋升卡升职"
+                elif others_hit:
+                    why = "别人已经在拦他"
+                else:
+                    why = "就是没拦（在发展）"
+                t.count[f"ru|{why}"] += 1
+                t.count[f"ru|{why}|他登顶了"] += lead_won
+                t.count["ru|total"] += 1
 
             # ---- "他这轮要登顶"判得准不准（只看省级的对手）----
             # 真相 = 按他的真实钱、政绩和手牌，没人拦的话这一轮够不够登顶
@@ -318,10 +347,11 @@ def audit_games(args: tuple[int, int, int]) -> dict[str, Any]:
     return t.to_plain()
 
 
-def exploit(args: tuple[str, int, int]) -> tuple[str, float, int]:
-    """1 个脚本打法 + 5 个思考型 AI，轮换座位，六身份混战。返回夺冠份额。"""
-    name, n_games, seed = args
-    cfg = DEFAULT_CONFIG
+def exploit(args: tuple) -> tuple[str, float, int]:
+    """1 个脚本打法 + 5 个 AI（手写，或给了权重文件就用学习型），轮换座位。返回夺冠份额。"""
+    name, n_games, seed = args[:3]
+    theta = ai.load_policy(args[3]) if len(args) > 3 and args[3] else None
+    cfg = HAND_CFG
     rng = random.Random(seed)
     share = 0.0
     for g in range(n_games):
@@ -330,8 +360,13 @@ def exploit(args: tuple[str, int, int]) -> tuple[str, float, int]:
         names[seat] = name
         pool_ids = list(cfg.origin_ids())
         rng.shuffle(pool_ids)
-        rec = analysis.play(N, rng, cfg, analysis.build_assignment(names, cfg, rng),
-                            origins=pool_ids[:N])
+        assign = analysis.build_assignment(names, cfg, rng)
+        if theta is not None:
+            for s in range(N):
+                if s != seat:
+                    pool = ai.AgentPool(cfg=cfg, rng=rng, policy=theta)
+                    assign[s] = (lambda p: lambda game, me, hand, others, _r: ai.turn(game, me.id, p))(pool)
+        rec = analysis.play(N, rng, cfg, assign, origins=pool_ids[:N])
         pid = sorted(rec.cards)[seat]
         if pid in rec.winners:
             share += 1.0 / len(rec.winners)
@@ -344,7 +379,7 @@ def duel(args: tuple) -> tuple[str, float, int]:
     各变体用同一串种子（同样的发牌、同样的出身分配），差异主要来自那一席的决策。
     """
     label, over, n_games, seed, crowd_over = args
-    cfg = DEFAULT_CONFIG
+    cfg = HAND_CFG
     rng = random.Random(seed)
     weights = dataclasses.replace(ai.Weights(), **over)
     crowd_weights = dataclasses.replace(ai.Weights(), **crowd_over)
@@ -381,7 +416,7 @@ def _load_ai(path: str):
 def versus(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
     """1 个 A 版 AI + 5 个 B 版 AI，轮换座位。mode = "new_in_old" / "old_in_new"。"""
     mode, old_path, n_games, seed = args
-    cfg = DEFAULT_CONFIG
+    cfg = HAND_CFG
     old = _load_ai(old_path)
     rng = random.Random(seed)
 
@@ -406,6 +441,100 @@ def versus(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
     return mode, 100.0 * share / n_games, n_games
 
 
+def learned_vs_smart(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
+    """学习型 AI 和手写 AI 同桌。mode = "learned_in_smart"（1 学 5 手写）/ "smart_in_learned"。"""
+    mode, policy_path, n_games, seed = args
+    cfg = HAND_CFG
+    theta = ai.load_policy(policy_path)
+    rng = random.Random(seed)
+
+    def make(policy):
+        def f(cfg: Config, rng: random.Random):
+            pool = ai.AgentPool(cfg=cfg, rng=rng, policy=policy)
+            return lambda game, me, hand, others, _rng: ai.turn(game, me.id, pool)
+        return f
+
+    lone, crowd = (make(theta), make(None)) if mode == "learned_in_smart" else (make(None), make(theta))
+    share = 0.0
+    for g in range(n_games):
+        seat = g % N
+        assign = [crowd(cfg, rng) for _ in range(N)]
+        assign[seat] = lone(cfg, rng)
+        ids = list(cfg.origin_ids())
+        rng.shuffle(ids)
+        rec = analysis.play(N, rng, cfg, assign, origins=ids[:N])
+        pid = sorted(rec.cards)[seat]
+        if pid in rec.winners:
+            share += 1.0 / len(rec.winners)
+    return mode, 100.0 * share / n_games, n_games
+
+
+DYNAMIC_TABLES = {
+    "全是只举报的": ["reporter"] * 5,
+    "全是从不举报、只干活的": ["worker"] * 5,
+    "全是只攻击的": ["attacker"] * 5,
+    "全是只贪的": ["corrupt"] * 5,
+    "全是手写 AI": ["smart"] * 5,
+}
+
+
+def dynamic(args: tuple[str, str, str, int, int]) -> tuple[str, str, dict[str, float]]:
+    """把被测 AI 放进一桌"怪人"里，看它的打法会不会跟着变。"""
+    who, policy_path, table, n_games, seed = args
+    cfg = HAND_CFG
+    rng = random.Random(seed)
+    theta = ai.load_policy(policy_path) if who == "学习型" else None
+    mix: Counter = Counter()
+    share = 0.0
+    for g in range(n_games):
+        seat = g % N
+        pool = ai.AgentPool(cfg=cfg, rng=rng, policy=theta)
+        names = list(DYNAMIC_TABLES[table])
+        assign = analysis.build_assignment(names[:seat] + ["smart"] + names[seat:], cfg, rng)
+        assign[seat] = lambda game, me, hand, others, _rng: ai.turn(game, me.id, pool)
+        ids = list(cfg.origin_ids())
+        rng.shuffle(ids)
+        rec = analysis.play(N, rng, cfg, assign, origins=ids[:N])
+        pid = sorted(rec.cards)[seat]
+        if pid in rec.winners:
+            share += 1.0 / len(rec.winners)
+        for card, n in rec.cards[pid].items():
+            mix[card] += n
+    total = sum(mix.values()) or 1
+    out = {c: 100.0 * mix[c] / total for c in ("WORK", "CORRUPT", "GRAFT", "REPORT", "ATTACK")}
+    out["胜率"] = 100.0 * share / n_games
+    return who, table, out
+
+
+def force_block_duel(args: tuple[bool, str, int, int]) -> tuple[bool, float, int]:
+    """1 个学习型（可选"头号挑战者必拦"）+ 5 个学习型。比较强制拦人到底是赚是亏。"""
+    force, policy_path, n_games, seed = args
+    cfg = HAND_CFG
+    theta = ai.load_policy(policy_path)
+    rng = random.Random(seed)
+
+    def make(flag: bool):
+        pool = ai.AgentPool(cfg=cfg, rng=rng, policy=theta)
+
+        def play(game, me, hand, others, _rng):
+            pool.get(me.id).force_block = flag
+            return ai.turn(game, me.id, pool)
+        return play
+
+    share = 0.0
+    for g in range(n_games):
+        seat = g % N
+        assign = [make(False) for _ in range(N)]
+        assign[seat] = make(force)
+        ids = list(cfg.origin_ids())
+        rng.shuffle(ids)
+        rec = analysis.play(N, rng, cfg, assign, origins=ids[:N])
+        pid = sorted(rec.cards)[seat]
+        if pid in rec.winners:
+            share += 1.0 / len(rec.winners)
+    return force, 100.0 * share / n_games, n_games
+
+
 def parse_weights(spec: str) -> dict[str, Any]:
     """'endgame_economy_discount=0.5,noise=0.01' -> {...}，按 Weights 里的类型转换。"""
     fields = {f.name: f.type for f in dataclasses.fields(ai.Weights)}
@@ -427,7 +556,7 @@ def features(args: tuple[int, int, int, bool]) -> dict[tuple[str, str], list[int
     import rules  # noqa: F401
 
     start, n_games, seed, bots = args
-    cfg = DEFAULT_CONFIG
+    cfg = HAND_CFG
     tab: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
     for g in range(start, start + n_games):
         rng = random.Random(seed * 100003 + g)
@@ -526,6 +655,14 @@ def report(t: Tally) -> None:
     cal_table("他在买官", "  举报时估的「他这轮在买官」vs 他真的掏钱升职了没有")
     cal_table("拦人", "  有人要登顶、我手里有干扰牌时，我拦他的比例（看'实际'那一列）")
 
+    if c["ru|total"]:
+        print(f"\n  全场第 2 名有干扰牌却没拦要登顶的人（{c['ru|total']} 次）：")
+        for why in ("我自己也在冲主席", "我在用晋升卡升职", "别人已经在拦他", "就是没拦（在发展）"):
+            n = c[f"ru|{why}"]
+            won = c[f"ru|{why}|他登顶了"]
+            print(f"    {why:<16}{n:>6}  ({n / c['ru|total']:.0%})   其中他真登顶了 {won}"
+                  f"（{won / n:.0%}）" if n else f"    {why:<16}{0:>6}")
+
     print("\n1b. 明显失误")
 
     def rate(a: str, b: str) -> str:
@@ -568,6 +705,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--features", type=int, default=0,
                     help="跑这么多局，打印 AI 读牌用的特征 vs 实际行为（拟合 ai.py 因子表用）")
     ap.add_argument("--bots", action="store_true", help="--features 时每局混一个脚本打法")
+    ap.add_argument("--audit-policy", default="", help="体检学习型 AI（六个座位都用这份权重）")
+    ap.add_argument("--policy", default="", help="学习型 AI 的权重文件：和手写 AI 同桌对决（用 --duel-games 局数）")
+    ap.add_argument("--dynamic", type=int, default=0,
+                    help="动态性测试：被测 AI 坐进各种怪桌，每桌跑这么多局（要和 --policy 一起用才有学习型对照）")
+    ap.add_argument("--force-block", action="store_true",
+                    help="和 --policy 一起用：学习型'头号挑战者必拦'vs 照常，各坐进 5 个学习型里")
     ap.add_argument("--vs-old", default="", help="另一份 ai.py 的路径：新版 1 打旧版 5、旧版 1 打新版 5")
     args = ap.parse_args(argv)
 
@@ -575,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.games:
         per = max(1, args.games // args.workers)
         starts = list(range(0, args.games, per))
-        jobs = [(s, min(per, args.games - s), args.seed) for s in starts]
+        jobs = [(s, min(per, args.games - s), args.seed, args.audit_policy) for s in starts]
     scripted = ["worker", "builder", "safe_climber", "climber", "corrupt", "challenger", "reporter"]
     if args.features:
         per = max(1, args.features // args.workers)
@@ -593,12 +736,21 @@ def main(argv: list[str] | None = None) -> int:
                 cur = k
             print(f"  {v:<12}{n:>8}{c / n:>8.1%}{b / n:>8.1%}")
         return 0
-    if (args.duel or args.vs_old) and not args.exploit and args.games == 2000:
+    if (args.duel or args.vs_old or args.policy or args.dynamic) and not args.exploit \
+            and args.games == 2000:
         jobs = []  # 只跑对决时不默认跑体检
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = [ex.submit(audit_games, j) for j in jobs]
-        efuts = [ex.submit(exploit, (s, args.exploit, args.seed + i))
+        efuts = [ex.submit(exploit, (s, args.exploit, args.seed + i, args.audit_policy))
                  for i, s in enumerate(scripted)] if args.exploit else []
+        pfuts = [ex.submit(learned_vs_smart, (m, args.policy, args.duel_games, args.seed + k))
+                 for k, m in enumerate(["learned_in_smart", "smart_in_learned"] * 2)] \
+            if args.policy and not args.dynamic and not args.force_block else []
+        ffuts = [ex.submit(force_block_duel, (flag, args.policy, args.duel_games, args.seed + k))
+                 for k in range(2) for flag in (False, True)] if args.force_block else []
+        whos = ["手写"] + (["学习型"] if args.policy else [])
+        yfuts = [ex.submit(dynamic, (w, args.policy, t, args.dynamic, args.seed))
+                 for w in whos for t in DYNAMIC_TABLES] if args.dynamic else []
         vfuts = [ex.submit(versus, (m, args.vs_old, args.duel_games, args.seed + k))
                  for k, m in enumerate(["new_in_old", "old_in_new"] * 2)] if args.vs_old else []
         crowd = parse_weights(args.crowd) if args.crowd else {}
@@ -616,6 +768,38 @@ def main(argv: list[str] | None = None) -> int:
                 half = 1.96 * (pct / 100 * (1 - pct / 100) / n) ** 0.5 * 100
                 flag = "  <<< 能剥削 AI" if pct - half > 16.67 else ""
                 print(f"  {name:<14}{pct:>7.2f}%  ±{half:.2f}{flag}")
+        if pfuts:
+            agg_p: dict[str, list[float]] = defaultdict(lambda: [0.0, 0])
+            for f in pfuts:
+                mode, pct, n = f.result()
+                agg_p[mode][0] += pct * n
+                agg_p[mode][1] += n
+            print(f"\n学习型 vs 手写（公平线 16.67%）  {args.policy}")
+            for mode, label in (("learned_in_smart", "1 个学习型 + 5 个手写：学习型"),
+                                ("smart_in_learned", "1 个手写 + 5 个学习型：手写")):
+                tot, n = agg_p[mode]
+                pct = tot / n
+                half = 1.96 * (pct / 100 * (1 - pct / 100) / n) ** 0.5 * 100
+                print(f"  {label:<26}{pct:>7.2f}%  ±{half:.2f}   （{n} 局）")
+        if ffuts:
+            agg_f: dict[bool, list[float]] = defaultdict(lambda: [0.0, 0])
+            for f in ffuts:
+                flag, pct, n = f.result()
+                agg_f[flag][0] += pct * n
+                agg_f[flag][1] += n
+            print("\n强制拦人对照：1 个学习型 + 5 个学习型（公平线 16.67%）")
+            for flag, label in ((False, "照常（自己判断拦不拦）"), (True, "头号挑战者必拦")):
+                tot, n = agg_f[flag]
+                pct = tot / n
+                half = 1.96 * (pct / 100 * (1 - pct / 100) / n) ** 0.5 * 100
+                print(f"  {label:<20}{pct:>7.2f}%  ±{half:.2f}   （{n} 局）")
+        if yfuts:
+            print(f"\n动态性测试：被测 AI 坐进各种怪桌，它自己打出的牌里各占多少（%）")
+            print(f"  {'谁':<6}{'桌子':<20}{'干活':>7}{'贪污':>7}{'以权谋私':>9}{'举报':>7}{'攻击':>7}{'胜率':>8}")
+            for f in yfuts:
+                who, table, o = f.result()
+                print(f"  {who:<6}{table:<20}{o['WORK']:>7.1f}{o['CORRUPT']:>7.1f}{o['GRAFT']:>9.1f}"
+                      f"{o['REPORT']:>7.1f}{o['ATTACK']:>7.1f}{o['胜率']:>8.1f}")
         if vfuts:
             agg: dict[str, list[float]] = defaultdict(lambda: [0.0, 0])
             for f in vfuts:

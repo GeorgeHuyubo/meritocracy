@@ -880,3 +880,58 @@ class TestAuditFixes(unittest.TestCase):
             values[my_rank] = agent._contender(2)
         self.assertAlmostEqual(values[top], 1.0)
         self.assertLess(values[0], 0.1)
+
+
+class TestLearnedAgent(unittest.TestCase):
+    """学习型 AI：眼睛和手写 AI 共用，判断按学到的权重。"""
+
+    def _game(self, seed=3):
+        game = Game(game_id="learn", cfg=CFG, rng=random.Random(seed))
+        for i in range(4):
+            game.add_player(f"P{i + 1}")
+        game.start_game()
+        return game
+
+    def test_features_do_not_change_the_handwritten_scores(self):
+        """打开特征只是顺便记录，手写 AI 的打分一分不变；"hand" 特征就是手写总分。"""
+        game = self._game()
+        pub, priv = game.public_state(), game.private_state(1)
+        plain = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        plain.observe(pub, priv)
+        a = plain.score_combos(pub, priv)
+        feat = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        feat.want_features = True
+        feat.observe(pub, priv)
+        b = feat.score_combos(pub, priv)
+        self.assertEqual([round(s, 9) for s, _ in a], [round(s, 9) for s, _ in b])
+        self.assertEqual(len(feat.last_features), len(b))
+        for (s, _), f in zip(b, feat.last_features):
+            self.assertAlmostEqual(f["hand"], s)
+
+    def test_learned_agent_plays_legal_cards_and_records_its_choices(self):
+        game = self._game()
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0), policy={"hand": 50.0}, record=True)
+        for _ in range(4):
+            for pid in sorted(game.players):
+                picks = ai.turn(game, pid, pool)
+                game.select_actions(pid, picks)  # 不合法会抛 GameError
+                game.lock_action(pid)
+            game.reveal_event()
+            game.resolve()
+            if game.is_over:
+                break
+            game.advance_round()
+        agent = pool.get(1)
+        self.assertTrue(agent.trace, "record=True 时每次决策都要记下 ∇log π")
+        self.assertIn("dirty", agent.trace[0])
+
+    def test_table_mood_tracks_what_people_actually_do(self):
+        """这桌最近举报多凶：每轮都有人被举报，估计就往上走。"""
+        agent = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        before = agent.table["rep"]
+        facts = {pid: {"player_id": pid, "attacked": False, "attack_merit_loss": 0,
+                       "reported_by_player": True, "warnings_issued": 0, "demotion": "NONE"}
+                 for pid in (1, 2, 3)}
+        for _ in range(3):
+            agent._update_table(facts, {}, {"wealth_top_ids": []})
+        self.assertGreater(agent.table["rep"], before + 0.3)
