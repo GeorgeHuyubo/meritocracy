@@ -56,27 +56,36 @@ TABLE_PRIOR = {
 # 拟合之前的老规则估"在贪"平均 52%、实际 21%，而且估高估低实际都在 20% 上下——几乎没有信息量；
 # 还有一条反过来了：老规则认为"钱快够了就会去贪"，实际上钱够门槛的人只有 13% 在贪，最穷的 38%。
 READ_DAMPING = 0.65
-CORRUPT_BASE = 0.22
-BRIBE_BASE = 0.20
-CORRUPT_BY_MONEY = [(0.3, 1.7), (0.6, 1.3), (1.0, 1.0), (float("inf"), 0.6)]  # 估钱 ÷ 门槛
-BRIBE_BY_MONEY = [(0.3, 0.65), (0.6, 1.2), (1.0, 1.15), (float("inf"), 1.05)]
-CORRUPT_BY_ROUND = [(3, 1.6), (7, 0.9), (99, 0.6)]
-BRIBE_BY_ROUND = [(3, 1.2), (7, 1.1), (99, 0.7)]
-CORRUPT_BY_QUIET = [(0.2, 0.55), (0.4, 0.95), (0.6, 1.35), (9.0, 1.5)]  # 不干活的比例
-BRIBE_BY_QUIET = [(0.2, 0.7), (0.4, 1.0), (0.6, 1.05), (0.8, 2.2), (9.0, 2.7)]
-CORRUPT_BY_ORIGIN = {"ACCOUNTANT": 1.7, "GRINDER": 0.25, "OFFICIAL": 0.8,
-                     "PEASANT": 1.2, "RED": 1.25, "RICH": 0.85}
-BRIBE_BY_ORIGIN = {"ACCOUNTANT": 1.5, "GRINDER": 0.5, "OFFICIAL": 0.75,
-                   "PEASANT": 1.07, "RED": 1.07, "RICH": 1.25}
-BRIBE_BY_RANK = [1.1, 1.4, 0.8, 0.7]  # 基层 / 县级 / 市级 / 省级
-# 个人档案 = (被传闻点名或被查实的轮数 + 1) / (观察轮数 + 4)。上面那些因子都是"一般人"的规律，
-# 拟合数据里全是 AI，而 AI 很少一轮接一轮地贪——只靠它们，一个每轮都贪、每轮都被点名的人
-# 会被当成普通人：剥削测试里"只会贪污 + 够了就买官"的脚本打法在五个 AI 中间赢到 31.6%。
-# 这一项单独乘在开方之后（它是这个人自己的证据，不和别的特征重复）。
-# 数据（混了脚本打法的 480 局）：档案 0.1 的人 12% 在贪，0.5 的 36%，0.7 的 77%。
-CORRUPT_BY_RECORD = [(0.1, 0.45), (0.2, 0.6), (0.3, 1.0), (0.4, 0.9), (0.5, 1.4),
-                     (0.6, 1.8), (0.7, 2.8), (9.0, 3.8)]
-BRIBE_BY_RECORD = [(0.3, 0.7), (0.4, 1.25), (0.5, 2.1), (0.6, 2.6), (0.7, 3.4), (9.0, 3.7)]
+# 第三次拟合：对手换成学习型 AI 之后（audit.py --features 480 --audit-policy policies/best.json）。
+# 学习型 AI 60% 的轮次在贪、47% 在掏钱升职——上一版表（按手写 AI 拟合）以为只有两成，差了三倍，
+# 好几条还反过来了：经常被点名的人反而更收敛（学会了"被盯上就收手"）。
+# 真人和 AI 打法不一样，所以这张表只是起点，对局里还会按"被举报的人实际查实了多少"自动校准
+# （见 SmartAgent._read_calibration）。
+CORRUPT_BASE = 0.60
+BRIBE_BASE = 0.47
+CORRUPT_BY_MONEY = [(0.3, 1.07), (0.6, 1.03), (1.0, 0.96), (float("inf"), 0.82)]  # 估钱 ÷ 门槛
+BRIBE_BY_MONEY = [(float("inf"), 1.0)]
+CORRUPT_BY_ROUND = [(4, 1.16), (8, 0.87), (99, 0.70)]
+BRIBE_BY_ROUND = [(4, 1.15), (8, 0.89), (99, 0.75)]
+CORRUPT_BY_QUIET = [(9.0, 1.0)]  # 不干活的比例：学习型 AI 身上没区分度
+BRIBE_BY_QUIET = [(0.2, 1.02), (0.4, 0.87), (0.6, 0.99), (9.0, 1.16)]
+CORRUPT_BY_RANK = [1.17, 1.13, 0.77, 0.84]  # 基层 / 县级 / 市级 / 省级
+BRIBE_BY_RANK = [1.03, 1.24, 1.19, 0.5]
+# 出身：学习型 AI 会按出身打（会计敢贪、卷王爱干活、富二代爱买官），读别人时也要看出身
+CORRUPT_BY_ORIGIN = {"ACCOUNTANT": 1.2, "GRINDER": 0.73, "OFFICIAL": 0.96,
+                     "PEASANT": 1.06, "RED": 1.01, "RICH": 0.98}
+BRIBE_BY_ORIGIN = {"ACCOUNTANT": 1.06, "GRINDER": 0.81, "OFFICIAL": 0.92,
+                   "PEASANT": 0.98, "RED": 1.01, "RICH": 1.22}
+# 个人档案 = (被传闻点名或被查实的轮数 + 1) / (观察轮数 + 4)。
+# 学习型 AI 被盯上就收手，所以档案高的人反而少贪；但真人里有"一路贪到底"的
+# （混脚本打法拟合时档案 0.7 的人 77% 在贪），所以最高那档留一个往上翘的尾巴。
+CORRUPT_BY_RECORD = [(0.3, 1.0), (0.5, 0.88), (0.7, 0.75), (9.0, 1.5)]
+BRIBE_BY_RECORD = [(0.7, 1.0), (9.0, 1.5)]
+
+
+# 按出身各复制一份的特征（见 _combo_features）
+ORIGIN_CROSSED = ("dirty", "money_gain", "merit_gain", "promote_money", "promote_merit",
+                  "n_attack", "n_report", "risk", "family", "econ", "dirty_x_rep", "intf_x_contender")
 
 
 def _band(table, x):
@@ -287,6 +296,10 @@ class SmartAgent:
         self._seen_private: dict[str, Any] | None = None
         # 上一轮出牌时，我估的每个对手"这一轮在贪"的概率；下一轮看到结算后累加进上面那个数
         self._pending_corrupt_expect: dict[int, float] = {}
+        # 读法的对局内校准（见 _read_calibration）：被举报的人实际查实几个 vs 我当初估了多少
+        self._pending_hit_expect: dict[int, float] = {}
+        self._cal_hits = 0.0
+        self._cal_expect = 0.0
         self._times_attacked = 0  # 我自己被攻击过几次
         self._rounds_seen = 0
         self._my_rank = 0
@@ -327,6 +340,12 @@ class SmartAgent:
             p for pid, p in self._pending_corrupt_expect.items() if pid in facts
         )
         self._pending_corrupt_expect = {}
+        for pid, p in self._pending_hit_expect.items():
+            f = facts.get(pid)
+            if f and f.get("reported_by_player"):
+                self._cal_expect += p
+                self._cal_hits += float(self._caught(f))
+        self._pending_hit_expect = {}
         if facts.get(self.id, {}).get("attacked"):
             self._times_attacked += 1
         top_ids = set(result.get("wealth_top_ids") or [])
@@ -982,9 +1001,9 @@ class SmartAgent:
                 used_targets.add(target)
             picks.append((card.value, target))
         self.last_prediction = self._predictions(public, private, chosen, picks)
-        self._pending_corrupt_expect = {
-            o["id"]: self._report_hit_prob(public, o)[0] for o in opponents
-        }
+        reads = {o["id"]: self._report_hit_prob(public, o) for o in opponents}
+        self._pending_corrupt_expect = {pid: r[0] for pid, r in reads.items()}
+        self._pending_hit_expect = {pid: r[2] for pid, r in reads.items()}
         self.decision_log.append(
             f"r{public.get('round')} -> " + ", ".join(
                 f"{c}{'' if t is None else f'@{t}'}" for c, t in picks
@@ -1068,16 +1087,17 @@ class SmartAgent:
         #    所以只能算第二好的那个目标——以前两张都按最好的目标算，
         #    "举报 + 举报"被高估一倍，AI 会为了第二张举报放弃干活。
         solo: dict[Card, list[float]] = {}
+        solo_targets: dict[Card, list[dict[str, Any]]] = {}  # 同样排好序的目标（特征要看打的是谁）
         # 固定顺序（不用 set）：set 的遍历顺序随进程的哈希种子变，顺序一变结果就对不上
         for card in dict.fromkeys(hand):
-            if card is Card.ATTACK and self.allow_attack and opponents:
-                solo[card] = sorted(
-                    (self._score_attack(public, private, o)[0] for o in opponents), reverse=True
-                )
-            elif card is Card.REPORT and self.allow_report and opponents:
-                solo[card] = sorted(
-                    (self._score_report(public, private, o)[0] for o in opponents), reverse=True
-                )
+            scorer = (self._score_attack if card is Card.ATTACK and self.allow_attack
+                      else self._score_report if card is Card.REPORT and self.allow_report
+                      else None)
+            if scorer is not None and opponents:
+                ranked = sorted(((scorer(public, private, o)[0], i) for i, o in enumerate(opponents)),
+                                reverse=True)
+                solo[card] = [s for s, _ in ranked]
+                solo_targets[card] = [opponents[i] for _, i in ranked]
             else:
                 solo[card] = [0.0]
 
@@ -1085,6 +1105,9 @@ class SmartAgent:
         scored: list[tuple[float, list[Card]]] = []
         feats: list[dict[str, float]] = []
         contender = max((self._contender(o["id"]) for o in killers), default=0.0)
+        closer = max(killers, key=lambda o: self._p_reach(
+            o, self.models.get(o["id"], OpponentModel())), default=None)
+        closer_oid = (self.cfg.origin(closer.get("origin")) or {}).get("id") if closer else None
         variants = [[]] + ([[Card.PROMOTE_FAMILY]] if family_ok else [])
         for combo, extra in (
             (combo, extra)
@@ -1116,9 +1139,19 @@ class SmartAgent:
                 score += both_bonus
             scored.append((score, cards))
             if self.want_features:
-                feats.append(self._combo_features(
+                f = self._combo_features(
                     cards, score, econ, score - econ_scored, both, rival_closing, contender, public
-                ))
+                )
+                # 打的是什么出身的人：贫农单刀攻击挡不住、红二代举报了也降不了级、
+                # 会计被举报一半赃款抄不走……这些让它自己学
+                for c, tag in ((Card.ATTACK, "atk_on"), (Card.REPORT, "rep_on")):
+                    for t in solo_targets.get(c, [])[:cards.count(c)]:
+                        toid = (self.cfg.origin(t.get("origin")) or {}).get("id")
+                        if toid:
+                            f[f"{tag}_{toid}"] = f.get(f"{tag}_{toid}", 0.0) + 1.0
+                if closer_oid:
+                    f[f"intf_on_closer_{closer_oid}"] = f["n_attack"] + f["n_report"]
+                feats.append(f)
         self.last_features = feats
         return scored
 
@@ -1136,7 +1169,7 @@ class SmartAgent:
         rnd = int(public.get("round", 1))
         late = rnd / max(1, int(public.get("max_rounds", 12)))
         merit_risk = self.cfg.attack_steal_fraction if self.cfg.attack_mode == "steal_work" else 0
-        return {
+        feats = {
             "hand": total,
             "econ": econ,
             "intf": intf,
@@ -1165,6 +1198,14 @@ class SmartAgent:
             "econ_x_late": econ * late,
             "dirty_x_late": d["dirty"] * late,
         }
+        # 每个出身学自己的打法：会计被抓了一半赃款抄不走、该更敢贪；贫农一个人打不动他、
+        # 该放心干活；红二代的一纸调令……共用一套权重的话，学出来的是"平均身份"的打法，
+        # 第一轮训完会计胜率只有 5%、贫农 9%。所以关键特征再按"我是什么出身"各复制一份。
+        oid = (self.cfg.origin((self._seen_private or {}).get("origin")) or {}).get("id")
+        if oid:
+            for k in ORIGIN_CROSSED:
+                feats[f"{oid}*{k}"] = feats[k]
+        return feats
 
     def explain(self, public: dict[str, Any], private: dict[str, Any]) -> list[dict[str, Any]]:
         """我眼里的每个对手：给复盘工具看 AI 当时是怎么想的。只读，不碰 rng。"""
@@ -1649,7 +1690,7 @@ class SmartAgent:
         # 因子表的来源和含义见文件开头 READ_DAMPING 那段
         f = (_band(CORRUPT_BY_MONEY, ratio) * _band(CORRUPT_BY_ROUND, rnd)
              * _band(CORRUPT_BY_QUIET, quiet) * CORRUPT_BY_ORIGIN.get(oid, 1.0)
-             * (0.35 if merit_ready else 1.15))
+             * CORRUPT_BY_RANK[min(t_rank, len(CORRUPT_BY_RANK) - 1)])
         p_corrupt = min(0.9, CORRUPT_BASE * f ** READ_DAMPING
                         * _band(CORRUPT_BY_RECORD, model.record))
         p_corrupt += self.w.read_shrink * (CORRUPT_BASE - p_corrupt)
@@ -1660,18 +1701,27 @@ class SmartAgent:
             f = (_band(BRIBE_BY_MONEY, ratio) * _band(BRIBE_BY_ROUND, rnd)
                  * _band(BRIBE_BY_QUIET, quiet) * BRIBE_BY_ORIGIN.get(oid, 1.0)
                  * BRIBE_BY_RANK[min(t_rank, len(BRIBE_BY_RANK) - 1)]
-                 * (2.1 if named else 0.95) * (0.6 if merit_ready else 1.13))
+                 * (1.22 if named else 0.97) * (0.63 if merit_ready else 1.05))
             p_bribe = min(0.9, BRIBE_BASE * f ** READ_DAMPING
                           * _band(BRIBE_BY_RECORD, model.record))
             if cfg.needs_both(t_rank):
                 # 省级这一步"掏钱"就是冲主席。数据：AI 判他要登顶时 28% 真冲了
                 # （政绩已经够的 35%），没判要登顶的只有 3%
-                if self._about_to_win(opp, model):
-                    p_bribe = 0.35 if merit_ready else 0.25
-                else:
-                    p_bribe = 0.03
+                # （学习型 AI：判要登顶时 60% 真冲了，没判的 7%）
+                p_bribe = 0.6 if self._about_to_win(opp, model) else 0.07
+        cal = self._read_calibration()
+        p_corrupt, p_bribe = min(0.95, p_corrupt * cal), min(0.95, p_bribe * cal)
         p_hit = min(0.95, 1.0 - (1.0 - p_corrupt) * (1.0 - p_bribe))
         return p_corrupt, p_bribe, p_hit
+
+    def _read_calibration(self) -> float:
+        """这一桌的人比我的读法更脏还是更干净（0.4~2.5 的乘数）。
+
+        每轮公开：谁被玩家举报了、谁被查实了。被举报的人里实际查实了几个，
+        对比我当初对这些人估的查实概率，估高了往下调、估低了往上调。
+        因子表是拿 AI 对局拟合的，真人的打法不一样——这一项让读法在每一局里自己对上。
+        """
+        return max(0.4, min(2.5, (self._cal_hits + 3.0) / (self._cal_expect + 3.0)))
 
     def _score_report(self, public, private, opp) -> tuple[float, int | None]:
         """举报是一次对隐藏信息的下注：他这轮到底有没有经济问题。
@@ -1793,9 +1843,11 @@ class LearnedAgent(SmartAgent):
             self.chosen_stats[k] += feats[idx].get(k, 0.0)
         if self.record:
             # softmax 线性策略：∇log π(a) = φ(a) − Σ π(b) φ(b)
-            keys = feats[idx].keys()
+            # 特征是稀疏的（"打的是谁"只有带干扰牌的组合才有），缺的当 0
+            keys = set().union(*feats)
             self.trace.append({
-                k: feats[idx][k] - sum(p * f[k] for p, f in zip(probs, feats)) for k in keys
+                k: feats[idx].get(k, 0.0) - sum(p * f.get(k, 0.0) for p, f in zip(probs, feats))
+                for k in keys
             })
         return self._finish(public, private, list(scored[idx][1]))
 

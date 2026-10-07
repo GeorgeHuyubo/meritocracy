@@ -51,6 +51,44 @@ def _smart(cfg, rng):
     return lambda game, me, hand, others, _rng: ai.turn(game, me.id, pool)
 
 
+def play_focus(args: tuple) -> dict[str, Any]:
+    """专项训练：每局一个学习座位固定是某个出身，其余 5 席用一份固定的权重（不学）。
+
+    用来回答"这个出身垫底，是 AI 没学会还是身份本身弱"——专门给它找这桌人里的最优打法，
+    练完还上不去，就是规则的问题。
+    """
+    theta, opp_theta, origin, n_games, seed = args
+    cfg = DEFAULT_CONFIG
+    rng = random.Random(seed)
+    grad: Counter = Counter()
+    chosen: Counter = Counter()
+    stats: Counter = Counter()
+    for g in range(n_games):
+        seat = rng.randrange(N)
+        others = [o for o in cfg.origin_ids() if o != origin]
+        rng.shuffle(others)
+        origins = others[:seat] + [origin] + others[seat:N - 1]
+        pool, fn = _learner(cfg, rng, theta, True)
+        seats = [_learner(cfg, rng, opp_theta, False)[1] for _ in range(N)]
+        seats[seat] = fn
+        rec = analysis.play(N, rng, cfg, seats, origins=origins)
+        pid = sorted(rec.cards)[seat]
+        reward = 1.0 / len(rec.winners) if pid in rec.winners else 0.0
+        agent = pool.agents.get(pid)
+        if agent is None:
+            continue
+        for gr in agent.trace:
+            for k, v in gr.items():
+                grad[k] += (reward - 1.0 / N) * v
+        chosen.update(agent.chosen_stats)
+        stats["trajectories"] += 1
+        stats["decisions"] += len(agent.trace)
+        stats["reward_focus"] += reward
+        stats["seats_focus"] += 1
+        stats["games"] += 1
+    return {"grad": dict(grad), "stats": dict(stats), "chosen": dict(chosen)}
+
+
 def play_batch(args: tuple) -> dict[str, Any]:
     theta, league, n_games, seed = args
     cfg = DEFAULT_CONFIG
@@ -96,6 +134,10 @@ def play_batch(args: tuple) -> dict[str, Any]:
                 for k, v in g.items():
                     grad[k] += adv * v
             stats["trajectories"] += 1
+            if kind == "self":
+                oid = rec.origin_of.get(pid)
+                stats[f"origin_reward_{oid}"] += reward
+                stats[f"origin_seats_{oid}"] += 1
             stats[f"reward_{kind}"] += reward
             stats[f"seats_{kind}"] += 1
             stats["decisions"] += len(agent.trace)
@@ -150,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lr", type=float, default=0.03)
     ap.add_argument("--snapshot-every", type=int, default=10, help="每多少批存一份历史快照进联盟")
     ap.add_argument("--out", default=str(POLICY_DIR / "latest.json"))
+    ap.add_argument("--focus-origin", default="", help="专项训练这个出身（ACCOUNTANT 等），其余 5 席用 --opponents 的权重")
+    ap.add_argument("--opponents", default="", help="专项训练时对手用的权重文件")
+    ap.add_argument("--init", default="", help="从这份权重开始（不带 Adam 状态）")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -157,20 +202,28 @@ def main(argv: list[str] | None = None) -> int:
         d = json.loads(out.read_text(encoding="utf-8"))
         theta, adam, league, meta = d["theta"], Adam.from_state(d["adam"]), d["league"], d["meta"]
     else:
-        theta, adam, league = dict(INIT_THETA), Adam(args.lr), []
+        theta = ai.load_policy(args.init) if args.init else dict(INIT_THETA)
+        adam, league = Adam(args.lr), []
         meta = {"batches": 0, "games": 0, "history": []}
+    opp_theta = ai.load_policy(args.opponents) if args.focus_origin else None
 
     deadline = time.time() + args.minutes * 60
     seed0 = int(time.time()) % 100000
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         while time.time() < deadline:
             b = meta["batches"]
-            jobs = [(dict(theta), league, args.games_per_worker, seed0 * 1000 + b * 100 + w)
-                    for w in range(args.workers)]
+            if args.focus_origin:
+                fn = play_focus
+                jobs = [(dict(theta), opp_theta, args.focus_origin, args.games_per_worker,
+                         seed0 * 1000 + b * 100 + w) for w in range(args.workers)]
+            else:
+                fn = play_batch
+                jobs = [(dict(theta), league, args.games_per_worker, seed0 * 1000 + b * 100 + w)
+                        for w in range(args.workers)]
             grad: Counter = Counter()
             stats: Counter = Counter()
             chosen: Counter = Counter()
-            for res in ex.map(play_batch, jobs):
+            for res in ex.map(fn, jobs):
                 grad.update(res["grad"])
                 stats.update(res["stats"])
                 chosen.update(res["chosen"])
@@ -185,13 +238,25 @@ def main(argv: list[str] | None = None) -> int:
                 "president": round(100 * stats["president"] / max(1, stats["games"]), 1),
                 # 学习型每次出牌里：贪 / 举报 / 攻击 / 买官的比例——看它的打法怎么变
                 "mix": {k: round(chosen[k] / max(1, stats["decisions"]), 3) for k in TRACKED},
+                # 纯学习型的局里各出身的每席胜率（看身份差有没有在收窄）
+                "origins": {k[len("origin_reward_"):]: round(
+                    100 * v / max(1, stats["origin_seats_" + k[len("origin_reward_"):]]), 1)
+                    for k, v in stats.items() if k.startswith("origin_reward_")},
             }
             meta["history"].append(row)
             if meta["batches"] % args.snapshot_every == 0:
                 league = (league + [dict(theta)])[-6:]
             save(out, theta, adam, league, meta)
             top = sorted(((abs(v), k, v) for k, v in theta.items() if k != "hand"), reverse=True)[:5]
-            print(f"批 {row['batch']:>4}  累计 {row['games']:>7} 局  "
+            spread = (max(row["origins"].values()) - min(row["origins"].values())) \
+                if row["origins"] else 0.0
+            if args.focus_origin:
+                row["focus"] = round(100 * stats["reward_focus"] / max(1, stats["seats_focus"]), 2)
+                print(f"批 {row['batch']:>4}  {args.focus_origin} 专项  每席胜率 {row['focus']:5.1f}%"
+                      f"（{stats['seats_focus']} 局）  贪{row['mix']['dirty']:.2f} "
+                      f"举报{row['mix']['n_report']:.2f} 攻击{row['mix']['n_attack']:.2f}", flush=True)
+                continue
+            print(f"批 {row['batch']:>4}  累计 {row['games']:>7} 局  身份差 {spread:4.1f}  "
                   f"学习型 vs 手写同桌每席胜率 {row['vs_smart']:5.1f}%（{row['seats_smart']} 席）  "
                   f"贪{row['mix']['dirty']:.2f} 举报{row['mix']['n_report']:.2f} "
                   f"攻击{row['mix']['n_attack']:.2f}  hand={theta.get('hand', 0):.1f}  "

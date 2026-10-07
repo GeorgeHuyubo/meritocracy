@@ -839,8 +839,9 @@ class TestAuditFixes(unittest.TestCase):
         pub = game.public_state()
         opp = next(o for o in pub["players"] if o["id"] == 2)
         clean = ai.OpponentModel(observed_rounds=6, dirty_rounds=0)
-        dirty = ai.OpponentModel(observed_rounds=6, dirty_rounds=5)
-        self.assertGreater(agent._read(pub, opp, dirty)[0], 2 * agent._read(pub, opp, clean)[0])
+        dirty = ai.OpponentModel(observed_rounds=6, dirty_rounds=6)  # 轮轮被点名
+        # 学习型 AI 被盯上会收手，档案只在最高那档往上翘（真人里有一路贪到底的）
+        self.assertGreater(agent._read(pub, opp, dirty)[0], 1.1 * agent._read(pub, opp, clean)[0])
 
     def test_i_know_when_i_look_suspicious(self):
         """别人眼里的我比全桌平均可疑，我自己被查实的风险就该更高。"""
@@ -853,7 +854,7 @@ class TestAuditFixes(unittest.TestCase):
         for o in pub["players"]:
             if o["id"] != 1:
                 agent.models[o["id"]] = ai.OpponentModel(observed_rounds=6, dirty_rounds=0)
-        self.assertGreater(agent._report_pressure(pub, priv), base * 1.3)
+        self.assertGreater(agent._report_pressure(pub, priv), base * 1.15)
 
     def test_the_one_who_is_already_ready_is_stopped_first(self):
         """几个人同时可能登顶：两样都已经够了的人，比还要靠一张好牌的人更该先按住。"""
@@ -935,3 +936,31 @@ class TestLearnedAgent(unittest.TestCase):
         for _ in range(3):
             agent._update_table(facts, {}, {"wealth_top_ids": []})
         self.assertGreater(agent.table["rep"], before + 0.3)
+
+    def test_read_calibrates_itself_to_the_table(self):
+        """被举报的人实际查实得比我估的多，我的读法就往上调；少，就往下调。"""
+        agent = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        self.assertAlmostEqual(agent._read_calibration(), 1.0)
+        agent._cal_expect, agent._cal_hits = 10.0, 2.0   # 估了 10 个、只查实 2 个
+        low = agent._read_calibration()
+        agent._cal_expect, agent._cal_hits = 4.0, 9.0    # 估了 4 个、查实 9 个
+        high = agent._read_calibration()
+        self.assertLess(low, 0.5)
+        self.assertGreater(high, 1.5)
+
+
+    def test_sparse_features_do_not_break_the_gradient(self):
+        """只有部分组合才有的特征（比如"举报打在会计身上"）：缺的当 0，梯度照算。"""
+        game = Game(game_id="sparse", cfg=CFG, rng=random.Random(2))
+        for i in range(6):
+            game.add_player(f"P{i + 1}")
+        for pid, oid in zip(sorted(game.players), CFG.origin_ids()):
+            game.players[pid].origin = Origin(oid)
+        game.start_game()
+        game.hands[1] = [DealtCard(Card.REPORT, 0), DealtCard(Card.ATTACK, 0),
+                         DealtCard(Card.WORK, 6), DealtCard(Card.CORRUPT, 18),
+                         DealtCard(Card.PROMOTE_ANY, 0), DealtCard(Card.WORK, 5)]
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0), policy={"hand": 50.0}, record=True)
+        ai.turn(game, 1, pool)
+        trace = pool.get(1).trace[-1]
+        self.assertTrue(any(k.startswith("rep_on_") for k in trace))

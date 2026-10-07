@@ -443,7 +443,8 @@ def versus(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
 
 def learned_vs_smart(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
     """学习型 AI 和手写 AI 同桌。mode = "learned_in_smart"（1 学 5 手写）/ "smart_in_learned"。"""
-    mode, policy_path, n_games, seed = args
+    mode, policy_path, n_games, seed = args[:4]
+    other = ai.load_policy(args[4]) if len(args) > 4 and args[4] else None  # 对照组：另一份权重，默认手写
     cfg = HAND_CFG
     theta = ai.load_policy(policy_path)
     rng = random.Random(seed)
@@ -454,7 +455,7 @@ def learned_vs_smart(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
             return lambda game, me, hand, others, _rng: ai.turn(game, me.id, pool)
         return f
 
-    lone, crowd = (make(theta), make(None)) if mode == "learned_in_smart" else (make(None), make(theta))
+    lone, crowd = (make(theta), make(other)) if mode == "learned_in_smart" else (make(other), make(theta))
     share = 0.0
     for g in range(n_games):
         seat = g % N
@@ -555,7 +556,8 @@ def features(args: tuple[int, int, int, bool]) -> dict[tuple[str, str], list[int
     """
     import rules  # noqa: F401
 
-    start, n_games, seed, bots = args
+    start, n_games, seed, bots = args[:4]
+    policy = ai.load_policy(args[4]) if len(args) > 4 and args[4] else None
     cfg = HAND_CFG
     tab: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
     for g in range(start, start + n_games):
@@ -567,7 +569,7 @@ def features(args: tuple[int, int, int, bool]) -> dict[tuple[str, str], list[int
         rng.shuffle(ids)
         for pid, oid in zip(sorted(game.players), ids):
             game.players[pid].origin = Origin(oid)
-        pool = ai.AgentPool(cfg=cfg, rng=rng)
+        pool = ai.AgentPool(cfg=cfg, rng=rng, policy=policy)
         game.start_game()
         record = {pid: [0, 0] for pid in game.players}
         bot_seat = sorted(game.players)[g % N]
@@ -709,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--policy", default="", help="学习型 AI 的权重文件：和手写 AI 同桌对决（用 --duel-games 局数）")
     ap.add_argument("--dynamic", type=int, default=0,
                     help="动态性测试：被测 AI 坐进各种怪桌，每桌跑这么多局（要和 --policy 一起用才有学习型对照）")
+    ap.add_argument("--policy-b", default="", help="和 --policy 一起用：对照组换成另一份学习型权重（默认手写）")
     ap.add_argument("--force-block", action="store_true",
                     help="和 --policy 一起用：学习型'头号挑战者必拦'vs 照常，各坐进 5 个学习型里")
     ap.add_argument("--vs-old", default="", help="另一份 ai.py 的路径：新版 1 打旧版 5、旧版 1 打新版 5")
@@ -724,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         per = max(1, args.features // args.workers)
         tot: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
         with ProcessPoolExecutor(max_workers=args.workers) as ex:
-            for t in ex.map(features, [(i * per, per, args.seed, args.bots)
+            for t in ex.map(features, [(i * per, per, args.seed, args.bots, args.audit_policy)
                                        for i in range(args.workers)]):
                 for k, r in t.items():
                     for i in range(3):
@@ -743,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
         futs = [ex.submit(audit_games, j) for j in jobs]
         efuts = [ex.submit(exploit, (s, args.exploit, args.seed + i, args.audit_policy))
                  for i, s in enumerate(scripted)] if args.exploit else []
-        pfuts = [ex.submit(learned_vs_smart, (m, args.policy, args.duel_games, args.seed + k))
+        pfuts = [ex.submit(learned_vs_smart, (m, args.policy, args.duel_games, args.seed + k, args.policy_b))
                  for k, m in enumerate(["learned_in_smart", "smart_in_learned"] * 2)] \
             if args.policy and not args.dynamic and not args.force_block else []
         ffuts = [ex.submit(force_block_duel, (flag, args.policy, args.duel_games, args.seed + k))
@@ -774,9 +777,10 @@ def main(argv: list[str] | None = None) -> int:
                 mode, pct, n = f.result()
                 agg_p[mode][0] += pct * n
                 agg_p[mode][1] += n
-            print(f"\n学习型 vs 手写（公平线 16.67%）  {args.policy}")
-            for mode, label in (("learned_in_smart", "1 个学习型 + 5 个手写：学习型"),
-                                ("smart_in_learned", "1 个手写 + 5 个学习型：手写")):
+            b = args.policy_b or "手写"
+            print(f"\n{args.policy} vs {b}（公平线 16.67%）")
+            for mode, label in (("learned_in_smart", f"1 个 A + 5 个 B：A"),
+                                ("smart_in_learned", f"1 个 B + 5 个 A：B")):
                 tot, n = agg_p[mode]
                 pct = tot / n
                 half = 1.96 * (pct / 100 * (1 - pct / 100) / n) ** 0.5 * 100

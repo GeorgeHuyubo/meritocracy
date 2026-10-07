@@ -81,6 +81,11 @@ VARIANTS: dict[str, dict[str, Any]] = {
                 "promotion_money_costs": [17, 24, 33, 41]},
     "both120": {"promotion_merit_costs": [22, 32, 43, 54],
                 "promotion_money_costs": [18, 26, 36, 44]},
+    # 学习型 AI 之后：主席率 99%、贪污占六成
+    "top120": {"promotion_merit_costs": [18, 27, 36, 54],      # 只抬最后一步（省级 -> 主席）
+               "promotion_money_costs": [15, 22, 30, 44]},
+    "c16": {"corrupt_card_distribution": [(14, 1), (15, 2), (16, 2), (17, 2), (18, 1)],
+            "graft_card_distribution": [(7, 1), (8, 2), (9, 2), (10, 2), (11, 1)]},
     # 身份：官二代、卷王偏强
     "off34": {"origin_patronage_merit_ratio": Fraction(3, 4)},
     "grind3": {"origin_grinder_overtime_multiplier": 3},
