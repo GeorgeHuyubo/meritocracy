@@ -595,6 +595,25 @@ ORIGIN_GRINDER_MIN_WORK: int = 2
 # 1/2 和 REPORT_REWARD_RATIO 的 1/2 正好互补，充公那份刚好被吃干净。
 ORIGIN_ACCOUNTANT_LAUNDER_RATIO: Fraction = Fraction(1, 2)
 
+# 官二代「透风」：选牌阶段就知道本轮全局事件。2026-10 起**取消**（False），只剩门槛折扣。
+# 依据：大模型 100 局里官二代被投"最强"270 次，理由几乎都是"门槛打折 + 提前知道事件，半个开卷考试"；
+# 两套 AI 都测出他最强（学习型 24.9%、大模型 27~38%）。关掉之后学习型 AI 里他少赢 3.5 个点，
+# 大模型反馈里说他不公平的比例从 41% 降到 7%。
+ORIGIN_OFFICIAL_TIPOFF: bool = False
+
+# 贫农「政治正确」：几个人以内一起攻击，他的政绩升职不会被暂缓。None = 不限（上一版：谁都拦不住）。
+# 改成 1 的原因：AI 学会终局拦人之后贫农走政绩登顶谁也拦不住（3000 局 25.4%）；
+# 但学习型 AI 和大模型都测出贫农垫底（8%），大模型 600 份反馈投他"最弱"186 次。
+ORIGIN_PEASANT_MAX_ATTACKERS: int | None = 1
+
+# AI 的"人类式围堵"默契（实验开关）：有人在省级、政绩差一张埋头工作就够门槛时，
+# 全桌 AI 手里有攻击就打他（他政绩已经够了的话举报也一起打），没牌就花钱重抽来拦——
+# 除非自己这一轮就能当上主席。
+# 为什么要有它：AI 自我对局学到的是"各自冲刺、让别人去拦"（拦人是公共品），
+# 第一个到省级的人 35% 夺冠、7 轮就结束；人类局里大家会默契地一起按住冒头的人，
+# 逼他改走贿赂、被举报降级，局面长得多，"几个人都拦不住"的贫农也因此很强。
+AI_DOGPILE: bool = False
+
 ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "RICH",
@@ -671,6 +690,35 @@ MAX_PLAYERS: int = 6
 
 # Web 层：抽到事件后停留多久再结算（秒），给玩家看清事件的时间。
 REVEAL_EVENT_SECONDS: float = 2.5
+
+
+def _origin_text(cfg: "Config", oid: str) -> dict[str, str]:
+    """几个受开关影响的出身技能说明（skill / description）；不受影响的返回空。"""
+    ratio = cfg.origin_patronage_merit_ratio
+    base = cfg.promotion_merit_costs[0]
+    if oid == "OFFICIAL":
+        text = (f"有人提拔：每一级的政绩门槛只要别人的 {ratio}"
+                f"（{base} 点的那一级，他只要 {-(-base * ratio.numerator // ratio.denominator)} 点）")
+        if cfg.origin_official_tipoff:
+            return {"skill": "提携 · 透风",
+                    "description": text + "；家里有人透风：选牌时就知道本轮的全局事件，"
+                                          "别人要等所有人锁定才揭晓。"}
+        return {"skill": "提携", "description": text + "。"}
+    if oid == "PEASANT":
+        n = cfg.origin_peasant_max_attackers
+        if n is None:
+            return {"description": "成分过硬，谁放黑料都没用——不管几个人政治攻击你，"
+                                   "你的政绩升职都不会被暂缓。"}
+        return {"description": f"成分过硬，{'一个人' if n == 1 else f'{n} 个人以内'}放黑料挡不住你——"
+                               f"{'只有一个人' if n == 1 else f'不超过 {n} 个人'}政治攻击你时，"
+                               f"你的政绩升职不会被暂缓；再多就躲不过。"}
+    if oid == "ACCOUNTANT":
+        if cfg.report_reward_ratio == 0:
+            return {"description": f"捞来的钱有 {cfg.origin_accountant_launder_ratio} 能做成合法收入，"
+                                   "被举报也抄不走。"}
+        return {"description": "捞来的钱有一半能做成合法收入，被举报也抄不走"
+                               "（举报人该分的那份一分不少，少的是充公那部分）。"}
+    return {}
 
 
 @dataclass(frozen=True)
@@ -778,6 +826,9 @@ class Config:
     origin_grinder_min_work: int = ORIGIN_GRINDER_MIN_WORK
     origin_patronage_merit_ratio: Fraction = ORIGIN_PATRONAGE_MERIT_RATIO
     origin_accountant_launder_ratio: Fraction = ORIGIN_ACCOUNTANT_LAUNDER_RATIO
+    origin_official_tipoff: bool = ORIGIN_OFFICIAL_TIPOFF
+    origin_peasant_max_attackers: int | None = ORIGIN_PEASANT_MAX_ATTACKERS
+    ai_dogpile: bool = AI_DOGPILE
     origin_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(o) for o in ORIGIN_DEFINITIONS]
     )
@@ -839,6 +890,12 @@ class Config:
         if rank >= self.president_rank:
             return None
         return self.promotion_merit_costs[rank]
+
+    def __post_init__(self) -> None:
+        """出身技能说明按开关生成：做实验改了开关，给玩家 / 大模型看的说明要跟着变。"""
+        object.__setattr__(self, "origin_definitions", [
+            dict(o, **_origin_text(self, o["id"])) for o in self.origin_definitions
+        ])
 
     def origin(self, origin_id: str | None) -> dict[str, Any] | None:
         """按 id 取出身定义。总开关关掉时一律当作没有出身。"""

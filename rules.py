@@ -467,7 +467,8 @@ def smear_resisted(player: PlayerState, outcome, cfg: Config = DEFAULT_CONFIG) -
     贫农走政绩登顶谁也拦不住：3000 局混战胜率 25.4%，六张里最强。
     改成两个人联手就能按住他。
     """
-    return origin_is(player, "PEASANT", cfg) and outcome.attacker_count <= 1
+    n = cfg.origin_peasant_max_attackers
+    return origin_is(player, "PEASANT", cfg) and (n is None or outcome.attacker_count <= n)
 
 
 def apply_origin_start_bonuses(

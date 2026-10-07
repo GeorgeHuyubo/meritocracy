@@ -853,6 +853,7 @@ class Game:
             self.phase is Phase.ACTION_SELECTION
             and self.next_event is not None
             and rules.origin_is(player, "OFFICIAL", self.cfg)
+            and self.cfg.origin_official_tipoff
         ):
             tipoff = {"tipoff_event": self.next_event.public_view()}
         family = self._family_card_info(player)

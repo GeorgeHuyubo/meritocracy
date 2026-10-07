@@ -1257,13 +1257,20 @@ def _ablation_once(
         game = Game(game_id="ablation", cfg=cfg, rng=rng)
         for i in range(n_players):
             game.add_player(f"P{i + 1}")
+        # 和混战一样随机发出身：学习型 AI 的打法和出身有关，没出身的局测不出真实情况
+        origin_ids = list(cfg.origin_ids())
+        rng.shuffle(origin_ids)
+        for pid, oid in zip(sorted(game.players), origin_ids):
+            game.players[pid].origin = Origin(oid)
         role = {
             pid: ("muted" if (i + g) % n_players < muted_seats else "normal")
             for i, pid in enumerate(sorted(game.players))
         }
+        # 走 make_pool：跟着 cfg.ai_policy，测的就是服务器上实际在用的那个 AI。
+        # 以前直接 new AgentPool，切到学习型 AI 之后消融测的其实一直是手写 AI。
         pools = {
-            "normal": ai.AgentPool(cfg=cfg, rng=rng),
-            "muted": ai.AgentPool(cfg=cfg, rng=rng, **{flag: False}),
+            "normal": ai.make_pool(cfg, rng),
+            "muted": ai.make_pool(cfg, rng, **{flag: False}),
         }
         game.start_game()
         while not game.is_over:

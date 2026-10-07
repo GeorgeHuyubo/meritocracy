@@ -5,3 +5,6 @@ __pycache__/
 policies/latest.json
 policies/*.tmp
 llm_runs/
+policies/focus_*.json
+policies/var_*.json
+policies/best_by_origin.json

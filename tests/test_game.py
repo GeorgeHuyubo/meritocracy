@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import random
 import sys
@@ -745,9 +746,25 @@ class TestRedraw(unittest.TestCase):
         self.assertEqual(game.players[1].money, 3)
         self.assertEqual(len(game.hands[1]), CFG.hand_size)
 
+    def test_official_without_tipoff_hears_nothing(self):
+        """默认（透风已取消）：官二代也看不到本轮事件，技能说明里也不再写"透风"。"""
+        cfg = CFG
+        game = Game(game_id="t", cfg=cfg, rng=random.Random(7))
+        for i in range(3):
+            game.add_player(f"玩家{i + 1}")
+        game.players[1].origin = Origin.OFFICIAL
+        game.start_game()
+        self.assertNotIn("tipoff_event", game.private_state(1))
+        self.assertNotIn("透风", cfg.origin("OFFICIAL")["description"])
+        on = dataclasses.replace(CFG, origin_official_tipoff=True)
+        self.assertIn("透风", on.origin("OFFICIAL")["description"])
+
     def test_official_hears_the_event_before_choosing(self):
-        """官二代「透风」：选牌阶段就看得到本轮事件；别人连这个键都没有；揭晓的就是透露的那个。"""
-        game = make_game(3)
+        """（开关打开时）官二代「透风」：选牌阶段就看得到本轮事件；别人连这个键都没有；揭晓的就是透露的那个。"""
+        game = Game(game_id="t", cfg=dataclasses.replace(CFG, origin_official_tipoff=True),
+                    rng=random.Random(7))
+        for i in range(3):
+            game.add_player(f"玩家{i + 1}")
         game.players[1].origin = Origin.OFFICIAL
         game.start_game()
         tip = game.private_state(1).get("tipoff_event")
@@ -764,12 +781,15 @@ class TestRedraw(unittest.TestCase):
         self.assertNotIn("tipoff_event", game.private_state(1))  # 揭晓之后就不需要透风了
 
     def test_the_tipoff_survives_a_restart(self):
-        """服务器重启后官二代听到的风声不能变。"""
-        game = make_game(2)
+        """（开关打开时）服务器重启后官二代听到的风声不能变。"""
+        on = dataclasses.replace(CFG, origin_official_tipoff=True)
+        game = Game(game_id="t", cfg=on, rng=random.Random(7))
+        for i in range(2):
+            game.add_player(f"玩家{i + 1}")
         game.players[1].origin = Origin.OFFICIAL
         game.start_game()
         tip = game.private_state(1)["tipoff_event"]["id"]
-        restored = Game.from_snapshot(game.to_snapshot(), cfg=CFG)
+        restored = Game.from_snapshot(game.to_snapshot(), cfg=on)
         self.assertEqual(restored.private_state(1)["tipoff_event"]["id"], tip)
 
     def test_grinder_card_preview_flags_overtime(self):

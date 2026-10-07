@@ -1185,6 +1185,18 @@ class TestReportReward(unittest.TestCase):
             self.assertEqual(out.outcomes[2].money_from_reports, 6, ratio)  # 12 的一半
             self.assertEqual(caught.money - out.outcomes[1].salary, kept, ratio)
 
+    def test_no_reward_report_still_confiscates_everything(self):
+        """举报分成 0：赃款照样全部没收（充公），举报人一分不拿；会计的做账这时才真正保住一半。"""
+        cfg = dataclasses.replace(CFG, report_reward_ratio=Fraction(0))
+        caught, reporter = player(1, rank=0), player(2)
+        out = resolve([caught, reporter, player(3)],
+                      {1: Action(Card.CORRUPT), 2: Action(Card.REPORT, 1)},
+                      script=[corrupt_roll(12)], cfg=cfg)
+        self.assertTrue(out.outcomes[1].report_effective)
+        self.assertEqual(out.outcomes[1].money_confiscated, 12)
+        self.assertEqual(out.outcomes[2].money_from_reports, 0)
+        self.assertNotIn("举报人该分的那份", cfg.origin("ACCOUNTANT")["description"])
+
     def test_mutual_reports_settle_simultaneously(self):
         a = player(1, rank=0, money=5, merit=0)
         b = player(2, rank=0, money=7, merit=0)
@@ -2981,6 +2993,23 @@ class TestOrigins(unittest.TestCase):
         self.assertEqual(out.outcomes[1].attacker_count, 2)
         self.assertTrue(out.outcomes[1].merit_promotion_blocked)
         self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+
+    def test_peasant_old_version_ignores_any_number_of_attackers(self):
+        """开关 ORIGIN_PEASANT_MAX_ATTACKERS=None（上一版）：三个人一起攻击也拦不住他政绩升职。"""
+        cfg = dataclasses.replace(REAL_CFG, origin_peasant_max_attackers=None)
+        tc = cfg.merit_cost(0)
+        peasant = player(1, rank=0, merit=tc, origin=Origin.PEASANT)
+        a, b, c = player(2, rank=0), player(3, rank=0), player(4, rank=0)
+        out = resolve(
+            [peasant, a, b, c],
+            {1: [Action(Card.PROMOTE_MERIT)], 2: [Action(Card.ATTACK, 1)],
+             3: [Action(Card.ATTACK, 1)], 4: [Action(Card.ATTACK, 1)]},
+            cfg=cfg,
+        )
+        self.assertEqual(out.outcomes[1].attacker_count, 3)
+        self.assertFalse(out.outcomes[1].merit_promotion_blocked)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.MERIT)
+        self.assertIn("不管几个人", cfg.origin("PEASANT")["description"])
 
     def test_one_person_attacking_twice_still_counts_as_one(self):
         """同一个人打两张攻击不算"两个人"，贫农照样挡得住。"""

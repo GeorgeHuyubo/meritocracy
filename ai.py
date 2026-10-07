@@ -847,10 +847,55 @@ class SmartAgent:
             report = max(report, self.w.endgame_cover_report_must_corrupt)
         both = max(self.w.endgame_cover_both, single, report)
         if (self.cfg.origin(opp.get("origin")) or {}).get("id") == "PEASANT":
-            # 贫农只挡得住一个人：有别人也打他（概率 k）时攻击照常管用，否则白打
-            k = self.w.peasant_second_attacker
+            # 贫农只挡得住一个人：有别人也打他（概率 k）时攻击照常管用，否则白打；
+            # 开关设成"几个人都拦不住"时攻击对他的政绩升职完全没用
+            k = self._peasant_block_chance()
             return k * single, report, k * both + (1 - k) * report
         return single, report, both
+
+    def _dogpile_target(self, public: dict[str, Any]) -> dict[str, Any] | None:
+        """围堵默契的靶子：在省级、政绩差一张埋头工作就够门槛（或已判要登顶）的人里进度最快的。"""
+        if not self.cfg.ai_dogpile:
+            return None
+        top = self.cfg.president_rank - 1
+        best, best_p = None, -1.0
+        for o in public["players"]:
+            if o["id"] == self.id or o["rank"] != top:
+                continue
+            _, tc = self._costs(o["rank"], o.get("origin"))
+            if tc is None:
+                continue
+            close = (o["merit"] + self._expected_work(o["rank"]) >= tc
+                     or self._about_to_win(o, self.models.get(o["id"], OpponentModel())))
+            if close and o["merit"] / tc > best_p:
+                best, best_p = o, o["merit"] / tc
+        return best
+
+    def _apply_dogpile(self, public, hand: list[Card], scored, feats):
+        """围堵默契：手里有攻击就必须打（他政绩够了的话举报也要打），除非我这轮能当主席。"""
+        target = self._dogpile_target(public)
+        if target is None or getattr(self, "_can_win_now", False):
+            return scored, feats
+        need = []
+        if Card.ATTACK in hand and self.allow_attack:
+            need.append(Card.ATTACK)
+        _, tc = self._costs(target["rank"], target.get("origin"))
+        if Card.REPORT in hand and self.allow_report and tc is not None and target["merit"] >= tc:
+            need.append(Card.REPORT)
+        if not need:
+            return scored, feats
+        keep = [i for i, (_, cards) in enumerate(scored) if all(c in cards for c in need)] \
+            or [i for i, (_, cards) in enumerate(scored) if any(c in cards for c in need)]
+        if not keep:
+            return scored, feats
+        return [scored[i] for i in keep], ([feats[i] for i in keep] if feats else feats)
+
+    def _peasant_block_chance(self) -> float:
+        """我去攻击贫农，能按住他政绩升职的把握。"""
+        n = self.cfg.origin_peasant_max_attackers
+        if n is None:
+            return 0.0
+        return self.w.peasant_second_attacker if n <= 1 else self.w.peasant_second_attacker ** n
 
     def _cash_horizon(self, public: dict[str, Any]) -> float:
         """抄到手的一笔钱，现在还值几折。
@@ -968,6 +1013,7 @@ class SmartAgent:
         # 复盘不能自己再调一次 score_combos：打平挑目标会消耗 rng，
         # 多调一次后面的噪声就全错位了，同 seed 也复现不出来。
         self.last_scores = scored
+        scored, _ = self._apply_dogpile(public, hand, scored, [])
         # 噪声只用来决定"打不打干扰、打几张什么干扰"；同一种干扰搭配里，
         # 经济牌永远挑不加噪声时最好的那组。以前每个组合各加各的噪声：
         # 有人要登顶时经济分全打 0.15 折，"埋头工作"和"一张根本升不了的晋升卡"
@@ -984,7 +1030,7 @@ class SmartAgent:
             if best_score is None or score > best_score:
                 best_score, best_combo = score, cards
 
-        return self._finish(public, private, list(best_combo or hand[:n_picks]))
+        return self._finish(public, private, list(best_combo or []))
 
     def _finish(self, public, private, chosen: list[Card]) -> list[tuple[str, int | None]]:
         """选好了出哪组牌之后：排出场顺序、给干扰牌挑目标、留下复盘/体检要的记录。"""
@@ -1104,6 +1150,7 @@ class SmartAgent:
         # 2) 枚举所有出牌组合（按手牌下标，所以同名牌能出两张）
         scored: list[tuple[float, list[Card]]] = []
         feats: list[dict[str, float]] = []
+        self._can_win_now = False
         contender = max((self._contender(o["id"]) for o in killers), default=0.0)
         closer = max(killers, key=lambda o: self._p_reach(
             o, self.models.get(o["id"], OpponentModel())), default=None)
@@ -1115,12 +1162,17 @@ class SmartAgent:
             for extra in variants
         ):
             cards = extra + [hand[i] for i in combo]
-            if not self.allow_corrupt and Card.CORRUPT in cards:
+            # 被禁用的牌（消融 / 对抗赛用）整组不考虑——只把分数记 0 不够，
+            # 学习型 AI 有自己的权重，分数是 0 的组合照样可能被抽中
+            if ((not self.allow_corrupt and Card.CORRUPT in cards)
+                    or (not self.allow_attack and Card.ATTACK in cards)
+                    or (not self.allow_report and Card.REPORT in cards)):
                 continue
             score, i_win = self._score_economy(
                 public, private, cards, [0] * len(extra) + [values[i] for i in combo]
             )
             econ = score
+            self._can_win_now = self._can_win_now or i_win
             if rival_closing and not i_win:
                 score *= closing_discount
             econ_scored = score
@@ -1280,6 +1332,9 @@ class SmartAgent:
         例外：有人下一步就夺冠时，举报和攻击要**一起压在他身上**。
         分散开来谁也拦不住，而他赢了桌上每个人都输——这时候"别重复"是错的。
         """
+        target = self._dogpile_target(public)
+        if target is not None and not getattr(self, "_can_win_now", False):
+            return target["id"]
         killer = [
             o for o in opponents
             if self._about_to_win(o, self.models.get(o["id"], OpponentModel()))
@@ -1647,7 +1702,7 @@ class SmartAgent:
             ) / tc
         if (cfg.origin(t_origin) or {}).get("id") == "PEASANT":
             # 贫农「政治正确」：一个人挡不住他，得有别人也一起打才按得住
-            block_value *= self.w.peasant_second_attacker
+            block_value *= self._peasant_block_chance()
         deny += p_block * block_value * threat
 
         if cfg.attack_resets_tenure and cfg.tenure_required > 0:
@@ -1796,9 +1851,12 @@ class LearnedAgent(SmartAgent):
     `record=True` 时把每次决策的 ∇log π 记进 trace，learn.py 按输赢回传。
     """
 
-    def __init__(self, *args, theta: dict[str, float], record: bool = False, **kw) -> None:
+    def __init__(self, *args, theta: dict[str, float], record: bool = False,
+                 theta_by_origin: dict[str, dict[str, float]] | None = None, **kw) -> None:
         super().__init__(*args, **kw)
         self.theta = theta
+        # 每个出身专项训练出来的权重（learn.py --focus-origin）；没有的出身用 theta
+        self.theta_by_origin = theta_by_origin or {}
         self.record = record
         self.trace: list[dict[str, float]] = []
         self.chosen_stats: Counter = Counter()  # 选中的组合里各特征的累计（learn.py 看打法怎么变）
@@ -1817,7 +1875,8 @@ class LearnedAgent(SmartAgent):
         self.last_scores = scored
         feats = self.last_features
         if not scored:
-            return self._finish(public, private, hand[:n_picks])
+            return self._finish(public, private, [])
+        scored, feats = self._apply_dogpile(public, hand, scored, feats)
         if self.force_block:
             opps = [o for o in public["players"] if o["id"] != self.id]
             killers = [o for o in opps
@@ -1828,7 +1887,9 @@ class LearnedAgent(SmartAgent):
                 if keep:
                     scored = [scored[i] for i in keep]
                     feats = [feats[i] for i in keep]
-        logits = [sum(self.theta.get(k, 0.0) * v for k, v in f.items()) for f in feats]
+        oid = (self.cfg.origin(private.get("origin")) or {}).get("id")
+        theta = self.theta_by_origin.get(oid, self.theta)
+        logits = [sum(theta.get(k, 0.0) * v for k, v in f.items()) for f in feats]
         top = max(logits)
         weights = [math.exp(min(0.0, x - top)) for x in logits]
         total = sum(weights)
@@ -1859,7 +1920,16 @@ def load_policy(path: str) -> dict[str, float]:
         return dict(json.load(fh)["theta"])
 
 
-_POLICY_CACHE: dict[str, dict[str, float]] = {}
+def load_policy_bundle(path: str) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """(默认权重, {出身: 专项权重})。普通权重文件没有 theta_by_origin，第二项为空。"""
+    import json
+
+    with open(path, encoding="utf-8") as fh:
+        d = json.load(fh)
+    return dict(d["theta"]), {k: dict(v) for k, v in (d.get("theta_by_origin") or {}).items()}
+
+
+_POLICY_CACHE: dict[str, tuple[dict[str, float], dict[str, dict[str, float]]]] = {}
 
 
 def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
@@ -1871,7 +1941,7 @@ def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
     """
     from pathlib import Path
 
-    policy = None
+    policy, by_origin = None, None
     if cfg.ai_policy:
         path = Path(cfg.ai_policy)
         if not path.is_absolute():
@@ -1879,9 +1949,10 @@ def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
         if path.exists():
             key = str(path)
             if key not in _POLICY_CACHE:
-                _POLICY_CACHE[key] = load_policy(key)
-            policy = _POLICY_CACHE[key]
-    return AgentPool(cfg=cfg, rng=rng or random.Random(), policy=policy, **flags)
+                _POLICY_CACHE[key] = load_policy_bundle(key)
+            policy, by_origin = _POLICY_CACHE[key]
+    return AgentPool(cfg=cfg, rng=rng or random.Random(), policy=policy,
+                     policy_by_origin=by_origin or None, **flags)
 
 
 # --------------------------------------------------------------------------
@@ -1901,6 +1972,7 @@ class AgentPool:
     allow_corrupt: bool = True
     agents: dict[int, SmartAgent] = field(default_factory=dict)
     policy: dict[str, float] | None = None  # 给了就用学习型 AI（LearnedAgent）
+    policy_by_origin: dict[str, dict[str, float]] | None = None  # 每个出身的专项权重
     record: bool = False
 
     def get(self, player_id: int) -> SmartAgent:
@@ -1914,7 +1986,8 @@ class AgentPool:
                 allow_corrupt=self.allow_corrupt,
             )
             self.agents[player_id] = (
-                LearnedAgent(player_id, theta=self.policy, record=self.record, **kw)
+                LearnedAgent(player_id, theta=self.policy, record=self.record,
+                             theta_by_origin=self.policy_by_origin, **kw)
                 if self.policy is not None else SmartAgent(player_id, **kw)
             )
         return self.agents[player_id]
@@ -1949,6 +2022,9 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
     # 富二代的免费换牌：不花钱，手牌烂就换，跟真人一样
     if private.get("redraw_cost") == 0 and agent._hand_is_weak(private):
         return True
+    if agent._dogpile_target(public) is not None:
+        # 围堵默契：手里没有攻击就花钱重抽，抽到能拦他的牌为止（自己就是那个快赢的人除外）
+        return not any(Card(d["card"]) is Card.ATTACK for d in private["hand"])
     if any(Card(d["card"]).needs_target for d in private["hand"]):
         return False  # 手上已经有举报或攻击了
 

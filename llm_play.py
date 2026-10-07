@@ -187,6 +187,15 @@ def extract_json(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def variant_cfg(variant: str) -> Config:
+    """sweep.py 里的规则变体；后备的程序 AI 用这个变体续训出来的那份（有的话）。"""
+    if not variant or variant == "base":
+        return DEFAULT_CONFIG
+    import sweep
+
+    return sweep.build(variant, own_ai=True)
+
+
 def rules_text(cfg: Config) -> str:
     ranks = [cfg.rank_name(r) for r in range(cfg.president_rank + 1)]
     steps = "；".join(
@@ -217,6 +226,14 @@ def rules_text(cfg: Config) -> str:
 全局事件（反腐风暴会查办贪得多的人、经济好坏会让金钱收益翻倍或减半、重点项目让埋头工作加政绩……）在出牌**之后**才公布。
 克制关系：攻击克制走政绩路线的人，举报克制走金钱路线（贪污、买官）的人。
 
+【胜负的关键】只有一个人能赢：别人当上主席，你和其余所有人都算输（不管你当时离主席多近）。
+所以把快赢的人拦下来，和自己升官一样重要——拦住了，游戏才继续，你才有机会。
+- 看谁离主席最近，不是看谁的政绩数字最大：省级玩家只要钱和政绩都凑够、再打一张晋升卡就赢了。
+- 怎么拦：他想靠政绩升（政绩升职），政治攻击能把这次升职暂缓；他想靠钱买（贿赂升职），
+  匿名举报能让它作废、钱打水漂；他打通用升职的话，攻击和举报一起压上去才稳。
+- 一个人往往拦不住，几个人一起压上去才稳；手里没有攻击 / 举报时，可以花钱换牌去找。
+- 但如果你自己这一轮就能当上主席，那就去冲。
+
 出身（每人一个，有专属技能）：
 {origins}"""
 
@@ -246,6 +263,29 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
             f"政绩 {p['merit']}" + (f"/{tc}（他升下一级要：政绩 {tc} 或 金钱 {mc}）" if tc else "")
             + f"，降职警告 {p.get('warnings', 0)}{est}" + ("  ← 你" if p["id"] == pid else "")
         )
+    threat_rows = []
+    top = cfg.president_rank
+    for p in pub["players"]:
+        if p["id"] == pid:
+            continue
+        mc = rules.money_cost_at(p["rank"], p.get("origin"), cfg)
+        tc = rules.merit_cost_at(p["rank"], p.get("origin"), cfg)
+        if tc is None:
+            continue
+        m = agent.models.get(p["id"], ai.OpponentModel())
+        steps = top - p["rank"]
+        gap_merit = max(0, tc - p["merit"])
+        gap_money = max(0.0, (mc or 0) - m.money_est)
+        flag = ""
+        if p["rank"] == top - 1:
+            near = p["merit"] + agent._expected_work(p["rank"]) >= tc
+            if agent._about_to_win(p, m) or near:
+                flag = "  ⚠ 这一轮就可能登顶"
+        need = "钱和政绩都要" if cfg.needs_both(p["rank"]) else "政绩或金钱任一"
+        threat_rows.append((steps, gap_merit, f"  - {p['name']}（id={p['id']}）：离主席还差 {steps} 级；"
+                            f"本级（{need}）还差政绩 {gap_merit}、估计还差金钱 {gap_money:.0f}{flag}"))
+    threat_rows.sort(key=lambda r: (r[0], r[1]))
+    threat = "\n".join(r[2] for r in threat_rows)
     hand = "\n".join(
         f"  [{i}] {CARD_NAMES.get(d['card'], d['card'])}" + (f"（点数 {d['value']}）" if d.get("value") else "")
         for i, d in enumerate(priv["hand"])
@@ -256,6 +296,12 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
     tip = priv.get("tipoff_event")
     tip_line = f"\n家里透风：本轮的全局事件是「{tip.get('name')}」——{tip.get('description', '')}" if tip else ""
     np_ = priv.get("next_promotion") or {}
+    redraw_line = ""
+    if priv.get("redraw_available"):
+        cost, nxt = priv.get("redraw_cost", 0), priv.get("redraw_next_cost", 0)
+        redraw_line = (f"\n换牌：可以花 {cost} 金钱把这 6 张全部换掉重抽（同一轮再换要 {nxt}）"
+                       + ("" if priv.get("redraw_affordable") else "——你现在钱不够")
+                       + "。想换就只回 {\"redraw\": true}，我会把新手牌发给你再决定。")
     hist = "\n".join(history[-4:]) or "（第一轮，还没有历史）"
     mem = "\n".join(memory[-3:]) or "（无）"
     return f"""{rules_text(cfg)}
@@ -268,6 +314,9 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
 场上所有人：
 {chr(10).join(rows)}
 
+谁离赢最近（程序按公开信息算的，钱是估计）：
+{threat}
+
 最近几轮发生了什么：
 {hist}
 
@@ -275,12 +324,13 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
 {mem}
 
 你这轮的手牌：
-{hand}{family_line}
+{hand}{family_line}{redraw_line}
 
-请像一个想赢的真人玩家那样分析局势（谁快赢了、谁可能在贪、该发展还是该干扰），然后决定出牌。
+请像一个想赢的真人玩家那样分析局势：先看谁离赢最近、你这一轮能不能赢；
+不能赢的话，是自己发展，还是去拦那个快赢的人（他赢了你就输了）。然后决定出牌。
 最多出 {cfg.picks_per_round} 张，按结算顺序排列；举报和攻击要写目标的 id。
 **只输出一个 JSON**，不要别的文字：
-{{"picks": [{{"index": 手牌序号, "target": 目标id或null}}, ...], "family": false, "reason": "一两句话说明你的想法"}}"""
+{{"threat": 你认为离赢最近的对手id, "picks": [{{"index": 手牌序号, "target": 目标id或null}}, ...], "family": false, "reason": "一两句话：谁最可能先赢、你这轮能不能赢、为什么这样出"}}"""
 
 
 def session_system_prompt(cfg: Config, name: str, origin_name: str) -> str:
@@ -290,10 +340,11 @@ def session_system_prompt(cfg: Config, name: str, origin_name: str) -> str:
 
 ====================
 你是 {name}，出身「{origin_name}」。每轮我会告诉你最新的局面和你的手牌，
-你像一个想赢的真人玩家那样分析局势（谁快赢了、谁可能在贪、该发展还是该干扰），然后出牌。
+你像一个想赢的真人玩家那样分析局势：先看谁离赢最近、你这一轮能不能赢；
+不能赢的话，是自己发展，还是去拦那个快赢的人（他赢了你就输了）。然后出牌。
 最多出 {cfg.picks_per_round} 张，按结算顺序排列；举报和攻击要写目标的 id。
 出牌时**只输出一个 JSON**，不要别的文字：
-{{"picks": [{{"index": 手牌序号, "target": 目标id或null}}, ...], "family": false, "reason": "一两句话说明你的想法"}}"""
+{{"threat": 你认为离赢最近的对手id, "picks": [{{"index": 手牌序号, "target": 目标id或null}}, ...], "family": false, "reason": "一两句话：谁最可能先赢、你这轮能不能赢、为什么这样出"}}"""
 
 
 def session_round_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
@@ -360,23 +411,44 @@ def round_summary(cfg: Config, game: Game, outcome) -> str:
             + ("；".join(msgs) if msgs else "风平浪静") + f"。结束后：{ranks}")
 
 
+MAX_REDRAWS = 3
+
+
 def decide(cfg: Config, game: Game, pid: int, backend, pool: ai.AgentPool,
            history: list[str], memory: list[str], stats: Counter, mock: bool,
-           session: "ClaudeSession | None" = None) -> tuple[list, str]:
+           session: "ClaudeSession | None" = None) -> tuple[list, str, int]:
+    """返回 (出牌, 理由, 这轮换了几次牌)。换不换牌由大模型自己决定（mock 时交给程序 AI）。"""
     agent = pool.get(pid)
-    fallback = ai.turn(game, pid, pool)  # 同时也让 agent 的观察跟上（估计对手存款要用）
-    if session is not None:
-        prompt = session_round_prompt(cfg, game, pid, agent, history[-1] if history else "")
-        backend = session
-    else:
-        prompt = player_prompt(cfg, game, pid, agent, history, memory)
     if mock:
-        stats["prompt_chars"] += len(prompt)
-        return fallback, "（mock：程序 AI 出牌）"
-    hand = game.private_state(pid)["hand"]
-    for attempt in range(2):
+        picks = ai.turn(game, pid, pool)  # 程序 AI 冒充：连换牌一起它来
+        stats["prompt_chars"] += len(player_prompt(cfg, game, pid, agent, history, memory))
+        return picks, "（mock：程序 AI 出牌）", 0
+    ai.choose(game, pid, pool)  # 只为让程序 AI 的观察跟上（提示里的估计存款要用），不换牌
+
+    def make_prompt(after_redraw: bool) -> str:
+        if session is not None:
+            p = session_round_prompt(cfg, game, pid, agent, "" if after_redraw else
+                                     (history[-1] if history else ""))
+            return p.replace("【新一轮】", "【换牌后的新手牌】") if after_redraw else p
+        return player_prompt(cfg, game, pid, agent, history, memory)
+
+    ask = (session or backend).ask
+    prompt = make_prompt(False)
+    redraws = errors = 0
+    for _ in range(MAX_REDRAWS + 3):
         try:
-            ans = extract_json(backend.ask(prompt))
+            ans = extract_json(ask(prompt))
+            if ans.get("redraw"):
+                priv = game.private_state(pid)
+                if redraws < MAX_REDRAWS and priv.get("redraw_affordable"):
+                    stats["redraw_spent"] += game.redraw(pid)
+                    stats["redraws"] += 1
+                    redraws += 1
+                    prompt = make_prompt(True)
+                else:
+                    prompt = "（现在不能再换牌了：钱不够或者这轮已经换了好几次。请直接出牌，只输出出牌的 JSON。）"
+                continue
+            hand = game.private_state(pid)["hand"]
             picks = []
             for p in ans.get("picks", [])[: cfg.picks_per_round]:
                 i = int(p["index"])
@@ -387,18 +459,26 @@ def decide(cfg: Config, game: Game, pid: int, backend, pool: ai.AgentPool,
                 picks.append({"action": "PROMOTE_FAMILY", "target": None})
             game.select_actions(pid, picks)  # 不合法会抛 GameError
             stats["llm_ok"] += 1
-            return picks, str(ans.get("reason", ""))[:300]
+            reason = str(ans.get("reason", ""))[:300]
+            if ans.get("threat") is not None:
+                reason = f"[威胁:{ans.get('threat')}] " + reason
+            return picks, reason, redraws
         except (ValueError, KeyError, TypeError, GameError, RuntimeError,
                 subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-            stats["llm_retry" if attempt == 0 else "llm_fallback"] += 1
-            prompt += f"\n\n（上一次的回答有问题：{exc}。请严格只输出符合格式的 JSON。）"
-    return fallback, "（模型两次都没给出合法出牌，这一轮由程序 AI 代打）"
+            errors += 1
+            stats["llm_retry" if errors == 1 else "llm_fallback"] += 1
+            if errors >= 2:
+                break
+            prompt = f"（上一次的回答有问题：{exc}。请严格只输出符合格式的 JSON。）" if session else \
+                prompt + f"\n\n（上一次的回答有问题：{exc}。请严格只输出符合格式的 JSON。）"
+    return ai.choose(game, pid, pool), "（模型没给出合法出牌，这一轮由程序 AI 代打）", redraws
 
 
 def play_one(args: tuple) -> dict[str, Any]:
     g, seed, model, backend_name, out_dir = args[:5]
     extra = list(args[5]) if len(args) > 5 else []
-    cfg = DEFAULT_CONFIG
+    variant = args[6] if len(args) > 6 else "base"
+    cfg = variant_cfg(variant)
     rng = random.Random(seed)
     mock = backend_name == "mock"
     backend = MockBackend() if mock else ClaudeCLI(model)
@@ -431,14 +511,15 @@ def play_one(args: tuple) -> dict[str, Any]:
                     for pid in sorted(game.players)}
             # 并行时 decide 里已经各自 select_actions 过；mock / 退回程序 AI 的那几席在这里补上
             for pid, f in futs.items():
-                picks, reason = f.result()
+                picks, reason, redraws = f.result()
                 sel = game.selections[pid]
                 if not sel.picks:
                     game.select_actions(pid, picks)
                 game.lock_action(pid)
                 cards = [p.get("action") for p in picks]
                 memory[pid].append(f"第 {rnd} 轮：出了 {[CARD_NAMES.get(c, c) for c in cards]}。{reason}")
-                decisions.append({"round": rnd, "pid": pid, "picks": picks, "reason": reason})
+                decisions.append({"round": rnd, "pid": pid, "picks": picks, "reason": reason,
+                                  "redraws": redraws})
             game.force_lock_all()
             game.reveal_event()
             outcome = game.resolve()
@@ -473,7 +554,7 @@ def play_one(args: tuple) -> dict[str, Any]:
             "winner": p.id in game.winners, "feedback": feedback.get(p.id),
         })
     result = {
-        "game": g, "seed": seed, "model": model, "rounds": game.round_number,
+        "game": g, "seed": seed, "model": model, "variant": variant, "rounds": game.round_number,
         "president": any(p.rank >= cfg.president_rank for p in game.players.values()),
         "reason": game.game_over_reason, "players": players, "history": history,
         "decisions": decisions, "stats": dict(stats),
@@ -491,10 +572,12 @@ def play_one(args: tuple) -> dict[str, Any]:
 
 
 def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str:
-    cfg = DEFAULT_CONFIG
     games = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out_dir.glob("game_*.json"))]
     if not games:
         return "没有对局数据"
+    variant = games[0].get("variant", "base")
+    cfg = variant_cfg(variant)
+    redraw_by: Counter = Counter()
     n = len(games)
     wins: Counter = Counter()
     seats: Counter = Counter()
@@ -531,17 +614,46 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
                     f"最弱 {fb.get('weakest')}（{fb.get('weakest_why', '')}）；不公平：{fb.get('unfair', '')}；"
                     f"体验 {fb.get('fun')}/10：{fb.get('experience', '')}；建议：{fb.get('suggestion', '')}"
                 )
+        origin_of = {p["pid"]: origin_name.get(p["origin"], p["origin"]) for p in gm["players"]}
         for d in gm["decisions"]:
+            redraw_by[origin_of.get(d["pid"], "?")] += d.get("redraws", 0)
             for p in d["picks"]:
                 cards[p.get("action")] += 1
 
-    lines = [f"# 大模型对局小样本报告（{n} 局，{model}，{backend_name}）", ""]
+    # 拦人：攻击打在省级身上的比例、第一个到省级的人夺冠率（从每轮"结束后：…"的官职里推）
+    top_name = cfg.rank_name(cfg.president_rank - 1)
+    atk_total = atk_top = first_n = first_won = 0
+    for gm in games:
+        names = {p["pid"]: p["name"] for p in gm["players"]}
+        rank_after: dict[int, dict[str, str]] = {}
+        for line in gm["history"]:
+            m = re.match(r"第 (\d+) 轮.*结束后：(.*)$", line)
+            if m:
+                rank_after[int(m.group(1))] = dict(
+                    x.split(" ", 1) for x in m.group(2).split("、") if " " in x)
+        for d in gm["decisions"]:
+            prev = rank_after.get(d["round"] - 1, {})
+            for p in d["picks"]:
+                if p.get("action") == "ATTACK" and p.get("target") in names:
+                    atk_total += 1
+                    atk_top += prev.get(names[p["target"]]) == top_name
+        for r in sorted(rank_after):
+            tops = [nm for nm, rk in rank_after[r].items() if rk in (top_name, cfg.rank_name(cfg.president_rank))]
+            if tops:
+                first_n += 1
+                first_won += any(p["winner"] and p["name"] == tops[0] for p in gm["players"])
+                break
+
+    lines = [f"# 大模型对局小样本报告（规则变体 {variant}，{n} 局，{model}，{backend_name}）", ""]
     lines.append(f"- 主席率 {100 * sum(g['president'] for g in games) / n:.0f}%，"
                  f"平均 {sum(g['rounds'] for g in games) / n:.1f} 轮结束")
     total_dec = stats["llm_ok"] + stats["llm_fallback"]
     if total_dec:
         lines.append(f"- 模型出牌 {stats['llm_ok']} 次，重试 {stats['llm_retry']} 次，"
                      f"退回程序 AI {stats['llm_fallback']} 次（{100 * stats['llm_fallback'] / total_dec:.1f}%）")
+    lines.append(f"- 拦人：攻击里打在{top_name}身上的 {100 * atk_top / max(1, atk_total):.0f}%；"
+                 f"第一个到{top_name}的人最终夺冠 {100 * first_won / max(1, first_n):.0f}%"
+                 f"（公平线约 17%，越高说明领先者越没被拦住）")
     calls = sum(g["llm_calls"] for g in games)
     secs = sum(g["llm_seconds"] for g in games)
     lines.append(f"- 模型调用 {calls} 次，平均每次 {secs / max(1, calls):.1f} 秒")
@@ -555,6 +667,9 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     lines += ["", "## 出牌习惯（所有玩家打出的牌）", ""]
     tot = sum(cards.values()) or 1
     lines.append("、".join(f"{CARD_NAMES.get(c, c)} {100 * v / tot:.0f}%" for c, v in cards.most_common()))
+    if stats["redraws"]:
+        lines += ["", f"换牌：共 {stats['redraws']} 次、花了 {stats['redraw_spent']} 金钱；每个身份平均每局换牌 "
+                  + "、".join(f"{o} {redraw_by[o] / max(1, seats[o]):.1f} 次" for o in sorted(seats))]
     lines += ["", "## 体验打分", ""]
     for k, v in fun_by_result.items():
         lines.append(f"- {k}：平均 {sum(v) / len(v):.1f} / 10（{len(v)} 份）")
@@ -594,6 +709,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--extra", default='--tools ""',
                     help="session 模式额外传给 claude 的参数（默认关掉工具）；不支持就传空字符串")
     ap.add_argument("--selftest", action="store_true", help="测一下哪几种调用方式能用、各要几秒")
+    ap.add_argument("--variant", default="base",
+                    help="sweep.py 里的规则变体（noreward / off_notip / off34 / peasant_old，可用 + 组合）")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--report", default="", help="只对这个目录出报告")
     ap.add_argument("--no-summary", action="store_true", help="报告里不请模型归纳反馈")
@@ -604,13 +721,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.report:
         print(report(Path(args.report), not args.no_summary, args.model, args.backend))
         return 0
-    out_dir = RUN_DIR / time.strftime("%Y%m%d-%H%M%S")
+    variant_cfg(args.variant)  # 变体名写错就当场报
+    out_dir = RUN_DIR / (time.strftime("%Y%m%d-%H%M%S") + f"-{args.variant.replace('+', '_')}")
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"输出目录：{out_dir}", flush=True)
     import shlex
 
     extra = shlex.split(args.extra)
-    jobs = [(g, args.seed * 1000 + g, args.model, args.backend, out_dir, extra)
+    jobs = [(g, args.seed * 1000 + g, args.model, args.backend, out_dir, extra, args.variant)
             for g in range(args.games)]
     done = 0
     with ThreadPoolExecutor(max_workers=args.parallel) as ex:

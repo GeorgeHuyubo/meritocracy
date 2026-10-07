@@ -86,6 +86,11 @@ VARIANTS: dict[str, dict[str, Any]] = {
                "promotion_money_costs": [15, 22, 30, 44]},
     "c16": {"corrupt_card_distribution": [(14, 1), (15, 2), (16, 2), (17, 2), (18, 1)],
             "graft_card_distribution": [(7, 1), (8, 2), (9, 2), (10, 2), (11, 1)]},
+    # 大模型 100 局反馈之后的实验
+    "noreward": {"report_reward_ratio": Fraction(0)},          # 举报不分赃，赃款全部充公
+    "off_notip": {"origin_official_tipoff": False},           # 官二代取消"透风"
+    "peasant_old": {"origin_peasant_max_attackers": None},    # 贫农改回：几个人都拦不住
+    "dogpile": {"ai_dogpile": True},                           # AI 的人类式围堵默契
     # 身份：官二代、卷王偏强
     "off34": {"origin_patronage_merit_ratio": Fraction(3, 4)},
     "grind3": {"origin_grinder_overtime_multiplier": 3},
@@ -94,7 +99,19 @@ VARIANTS: dict[str, dict[str, Any]] = {
 }
 
 
-def build(name: str, base: Config = DEFAULT_CONFIG) -> Config:
+POLICY_DIR = Path(__file__).resolve().parent / "policies"
+
+
+def variant_policy(name: str) -> str:
+    """这个变体有没有专门续训过的 AI（policies/var_<变体名>.json）；没有就用默认的。"""
+    path = POLICY_DIR / f"var_{name.replace('+', '_')}.json"
+    return str(path) if path.exists() else DEFAULT_CONFIG.ai_policy
+
+
+def build(name: str, base: Config = DEFAULT_CONFIG, own_ai: bool = False) -> Config:
+    """own_ai=True：顺便把 ai_policy 指向这个变体续训出来的 AI。"""
+    if own_ai and name != "base":
+        base = dataclasses.replace(base, ai_policy=variant_policy(name))
     changes: dict[str, Any] = {}
     for part in name.split("+"):
         if part not in VARIANTS:
@@ -104,8 +121,9 @@ def build(name: str, base: Config = DEFAULT_CONFIG) -> Config:
     return dataclasses.replace(base, **changes)
 
 
-def run_variant(name: str, ablation_games: int, melee_games: int, seed: int) -> dict[str, Any]:
-    cfg = build(name)
+def run_variant(name: str, ablation_games: int, melee_games: int, seed: int,
+                own_ai: bool = False) -> dict[str, Any]:
+    cfg = build(name, own_ai=own_ai)
     t0 = time.time()
     out: dict[str, Any] = {"name": name}
 
@@ -158,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--melee-games", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=0, help="并行进程数（默认 = 变体数）")
+    ap.add_argument("--own-ai", action="store_true",
+                    help="每个变体用它自己续训出来的 AI（policies/var_<变体名>.json，learn.py --variant 训的）")
     args = ap.parse_args(argv)
 
     names = [n.strip() for n in args.variants.split(",") if n.strip()]
@@ -166,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     jobs = args.jobs or len(names)
     with ProcessPoolExecutor(max_workers=jobs) as ex:
         futures = [
-            ex.submit(run_variant, n, args.ablation_games, args.melee_games, args.seed)
+            ex.submit(run_variant, n, args.ablation_games, args.melee_games, args.seed, args.own_ai)
             for n in names
         ]
         results = [f.result() for f in futures]

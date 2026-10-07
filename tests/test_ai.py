@@ -964,3 +964,76 @@ class TestLearnedAgent(unittest.TestCase):
         ai.turn(game, 1, pool)
         trace = pool.get(1).trace[-1]
         self.assertTrue(any(k.startswith("rep_on_") for k in trace))
+
+
+class TestDisallowedCardsAreReallyDisallowed(unittest.TestCase):
+    def test_learned_agent_never_plays_a_disallowed_card(self):
+        """消融"禁用攻击"的座位：手里全是攻击也不许打（宁可这轮不出牌）。"""
+        game = Game(game_id="ban", cfg=CFG, rng=random.Random(1))
+        for i in range(4):
+            game.add_player(f"P{i + 1}")
+        game.start_game()
+        game.hands[1] = [DealtCard(Card.ATTACK, 0)] * 5 + [DealtCard(Card.WORK, 6)]
+        for policy in (None, {"hand": 50.0, "n_attack": 100.0}):
+            pool = ai.AgentPool(cfg=CFG, rng=random.Random(0), policy=policy, allow_attack=False)
+            picks = ai.choose(game, 1, pool)
+            self.assertNotIn("ATTACK", [p["action"] for p in picks])
+
+
+class TestPolicyByOrigin(unittest.TestCase):
+    def test_each_origin_uses_its_own_weights(self):
+        """按出身选权重：会计那份权重偏爱贪污，会计就贪；别的出身用默认权重。"""
+        game = Game(game_id="bo", cfg=CFG, rng=random.Random(1))
+        for i in range(3):
+            game.add_player(f"P{i + 1}")
+        game.players[1].origin = Origin.ACCOUNTANT
+        game.players[2].origin = Origin.GRINDER
+        game.start_game()
+        hand = [DealtCard(Card.CORRUPT, 18), DealtCard(Card.WORK, 6)] + [DealtCard(Card.WORK, 5)] * 4
+        game.hands[1] = list(hand)
+        game.hands[2] = list(hand)
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0), policy={"dirty": -100.0},
+                            policy_by_origin={"ACCOUNTANT": {"dirty": 100.0}})
+        acc = [p["action"] for p in ai.choose(game, 1, pool)]
+        grind = [p["action"] for p in ai.choose(game, 2, pool)]
+        self.assertIn("CORRUPT", acc)
+        self.assertNotIn("CORRUPT", grind)
+
+
+class TestDogpileNorm(unittest.TestCase):
+    """AI_DOGPILE：有人在省级、政绩快够了，全桌一起按住他；没攻击牌就花钱重抽。"""
+
+    def _game(self, cfg):
+        game = Game(game_id="dog", cfg=cfg, rng=random.Random(2))
+        for i in range(4):
+            game.add_player(f"P{i + 1}")
+        game.start_game()
+        top = cfg.president_rank - 1
+        leader = game.players[2]
+        leader.rank, leader.merit = top, cfg.merit_cost(top) - 2
+        return game
+
+    def test_everyone_attacks_the_leader_near_the_line(self):
+        import dataclasses
+
+        cfg = dataclasses.replace(CFG, ai_dogpile=True)
+        game = self._game(cfg)
+        game.hands[1] = [DealtCard(Card.ATTACK, 0), DealtCard(Card.CORRUPT, 18)] + \
+            [DealtCard(Card.WORK, 7)] * 4
+        for policy in (None, {"hand": 50.0, "n_attack": -100.0}):
+            pool = ai.AgentPool(cfg=cfg, rng=random.Random(0), policy=policy)
+            picks = ai.choose(game, 1, pool)
+            self.assertIn(("ATTACK", 2), [(p["action"], p["target"]) for p in picks])
+
+    def test_no_attack_card_means_paying_to_redraw(self):
+        import dataclasses
+
+        cfg = dataclasses.replace(CFG, ai_dogpile=True)
+        game = self._game(cfg)
+        game.players[1].money = 50
+        game.hands[1] = [DealtCard(Card.WORK, 7)] * 6
+        pool = ai.AgentPool(cfg=cfg, rng=random.Random(0))
+        self.assertTrue(ai.wants_redraw(game, 1, pool))
+        off = ai.AgentPool(cfg=CFG, rng=random.Random(0))
+        game.cfg = CFG
+        self.assertFalse(ai.wants_redraw(game, 1, off))

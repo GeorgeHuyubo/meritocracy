@@ -89,9 +89,17 @@ def play_focus(args: tuple) -> dict[str, Any]:
     return {"grad": dict(grad), "stats": dict(stats), "chosen": dict(chosen)}
 
 
+def _cfg(variant: str):
+    if not variant or variant == "base":
+        return DEFAULT_CONFIG
+    import sweep
+
+    return sweep.build(variant)
+
+
 def play_batch(args: tuple) -> dict[str, Any]:
-    theta, league, n_games, seed = args
-    cfg = DEFAULT_CONFIG
+    theta, league, n_games, seed = args[:4]
+    cfg = _cfg(args[4] if len(args) > 4 else "")
     rng = random.Random(seed)
     grad: Counter = Counter()
     chosen: Counter = Counter()
@@ -195,7 +203,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--focus-origin", default="", help="专项训练这个出身（ACCOUNTANT 等），其余 5 席用 --opponents 的权重")
     ap.add_argument("--opponents", default="", help="专项训练时对手用的权重文件")
     ap.add_argument("--init", default="", help="从这份权重开始（不带 Adam 状态）")
+    ap.add_argument("--variant", default="", help="在 sweep.py 的这个规则变体下训练（AI 适应新规则）")
+    ap.add_argument("--merge-focus", default="",
+                    help="把 policies/focus_<出身>.json 合并成一份按出身选权重的文件（写到这个路径），然后退出")
     args = ap.parse_args(argv)
+
+    if args.merge_focus:
+        base_theta = ai.load_policy(str(POLICY_DIR / "best.json"))
+        by_origin, meta = {}, {}
+        for path in sorted(POLICY_DIR.glob("focus_*.json")):
+            oid = path.stem[len("focus_"):]
+            d = json.loads(path.read_text(encoding="utf-8"))
+            by_origin[oid] = d["theta"]
+            h = [r.get("focus", 0.0) for r in d["meta"]["history"]]
+            k = max(1, len(h) // 5)
+            meta[oid] = {"games": d["meta"]["games"],
+                         "focus_first": round(sum(h[:k]) / k, 2), "focus_last": round(sum(h[-k:]) / k, 2)}
+        Path(args.merge_focus).write_text(json.dumps(
+            {"theta": base_theta, "theta_by_origin": by_origin, "meta": {"focus": meta}},
+            ensure_ascii=False, indent=1), encoding="utf-8")
+        for oid, m in meta.items():
+            print(f"{oid:<12}专项 {m['games']} 局：每席胜率 {m['focus_first']}% -> {m['focus_last']}%")
+        return 0
 
     out = Path(args.out)
     if args.resume and out.exists():
@@ -218,8 +247,8 @@ def main(argv: list[str] | None = None) -> int:
                          seed0 * 1000 + b * 100 + w) for w in range(args.workers)]
             else:
                 fn = play_batch
-                jobs = [(dict(theta), league, args.games_per_worker, seed0 * 1000 + b * 100 + w)
-                        for w in range(args.workers)]
+                jobs = [(dict(theta), league, args.games_per_worker, seed0 * 1000 + b * 100 + w,
+                         args.variant) for w in range(args.workers)]
             grad: Counter = Counter()
             stats: Counter = Counter()
             chosen: Counter = Counter()
