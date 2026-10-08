@@ -18,6 +18,9 @@ from game import Game  # noqa: E402
 from models import Card, DealtCard, Origin  # noqa: E402
 
 CFG = DEFAULT_CONFIG
+# 一纸调令默认已删掉；测调令本身的用例用这个
+import dataclasses as _dc  # noqa: E402
+FAMILY_CFG = _dc.replace(DEFAULT_CONFIG, origin_red_family_card=True)
 
 
 def fresh_table(n=6):
@@ -265,14 +268,15 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
 
     def test_red_plays_the_family_card_when_it_has_no_promotion_card(self):
         """够门槛却没摸到晋升卡：红二代 AI 会掏出一纸调令。手里有普通晋升卡时不浪费它。"""
-        game = Game(game_id="red", cfg=CFG, rng=random.Random(2))
+        # 一纸调令默认已删掉，这里测的是开关打开时 AI 会用它
+        game = Game(game_id="red", cfg=FAMILY_CFG, rng=random.Random(2))
         for name in ("我", "甲", "乙"):
             game.add_player(name)
         game.players[1].origin = Origin.RED
         game.start_game()
         me = game.players[1]
         me.rank, me.merit, me.money = 1, CFG.merit_cost(1), 0
-        pool = ai.AgentPool(cfg=CFG, rng=random.Random(2))
+        pool = ai.AgentPool(cfg=FAMILY_CFG, rng=random.Random(2))
         game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
         picks = [pk["action"] for pk in ai.choose(game, 1, pool)]
         self.assertIn("PROMOTE_FAMILY", picks)
@@ -313,7 +317,8 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
 
         （它最先结算时是赶不上这一轮产出的——修之前那版 AI 资源不够也照打，94% 白用。）
         """
-        game = Game(game_id="red2", cfg=CFG, rng=random.Random(3))
+        # 一纸调令默认已删掉，这里测的是开关打开时 AI 会用它
+        game = Game(game_id="red2", cfg=FAMILY_CFG, rng=random.Random(3))
         for name in ("我", "甲", "乙"):
             game.add_player(name)
         game.players[1].origin = Origin.RED
@@ -322,7 +327,7 @@ class TestTheAiUnderstandsOrigins(unittest.TestCase):
         # 市级：基层升县级用这张每局一次的卡不划算（AI 会留着），市级升省级才值得
         me.rank, me.merit, me.money = 2, CFG.merit_cost(2) - 4, 0
         game.hands[1] = [DealtCard(card=Card.WORK, value=8)] * CFG.hand_size
-        pool = ai.AgentPool(cfg=CFG, rng=random.Random(3))
+        pool = ai.AgentPool(cfg=FAMILY_CFG, rng=random.Random(3))
         picks = ai.choose(game, 1, pool)
         actions = [pk["action"] for pk in picks]
         self.assertIn("PROMOTE_FAMILY", actions)
@@ -1034,6 +1039,24 @@ class TestDogpileNorm(unittest.TestCase):
         game.hands[1] = [DealtCard(Card.WORK, 7)] * 6
         pool = ai.AgentPool(cfg=cfg, rng=random.Random(0))
         self.assertTrue(ai.wants_redraw(game, 1, pool))
-        off = ai.AgentPool(cfg=CFG, rng=random.Random(0))
-        game.cfg = CFG
+        no_dog = dataclasses.replace(CFG, ai_dogpile=False)
+        off = ai.AgentPool(cfg=no_dog, rng=random.Random(0))
+        game.cfg = no_dog
         self.assertFalse(ai.wants_redraw(game, 1, off))
+
+
+class TestLearnedTargeting(unittest.TestCase):
+    def test_target_choice_follows_learned_origin_weights(self):
+        """学"打谁"：权重偏爱攻击官二代，它就去打官二代，而且这次选择会记进梯度。"""
+        game = Game(game_id="tgt", cfg=CFG, rng=random.Random(3))
+        for i in range(4):
+            game.add_player(f"P{i + 1}")
+        for pid, o in zip((2, 3, 4), (Origin.OFFICIAL, Origin.GRINDER, Origin.RICH)):
+            game.players[pid].origin = o
+        game.start_game()
+        game.hands[1] = [DealtCard(Card.ATTACK, 0)] + [DealtCard(Card.WORK, 6)] * 5
+        theta = {"hand": 50.0, "n_attack": 100.0, "A:o_OFFICIAL": 100.0}
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0), policy=theta, record=True)
+        picks = ai.choose(game, 1, pool)
+        self.assertIn(("ATTACK", 2), [(p["action"], p["target"]) for p in picks])
+        self.assertTrue(any(k.startswith("A:") for g in pool.get(1).trace for k in g))

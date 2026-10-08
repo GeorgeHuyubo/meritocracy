@@ -235,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         adam, league = Adam(args.lr), []
         meta = {"batches": 0, "games": 0, "history": []}
     opp_theta = ai.load_policy(args.opponents) if args.focus_origin else None
+    for k, v in ai.TARGET_INIT.items():
+        theta.setdefault(k, v)
 
     deadline = time.time() + args.minutes * 60
     seed0 = int(time.time()) % 100000

@@ -301,6 +301,7 @@ class SmartAgent:
         self._cal_hits = 0.0
         self._cal_expect = 0.0
         self._times_attacked = 0  # 我自己被攻击过几次
+        self._last_attackers: dict[int, int] = {}  # 谁攻击过我 -> 最近一次的轮次（明攻击才公开）
         self._rounds_seen = 0
         self._my_rank = 0
         self.observed_demotions = 0  # 公开可见的"被查实"次数（举报压力的证据）
@@ -348,6 +349,8 @@ class SmartAgent:
         self._pending_hit_expect = {}
         if facts.get(self.id, {}).get("attacked"):
             self._times_attacked += 1
+        for a in facts.get(self.id, {}).get("attacked_by", []) or []:
+            self._last_attackers[a] = result["round"]
         top_ids = set(result.get("wealth_top_ids") or [])
         # 全场最高工资。传闻排的是"工资 + 没被查实的贪污款项（毛额，打点不扣；
         # 被查实的贪污记 0）+ 举报分到的赃款"，
@@ -1889,6 +1892,7 @@ class LearnedAgent(SmartAgent):
                     feats = [feats[i] for i in keep]
         oid = (self.cfg.origin(private.get("origin")) or {}).get("id")
         theta = self.theta_by_origin.get(oid, self.theta)
+        self._theta_now = theta  # 挑目标（_pick_target）也用这一份
         logits = [sum(theta.get(k, 0.0) * v for k, v in f.items()) for f in feats]
         top = max(logits)
         weights = [math.exp(min(0.0, x - top)) for x in logits]
@@ -1911,6 +1915,68 @@ class LearnedAgent(SmartAgent):
                 for k in keys
             })
         return self._finish(public, private, list(scored[idx][1]))
+
+    def _pick_target(self, public, private, card, opponents, used):
+        """学"打谁"：候选范围和手写一样（有人快赢就在快赢的人里挑，否则避开这轮打过的），
+        在候选里按学到的权重打分、抽签。特征里有目标的出身和"出身 × 进度"，
+        让它自己学会"官二代门槛低、要早点拦""贫农单刀攻击没用""红二代举报了也降不了级"。"""
+        target = self._dogpile_target(public)
+        if target is not None and not getattr(self, "_can_win_now", False):
+            return target["id"]
+        killer = [o for o in opponents
+                  if self._about_to_win(o, self.models.get(o["id"], OpponentModel()))]
+        pool = killer or [o for o in opponents if o["id"] not in used] or opponents
+        if not pool:
+            return None
+        if len(pool) == 1:
+            return pool[0]["id"]
+        tag = "A" if card is Card.ATTACK else "R"
+        scorer = self._score_attack if card is Card.ATTACK else self._score_report
+        feats = [self._target_features(public, tag, o, scorer(public, private, o)[0]) for o in pool]
+        theta = getattr(self, "_theta_now", self.theta)
+        logits = [sum(theta.get(k, TARGET_INIT.get(k, 0.0)) * v for k, v in f.items()) for f in feats]
+        top = max(logits)
+        weights = [math.exp(min(0.0, x - top)) for x in logits]
+        total = sum(weights)
+        probs = [w / total for w in weights]
+        r, acc, idx = self.rng.random(), 0.0, len(probs) - 1
+        for i, p in enumerate(probs):
+            acc += p
+            if r < acc:
+                idx = i
+                break
+        if self.record:
+            keys = set().union(*feats)
+            self.trace.append({
+                k: feats[idx].get(k, 0.0) - sum(p * f.get(k, 0.0) for p, f in zip(probs, feats))
+                for k in keys
+            })
+        return pool[idx]["id"]
+
+    def _target_features(self, public, tag: str, o: dict[str, Any], base: float) -> dict[str, float]:
+        m = self.models.get(o["id"], OpponentModel())
+        mc, tc = self._costs(o["rank"], o.get("origin"))
+        prog = min(1.5, o["merit"] / tc) if tc else 0.0
+        rnd = int(public.get("round", 1))
+        f = {
+            f"{tag}:t_base": base,
+            f"{tag}:t_progress": prog,
+            f"{tag}:t_rank{o['rank']}": 1.0,
+            f"{tag}:t_closing": float(self._about_to_win(o, m)),
+            f"{tag}:t_money": min(2.0, m.money_est / mc) if mc else 0.0,
+            f"{tag}:t_hit_me": float(self._last_attackers.get(o["id"], -9) >= rnd - 1),
+        }
+        oid = (self.cfg.origin(o.get("origin")) or {}).get("id")
+        if oid:
+            f[f"{tag}:o_{oid}"] = 1.0
+            f[f"{tag}:o_{oid}*progress"] = prog
+        if tag == "R":
+            f["R:t_phit"] = self._report_hit_prob(public, o)[2]
+        return f
+
+
+# 学"打谁"那部分权重的起点：只看手写规则给这个目标的打分（= 第 0 代照搬手写的挑法）
+TARGET_INIT = {"A:t_base": 50.0, "R:t_base": 50.0}
 
 
 def load_policy(path: str) -> dict[str, float]:
@@ -2023,8 +2089,8 @@ def wants_redraw(game, player_id: int, pool: AgentPool) -> bool:
     if private.get("redraw_cost") == 0 and agent._hand_is_weak(private):
         return True
     if agent._dogpile_target(public) is not None:
-        # 围堵默契：手里没有攻击就花钱重抽，抽到能拦他的牌为止（自己就是那个快赢的人除外）
-        return not any(Card(d["card"]) is Card.ATTACK for d in private["hand"])
+        # 围堵默契：手里攻击、举报都没有就花钱重抽，抽到能拦他的牌为止
+        return not any(Card(d["card"]).needs_target for d in private["hand"])
     if any(Card(d["card"]).needs_target for d in private["hand"]):
         return False  # 手上已经有举报或攻击了
 

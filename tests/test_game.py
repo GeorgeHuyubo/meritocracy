@@ -38,8 +38,8 @@ def pick(*cards_and_targets):
     return [{"action": c.value, "target": t} for c, t in cards_and_targets]
 
 
-def make_game(n=3, seed=7) -> Game:
-    game = Game(game_id="t", cfg=CFG, rng=random.Random(seed))
+def make_game(n=3, seed=7, cfg=None) -> Game:
+    game = Game(game_id="t", cfg=cfg or CFG, rng=random.Random(seed))
     for i in range(n):
         game.add_player(f"玩家{i + 1}")
     return game
@@ -812,9 +812,20 @@ class TestRedraw(unittest.TestCase):
         game.redraw(1)
         self.assertGreaterEqual(works(), 2)
 
+    def test_red_has_no_family_card_by_default(self):
+        """默认（一纸调令已删掉）：红二代私密状态里没有调令，硬要打也会被拒，技能说明只剩硬保。"""
+        game = make_game(2)
+        game.players[1].origin = Origin.RED
+        game.start_game()
+        self.assertIsNone(game.private_state(1).get("family_card"))
+        with self.assertRaises(GameError):
+            game.select_actions(1, [{"action": "PROMOTE_FAMILY", "target": None}])
+        self.assertNotIn("一纸调令", CFG.origin("RED")["description"])
+
     def test_red_has_a_one_shot_family_card(self):
         """一纸调令：只有红二代有；不在手牌里也能选；打出去就算用掉（没升成也一样）。"""
-        game = make_game(2)
+        # 一纸调令默认已删掉，这里测的是开关打开时它照常工作
+        game = make_game(2, cfg=dataclasses.replace(CFG, origin_red_family_card=True))
         game.players[1].origin = Origin.RED
         game.start_game()
         self.assertTrue(game.private_state(1)["family_card"]["usable"])
@@ -836,7 +847,8 @@ class TestRedraw(unittest.TestCase):
 
     def test_family_card_is_a_free_extra_in_the_order_you_choose(self):
         """一纸调令不算行动卡：照样能再打满两张手牌；结算顺序按玩家排的来。"""
-        game = make_game(2)
+        # 一纸调令默认已删掉，这里测的是开关打开时它照常工作
+        game = make_game(2, cfg=dataclasses.replace(CFG, origin_red_family_card=True))
         game.players[1].origin = Origin.RED
         game.start_game()
         game.hands[1] = [DealtCard(card=Card.WORK, value=6)] * CFG.hand_size
@@ -855,7 +867,8 @@ class TestRedraw(unittest.TestCase):
             game2.select_actions(1, [{"index": 0}, {"index": 1}, {"index": 2}])
 
     def test_family_card_is_not_offered_on_the_last_step(self):
-        game = make_game(2)
+        # 一纸调令默认已删掉，这里测的是开关打开时它照常工作
+        game = make_game(2, cfg=dataclasses.replace(CFG, origin_red_family_card=True))
         game.players[1].origin = Origin.RED
         game.start_game()
         game.players[1].rank = CFG.president_rank - 1

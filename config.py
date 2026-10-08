@@ -419,7 +419,7 @@ REPORT_SEIZE_RATIO: Fraction = Fraction(1)
 
 # 服务器上的 AI 用哪个："" = 手写 AI（ai.SmartAgent）；填权重文件路径（相对仓库根目录）
 # = 自我对局训练出来的学习型 AI（ai.LearnedAgent，见 learn.py）。文件不存在时退回手写 AI。
-# 2026-10：第一轮训练 66 万局自我对局，1 学 5 手写 17.5%、1 手写 5 学 7.4%，各种脚本打法都 ≤ 2.6%。
+# policies/best.json 现在是第三轮：围堵风气下续训 + 学会挑目标（见文件里的 meta.note）。
 AI_POLICY: str = "policies/best.json"
 
 # --------------------------------------------------------------------------
@@ -612,7 +612,14 @@ ORIGIN_PEASANT_MAX_ATTACKERS: int | None = 1
 # 为什么要有它：AI 自我对局学到的是"各自冲刺、让别人去拦"（拦人是公共品），
 # 第一个到省级的人 35% 夺冠、7 轮就结束；人类局里大家会默契地一起按住冒头的人，
 # 逼他改走贿赂、被举报降级，局面长得多，"几个人都拦不住"的贫农也因此很强。
-AI_DOGPILE: bool = False
+# 2026-10 起默认打开：两套 AI（学习型 + 大模型）加上围堵之后，局长都从 7 轮拉到 8.4 轮、
+# 第一个到省级的人夺冠率从 45~53% 降到 29~33%，和真人局的体验一致。
+AI_DOGPILE: bool = True
+
+# 红二代「一纸调令」：每局一次、不占出牌位的家族升职卡。2026-10 起**删掉**（False），只剩「硬保」。
+# 依据：围堵风气下（AI 学会一起按住冒头的人）红二代 26.9%，六个身份里唯一明显偏强——
+# 降不了级让举报对他基本没用，调令又能绕开攻击和举报直接升一级。
+ORIGIN_RED_FAMILY_CARD: bool = False
 
 ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -712,6 +719,16 @@ def _origin_text(cfg: "Config", oid: str) -> dict[str, str]:
         return {"description": f"成分过硬，{'一个人' if n == 1 else f'{n} 个人以内'}放黑料挡不住你——"
                                f"{'只有一个人' if n == 1 else f'不超过 {n} 个人'}政治攻击你时，"
                                f"你的政绩升职不会被暂缓；再多就躲不过。"}
+    if oid == "RED":
+        hard = (f"上头有人：降职警告照记、赃款照抄，但官职动不了——"
+                f"攒满 {cfg.warnings_before_demotion} 次也降不下来")
+        if not cfg.origin_red_family_card:
+            return {"skill": "硬保", "description": hard + "。"}
+        return {"skill": "硬保 · 一纸调令",
+                "description": hard + "；另有一张每局一次的「一纸调令」（不占出牌位，结算顺序自己排）：政绩优先、其次金钱"
+                "（排在贪污后面能花这一轮的赃款，但这一轮被举报查实的话赃款当场抄走、就花不了），"
+                "攻击和举报都拦不住，不能用来升主席，打出去不管成没成都算用掉"
+                "（用钱升的那笔照样算行贿，举报查实记警告，只是官不撤）。"}
     if oid == "ACCOUNTANT":
         if cfg.report_reward_ratio == 0:
             return {"description": f"捞来的钱有 {cfg.origin_accountant_launder_ratio} 能做成合法收入，"
@@ -829,6 +846,7 @@ class Config:
     origin_official_tipoff: bool = ORIGIN_OFFICIAL_TIPOFF
     origin_peasant_max_attackers: int | None = ORIGIN_PEASANT_MAX_ATTACKERS
     ai_dogpile: bool = AI_DOGPILE
+    origin_red_family_card: bool = ORIGIN_RED_FAMILY_CARD
     origin_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(o) for o in ORIGIN_DEFINITIONS]
     )

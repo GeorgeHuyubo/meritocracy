@@ -403,6 +403,8 @@ class Game:
 
     def _family_card_blocker(self, player: PlayerState) -> str | None:
         """这个人现在能不能打一纸调令。能打返回 None，否则返回原因。"""
+        if not self.cfg.origin_red_family_card:
+            return "这一版规则里没有一纸调令。"
         if not rules.origin_is(player, "RED", self.cfg):
             return "只有红二代才有一纸调令。"
         if player.id in self.family_used:
@@ -413,7 +415,8 @@ class Game:
 
     def _family_card_info(self, player: PlayerState) -> dict[str, Any] | None:
         """给私密状态用：红二代才有，没用过才显示"""
-        if not rules.origin_is(player, "RED", self.cfg) or player.id in self.family_used:
+        if (not self.cfg.origin_red_family_card or not rules.origin_is(player, "RED", self.cfg)
+                or player.id in self.family_used):
             return None
         why = self._family_card_blocker(player)
         return {"usable": why is None, "why": why or ""}

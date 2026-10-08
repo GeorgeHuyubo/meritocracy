@@ -909,14 +909,14 @@ function quickRulesHtml(c) {
     <tr><td><b>贿赂升职</b></td><td>钱</td><td>不受影响</td><td>失败，${bribeLossText()}</td></tr>
     <tr><td><b>通用升职</b></td><td colspan="3">= 政绩升职；政绩升职失败（政绩不够、或被攻击挡下）
         就再试一次贿赂升职——走到贿赂那一步就怕举报</td></tr>
-    <tr><td><b>一纸调令</b><br><span class="qsub">红二代 · 每局一次</span></td><td>先政绩，不够用钱</td>
-        <td>拦不住</td><td>拦不住（用钱那笔记警告）</td></tr>
+    ${c.origin_red_family_card ? `<tr><td><b>一纸调令</b><br><span class="qsub">红二代 · 每局一次</span></td><td>先政绩，不够用钱</td>
+        <td>拦不住</td><td>拦不住（用钱那笔记警告）</td></tr>` : ""}
   </tbody>
 </table>
 <p class="rsub"><b>升国家主席</b>（${esc(c.rank_names[top])}→${esc(c.rank_names[top + 1])}）：
 钱 <b>${lastMoney}</b> 和政绩 <b>${lastMerit}</b> <b>都要够、都要花</b>。
 怕谁由你打的卡决定：政绩升职只怕攻击（被拦只是暂缓、一分不亏），贿赂升职只怕举报，
-通用升职先按政绩升职算、被攻击挡下就再试贿赂升职，两样都挨就失败。工龄和一纸调令都升不到主席；
+通用升职先按政绩升职算、被攻击挡下就再试贿赂升职，两样都挨就失败。工龄${c.origin_red_family_card ? "和一纸调令都" : ""}升不到主席；
 同一轮多人登顶只留家底最厚的那个。</p>
 `;
 }

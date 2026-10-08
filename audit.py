@@ -446,6 +446,10 @@ def learned_vs_smart(args: tuple[str, str, int, int]) -> tuple[str, float, int]:
     mode, policy_path, n_games, seed = args[:4]
     other = ai.load_policy(args[4]) if len(args) > 4 and args[4] else None  # 对照组：另一份权重，默认手写
     cfg = HAND_CFG
+    if len(args) > 5 and args[5] and args[5] != "base":
+        import sweep  # 规则变体（比如 dogpile：全桌都按围堵默契打）
+
+        cfg = dataclasses.replace(sweep.build(args[5]), ai_policy="")
     theta = ai.load_policy(policy_path)
     rng = random.Random(seed)
 
@@ -711,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--policy", default="", help="学习型 AI 的权重文件：和手写 AI 同桌对决（用 --duel-games 局数）")
     ap.add_argument("--dynamic", type=int, default=0,
                     help="动态性测试：被测 AI 坐进各种怪桌，每桌跑这么多局（要和 --policy 一起用才有学习型对照）")
+    ap.add_argument("--variant", default="", help="对决用 sweep.py 的规则变体（比如 dogpile）")
     ap.add_argument("--policy-b", default="", help="和 --policy 一起用：对照组换成另一份学习型权重（默认手写）")
     ap.add_argument("--force-block", action="store_true",
                     help="和 --policy 一起用：学习型'头号挑战者必拦'vs 照常，各坐进 5 个学习型里")
@@ -746,7 +751,8 @@ def main(argv: list[str] | None = None) -> int:
         futs = [ex.submit(audit_games, j) for j in jobs]
         efuts = [ex.submit(exploit, (s, args.exploit, args.seed + i, args.audit_policy))
                  for i, s in enumerate(scripted)] if args.exploit else []
-        pfuts = [ex.submit(learned_vs_smart, (m, args.policy, args.duel_games, args.seed + k, args.policy_b))
+        pfuts = [ex.submit(learned_vs_smart, (m, args.policy, args.duel_games, args.seed + k,
+                                              args.policy_b, args.variant))
                  for k, m in enumerate(["learned_in_smart", "smart_in_learned"] * 2)] \
             if args.policy and not args.dynamic and not args.force_block else []
         ffuts = [ex.submit(force_block_duel, (flag, args.policy, args.duel_games, args.seed + k))
