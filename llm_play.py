@@ -286,6 +286,12 @@ def rules_text(cfg: Config) -> str:
     origins = "\n".join(
         f"  - {o['name']}「{o['skill']}」：{o['description']}" for o in cfg.origin_definitions
     )
+    import rules
+
+    hat = " / ".join(f"{ranks[r]} {rules.work_merit(cfg.attack_merit_penalty, r, None, cfg)}"
+                     for r in range(cfg.president_rank))
+    hat_reward = " / ".join(f"{ranks[r]} {rules.work_merit(cfg.attack_hat_reward, r, None, cfg)}"
+                            for r in range(cfg.president_rank))
     return f"""【游戏：Meritocracy（官场升职）】6 人，最多 {cfg.max_rounds} 轮。官职：{' < '.join(ranks)}。
 目标：第一个当上国家主席的人获胜（同一轮多人登顶，家底厚的那个当选）；打满 {cfg.max_rounds} 轮没人登顶就比官职和资源。
 升职门槛（升一级要打一张对应的晋升卡）：{steps}。升职后多余的政绩会打折，钱只扣门槛。
@@ -296,12 +302,16 @@ def rules_text(cfg: Config) -> str:
   - 中饱私囊：加不少钱，但这是贪污；以权谋私：钱少一点、顺带一点政绩，同样算贪污
   - 匿名举报（选一个人）：他这轮如果贪污或花钱买官，就被查实——本轮赃款没收（举报人分一半，扣 1 块跑腿费），
     记一次降职警告（攒满 {cfg.warnings_before_demotion} 次降一级），买的官作废、钱打水漂；他这轮没有经济问题就白打
-  - 政治攻击（选一个人）：抢走他这轮埋头工作政绩的一半；他要是靠政绩升职，就把这次升职暂缓；他这轮要是没干活，攻击者记一点功
+  - 政治攻击（选一个人）：抢走他这轮埋头工作政绩的一半（几个人攻击同一人就平分这一半）；
+    他要是靠政绩升职，就把这次升职暂缓（贫农例外，见出身）；
+    他这轮一点政绩都没产（没干活）就"戴帽子"：扣他政绩 {hat}（按他的官职），每个攻击者记功 {hat_reward}（按攻击者官职）
   - 晋升卡（够门槛才能升一级，一轮最多升一级）：
       政绩升职 = 只花政绩（政绩不够就白打，不会掏钱；被攻击会暂缓）
       贿赂升职 = 只花钱（钱不够就白打；被举报查实就作废、钱打水漂）
       通用升职 = 先试政绩，政绩不够或被攻击按住时改成掏钱
     主席那一步钱和政绩都要够；打政绩升职就怕攻击，打贿赂升职就怕举报
+工龄：连续 {cfg.tenure_required} 轮官职没变（没升没降），自动升一级，不用晋升卡；记一次降职警告会把工龄清零；
+工龄{'也能' if cfg.tenure_can_reach_president else '升不到'}国家主席。
 钱是暗的（别人看不到你有多少钱），政绩和官职是公开的。每轮公布"坊间传闻"：点名本轮到手钱最多的人（工资+没被查实的贪污+举报分到的赃款），不报金额。
 全局事件（反腐风暴会查办贪得多的人、经济好坏会让金钱收益翻倍或减半、重点项目让埋头工作加政绩……）在出牌**之后**才公布。
 克制关系：攻击克制走政绩路线的人，举报克制走金钱路线（贪污、买官）的人。

@@ -288,6 +288,7 @@ class SmartAgent:
         self.est_corrupt_attempts = 0.0  # 估计发生过多少次贪污
         # 别人眼里的我：只用公开信息、按和对手一样的规则更新
         self.self_model = OpponentModel()
+        self._self_model_seeded = False
         self.table: dict[str, float] = dict(TABLE_PRIOR)
         self.want_features = False  # LearnedAgent 打开：score_combos 顺便产出每个组合的特征
         self.last_features: list[dict[str, float]] = []
@@ -322,9 +323,12 @@ class SmartAgent:
         """
         players = {p["id"]: p for p in public["players"]}
         self._seen_public, self._seen_private = public, private  # 给 _contender 用
-        for pid in players:
-            if pid != self.id:
-                self.models.setdefault(pid, OpponentModel())
+        for pid, p in players.items():
+            if pid != self.id and pid not in self.models:
+                self.models[pid] = OpponentModel(money_est=self._start_money(p))
+        if not self._self_model_seeded and self.id in players:
+            self.self_model.money_est = self._start_money(players[self.id])
+            self._self_model_seeded = True
 
         result = public.get("last_result")
         if result is None or result.get("round") == self._last_round_seen:
@@ -484,6 +488,13 @@ class SmartAgent:
                 model.money_est = max(0.0, model.money_est)
 
         self._prev_players = players
+
+    def _start_money(self, p: dict[str, Any]) -> float:
+        """开局时公开可知的存款：富二代白拿 origin_old_money_start，其他人 0。
+        以前对手模型一律从 0 起算，富二代的存款一直被少估 15 块——
+        大模型 200 局的反馈里专门点出"富二代显示 0~16、实际几十"。"""
+        oid = (self.cfg.origin(p.get("origin")) or {}).get("id")
+        return float(self.cfg.origin_old_money_start) if oid == "RICH" else 0.0
 
     def _update_table(self, facts, players, result) -> None:
         """这桌最近的风气：举报多凶、攻击多凶、有多少人在贪、多少人在干活、我自己挨了多少。"""

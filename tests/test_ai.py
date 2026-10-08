@@ -1065,3 +1065,18 @@ class TestLearnedTargeting(unittest.TestCase):
         picks = ai.choose(game, 1, pool)
         self.assertIn(("ATTACK", 2), [(p["action"], p["target"]) for p in picks])
         self.assertTrue(any(k.startswith("A:") for g in pool.get(1).trace for k in g))
+
+
+class TestStartingMoneyEstimate(unittest.TestCase):
+    def test_rich_opponent_starts_with_his_old_money(self):
+        """富二代开局白拿的钱是公开可知的：对手模型从这个数起算，不能从 0 起算。"""
+        game = Game(game_id="sm", cfg=CFG, rng=random.Random(1))
+        for i in range(3):
+            game.add_player(f"P{i + 1}")
+        game.players[2].origin = Origin.RICH
+        game.players[3].origin = Origin.PEASANT
+        game.start_game()
+        agent = ai.SmartAgent(1, cfg=CFG, rng=random.Random(0))
+        agent.observe(game.public_state(), game.private_state(1))
+        self.assertEqual(agent.models[2].money_est, CFG.origin_old_money_start)
+        self.assertEqual(agent.models[3].money_est, 0.0)
