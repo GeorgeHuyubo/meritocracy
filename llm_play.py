@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import subprocess
@@ -52,6 +53,21 @@ CARD_NAMES = {
 # ---------------------------------------------------------------------------
 
 
+# 网关的临时性错误（限流 / 过载 / 5xx / 网络）：退避重试，不算"退回程序 AI"
+TRANSIENT = ("rate", "limit", "overload", "429", "529", "500", "502", "503", "504",
+             "timeout", "Timeout", "ECONN", "network", "Network", "API Error", "temporarily")
+MAX_TRIES = 8
+
+
+def _transient(msg: str) -> bool:
+    return any(t in msg for t in TRANSIENT)
+
+
+def _backoff(attempt: int) -> None:
+    base = float(os.environ.get("LLM_BACKOFF_BASE", "10"))
+    time.sleep(min(300, base * 2 ** attempt))  # 10 秒、20、40……最长 5 分钟
+
+
 class ClaudeCLI:
     """每次调用起一个 `claude -p`，在空的临时目录里跑（不加载仓库的上下文）。"""
 
@@ -61,8 +77,22 @@ class ClaudeCLI:
         self.cwd = tempfile.mkdtemp(prefix="meritocracy_llm_")
         self.calls = 0
         self.seconds = 0.0
+        self.retries = 0
+        self.restarts = 0
 
     def ask(self, prompt: str) -> str:
+        for attempt in range(MAX_TRIES):
+            try:
+                return self._ask_once(prompt)
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                if attempt == MAX_TRIES - 1 or not (_transient(str(exc))
+                                                   or isinstance(exc, subprocess.TimeoutExpired)):
+                    raise
+                self.retries += 1
+                _backoff(attempt)
+        raise RuntimeError("重试次数用完")
+
+    def _ask_once(self, prompt: str) -> str:
         t0 = time.time()
         # 提示词走标准输入：几百份反馈拼起来会超过命令行参数的长度上限
         proc = subprocess.run(
@@ -87,47 +117,86 @@ class ClaudeSession:
     开局把规则和身份放进系统提示（读一次），之后每轮只发"这轮的新局面和手牌"；
     之前几轮发生过什么它自己记得，赛后反馈也在同一个会话里问。
     换掉 Claude Code 自带的大段系统提示、关掉工具，每次调用快很多。
+
+    过夜跑的可靠性：网关临时出错就退避重试；进程死掉 / 卡住就重开一个
+    （系统提示照旧，前面几轮的记忆没了，但每轮发的内容本来就带着当前局面和上一轮经过）。
+    stderr 写进临时文件——接成管道又没人读的话，写满 64KB 进程会卡死。
     """
 
     def __init__(self, model: str, system_prompt: str, extra: list[str], timeout: int = 240) -> None:
-        import queue
-        import threading
-
+        self.model, self.system_prompt, self.extra = model, system_prompt, list(extra)
         self.timeout = timeout
         self.calls = 0
         self.seconds = 0.0
+        self.retries = 0
+        self.restarts = 0
         self.cwd = tempfile.mkdtemp(prefix="meritocracy_llm_")
+        self._start()
+
+    def _start(self) -> None:
+        import queue
+        import threading
+
+        self.err = open(Path(self.cwd) / "stderr.log", "a", encoding="utf-8")
         self.proc = subprocess.Popen(
             ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-             "--verbose", "--model", model, "--system-prompt", system_prompt, *extra],
-            cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+             "--verbose", "--model", self.model, "--system-prompt", self.system_prompt, *self.extra],
+            cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
             text=True, bufsize=1,
         )
         self.lines: "queue.Queue[str | None]" = queue.Queue()
+        proc, lines = self.proc, self.lines
 
         def pump() -> None:
-            for line in self.proc.stdout:  # type: ignore[union-attr]
-                self.lines.put(line)
-            self.lines.put(None)
+            for line in proc.stdout:  # type: ignore[union-attr]
+                lines.put(line)
+            lines.put(None)
 
         threading.Thread(target=pump, daemon=True).start()
 
+    def _restart(self) -> None:
+        self.restarts += 1
+        try:
+            self.proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        self._start()
+
     def ask(self, text: str) -> str:
+        note = ""
+        for attempt in range(MAX_TRIES):
+            try:
+                return self._ask_once(note + text)
+            except _SessionDied:
+                if attempt == MAX_TRIES - 1:
+                    raise RuntimeError("会话进程反复退出") from None
+                self._restart()
+                note = "（你的会话中断后重开了，前面几轮的经过可能不记得了，下面是当前局面。）\n"
+            except RuntimeError as exc:
+                if attempt == MAX_TRIES - 1 or not _transient(str(exc)):
+                    raise
+                self.retries += 1
+                _backoff(attempt)
+        raise RuntimeError("重试次数用完")
+
+    def _ask_once(self, text: str) -> str:
         import queue
 
         t0 = time.time()
         msg = {"type": "user", "message": {"role": "user", "content": text}}
-        self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")  # type: ignore[union-attr]
-        self.proc.stdin.flush()  # type: ignore[union-attr]
+        try:
+            self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")  # type: ignore[union-attr]
+            self.proc.stdin.flush()  # type: ignore[union-attr]
+        except (BrokenPipeError, OSError, ValueError):
+            raise _SessionDied() from None
         deadline = t0 + self.timeout
         while True:
             try:
                 line = self.lines.get(timeout=max(0.1, deadline - time.time()))
             except queue.Empty:
-                raise RuntimeError("会话超时") from None
+                raise _SessionDied() from None  # 卡住了：当成进程死掉，重开
             if line is None:
-                err = self.proc.stderr.read()[-300:] if self.proc.stderr else ""
-                raise RuntimeError(f"会话进程退出了：{err}")
+                raise _SessionDied()
             line = line.strip()
             if not line.startswith("{"):
                 continue
@@ -145,6 +214,14 @@ class ClaudeSession:
             self.proc.wait(timeout=10)
         except Exception:  # noqa: BLE001
             self.proc.kill()
+        try:
+            self.err.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _SessionDied(Exception):
+    """常驻会话的进程退出了或者卡住了。"""
 
 
 class MockBackend:
@@ -152,6 +229,8 @@ class MockBackend:
 
     calls = 0
     seconds = 0.0
+    retries = 0
+    restarts = 0
 
     def ask(self, prompt: str) -> str:
         self.calls += 1
@@ -159,6 +238,7 @@ class MockBackend:
             return json.dumps({
                 "strongest": "官二代", "weakest": "小镇做题家·会计", "fun": 6,
                 "unfair": "（mock）", "experience": "（mock）", "suggestion": "（mock）",
+                "lessons": ["（mock 心得）"],
             }, ensure_ascii=False)
         return "MOCK"
 
@@ -333,10 +413,16 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
 {{"threat": 你认为离赢最近的对手id, "picks": [{{"index": 手牌序号, "target": 目标id或null}}, ...], "family": false, "reason": "一两句话：谁最可能先赢、你这轮能不能赢、为什么这样出"}}"""
 
 
-def session_system_prompt(cfg: Config, name: str, origin_name: str) -> str:
+def session_system_prompt(cfg: Config, name: str, origin_name: str, notebook: str = "") -> str:
+    memo = (f"""
+
+【你过去对局积累的心得（笔记本）】
+这是你之前打过的很多局总结下来的经验，参考着用，但不一定全对，以眼前的局面为准：
+{notebook}
+""" if notebook.strip() else "")
     return f"""你在玩一个桌游，扮演其中一名玩家，目标是赢。不要使用任何工具，直接回答。
 
-{rules_text(cfg)}
+{rules_text(cfg)}{memo}
 
 ====================
 你是 {name}，出身「{origin_name}」。每轮我会告诉你最新的局面和你的手牌，
@@ -396,6 +482,79 @@ FEEDBACK_IN_SESSION = """【对局结束】{reason}
   "unfair": "你觉得哪条规则不公平或有问题（没有就写无）",
   "fun": 1到10的整数（这局好不好玩）, "experience": "这局的体验：哪里爽、哪里憋屈",
   "suggestion": "你最想改的一条规则"}}"""
+
+
+LESSONS_IN_SESSION = """【对局结束】{reason}
+最后一轮：{last}
+
+这局打完了。请总结 1~3 条**下一局能用上的心得**（具体、可执行：什么局面该怎么打、哪个身份该怎么用 /
+怎么对付、哪种判断这局被证明是错的）。**只输出一个 JSON**：
+{{"lessons": ["……", "……"]}}"""
+
+FEEDBACK_AND_LESSONS_IN_SESSION = FEEDBACK_IN_SESSION.replace(
+    '"suggestion": "你最想改的一条规则"}}',
+    '"suggestion": "你最想改的一条规则",\n  "lessons": ["下一局能用上的心得，1~3 条，具体可执行"]}}')
+
+NOTEBOOK_LIMIT = 2600  # 字；初始版（入门套路）约 1800 字，留出学新东西的空间
+
+
+class Notebook:
+    """六个座位共用的跨局笔记本：每局开局读最新版，打完把六份心得合并进去（加锁，同时结束的几局不会互相覆盖）。"""
+
+    def __init__(self, out_dir: Path, model: str, backend_name: str, seed: str = "") -> None:
+        import threading
+
+        self.path = out_dir / "notebook.md"
+        self.history = out_dir / "notebook_history"
+        self.history.mkdir(exist_ok=True)
+        # 初始版：从 Python AI 的训练经验写的入门套路（llm_notebook_seed.md），让它一上来不是纯新手
+        if not self.path.exists() and seed and Path(seed).exists():
+            text = Path(seed).read_text(encoding="utf-8")
+            self.path.write_text(text, encoding="utf-8")
+            (self.history / "seed.md").write_text(text, encoding="utf-8")
+        self.lock = threading.Lock()
+        self.mock = backend_name == "mock"
+        self.curator = None if self.mock else ClaudeCLI(model, timeout=300)
+        self.version = len(list(self.history.glob("after_game_*.md")))
+
+    def read(self) -> tuple[str, int]:
+        with self.lock:
+            text = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+            return text, self.version
+
+    def merge(self, game_no: int, summary: str, lessons: list[str], cfg: Config) -> str:
+        with self.lock:
+            old = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+            if self.mock:
+                new = (old + "\n" + f"- 第 {game_no} 局：" + "；".join(lessons[:2]))[-NOTEBOOK_LIMIT:]
+            else:
+                prompt = (rules_text(cfg) + f"""
+
+====================
+你在维护一本**跨局心得笔记本**：同一个 AI 打了很多局这个游戏，每局结束后六个座位各写几条心得，你负责把它们
+合并进笔记本，让下一局的自己打得更好。
+
+现在的笔记本：
+{old or "（还是空的）"}
+
+刚结束的这一局：{summary}
+六个座位这局写的心得：
+""" + "\n".join(f"- {x}" for x in lessons) + f"""
+
+请输出**更新后的完整笔记本**（Markdown，{NOTEBOOK_LIMIT} 字以内，可以比现在长一点但别超），分三节：
+## 通用策略
+## 各身份怎么打 / 怎么对付
+## 容易犯的错
+要求：合并重复的；被多局证明有效的留下、措辞更精炼；和新证据矛盾的改掉或删掉；具体、可执行，不要空话。
+只输出笔记本正文。""")
+                new = self.curator.ask(prompt).strip()[:NOTEBOOK_LIMIT + 500]
+            self.path.write_text(new, encoding="utf-8")
+            self.version += 1
+            (self.history / f"after_game_{game_no:03d}_v{self.version:03d}.md").write_text(new, encoding="utf-8")
+            return new
+
+
+NOTEBOOK: "Notebook | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +637,7 @@ def play_one(args: tuple) -> dict[str, Any]:
     g, seed, model, backend_name, out_dir = args[:5]
     extra = list(args[5]) if len(args) > 5 else []
     variant = args[6] if len(args) > 6 else "base"
+    want_feedback = args[7] if len(args) > 7 else True
     cfg = variant_cfg(variant)
     rng = random.Random(seed)
     mock = backend_name == "mock"
@@ -493,10 +653,12 @@ def play_one(args: tuple) -> dict[str, Any]:
         game.players[pid].origin = Origin(oid)
     pool = ai.make_pool(cfg, rng)
     game.start_game()
+    notebook_text, notebook_version = NOTEBOOK.read() if NOTEBOOK is not None else ("", None)
     if backend_name == "session":
         for pid, p in game.players.items():
             oname = (cfg.origin(p.origin.value) or {}).get("name", "?")
-            sessions[pid] = ClaudeSession(model, session_system_prompt(cfg, p.name, oname), extra)
+            sessions[pid] = ClaudeSession(
+                model, session_system_prompt(cfg, p.name, oname, notebook_text), extra)
 
     history: list[str] = []
     memory: dict[int, list[str]] = defaultdict(list)
@@ -527,12 +689,17 @@ def play_one(args: tuple) -> dict[str, Any]:
             if not game.is_over:
                 game.advance_round()
 
-        if sessions:
-            # 会话模式：整局都在它的上下文里，只要告诉它结局
-            fb_futs = {pid: ex.submit(sessions[pid].ask, FEEDBACK_IN_SESSION.format(
+        fb_futs = {}
+        learning = NOTEBOOK is not None
+        if sessions and (want_feedback or learning):
+            # 会话模式：整局都在它的上下文里，只要告诉它结局。
+            # 笔记本模式每局都要心得；收反馈的局心得和反馈一起交
+            tpl = (FEEDBACK_AND_LESSONS_IN_SESSION if learning else FEEDBACK_IN_SESSION) \
+                if want_feedback else LESSONS_IN_SESSION
+            fb_futs = {pid: ex.submit(sessions[pid].ask, tpl.format(
                            reason=game.game_over_reason, last=history[-1] if history else ""))
                        for pid in sorted(game.players)}
-        else:
+        elif want_feedback:
             fb_futs = {pid: ex.submit(backend.ask, feedback_prompt(cfg, game, pid, history, memory[pid]))
                        for pid in sorted(game.players)}
         feedback = {}
@@ -541,10 +708,32 @@ def play_one(args: tuple) -> dict[str, Any]:
                 feedback[pid] = extract_json(f.result())
             except Exception as exc:  # noqa: BLE001 反馈拿不到不影响对局数据
                 feedback[pid] = {"error": str(exc)}
+    lessons: list[str] = []
+    if NOTEBOOK is not None:
+        for pid, fb in feedback.items():
+            o = game.players[pid]
+            tag = f"[{(cfg.origin(o.origin.value) or {}).get('name', '?')}{'·冠军' if pid in game.winners else ''}] "
+            lessons += [tag + str(x) for x in (fb.get("lessons") or [])[:3]]
+        if not want_feedback:  # 只要了心得的局，不当反馈统计
+            feedback = {}
+        if mock:
+            lessons = lessons or [f"[mock] 第 {g} 局的心得"]
+        winner_txt = "、".join(f"{game.players[w].name}（{(cfg.origin(game.players[w].origin.value) or {}).get('name')}）"
+                              for w in game.winners)
+        try:
+            NOTEBOOK.merge(g, f"{game.round_number} 轮结束，{winner_txt}获胜。{game.game_over_reason}",
+                           lessons, cfg)
+        except Exception as exc:  # noqa: BLE001 笔记本更新失败不影响对局数据
+            stats["notebook_errors"] += 1
+            lessons.append(f"（笔记本更新失败：{exc}）")
     for s in sessions.values():
         backend.calls += s.calls
         backend.seconds += s.seconds
+        backend.retries += s.retries
+        backend.restarts += s.restarts
         s.close()
+    stats["gateway_retries"] += backend.retries
+    stats["session_restarts"] += backend.restarts
 
     players = []
     for p in game.ordered_players():
@@ -558,6 +747,7 @@ def play_one(args: tuple) -> dict[str, Any]:
         "president": any(p.rank >= cfg.president_rank for p in game.players.values()),
         "reason": game.game_over_reason, "players": players, "history": history,
         "decisions": decisions, "stats": dict(stats),
+        "notebook_version": notebook_version, "lessons": lessons,
         "llm_calls": backend.calls, "llm_seconds": round(backend.seconds, 1),
         "wall_seconds": round(time.time() - t0, 1),
     }
@@ -571,6 +761,17 @@ def play_one(args: tuple) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _origin_in(text: str, origin_name: dict[str, str]) -> str:
+    """反馈里写的身份（"红二代「硬保」""富二代（老刘）"……）归到标准身份名；认不出就原样。"""
+    best, pos = text, 10 ** 9
+    for name in origin_name.values():
+        for key in {name, name.split("·")[-1]}:
+            i = text.find(key)
+            if i != -1 and i < pos:
+                best, pos = name, i
+    return best
+
+
 def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str:
     games = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out_dir.glob("game_*.json"))]
     if not games:
@@ -578,6 +779,8 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     variant = games[0].get("variant", "base")
     cfg = variant_cfg(variant)
     redraw_by: Counter = Counter()
+    atk_recv: Counter = Counter()
+    rep_recv: Counter = Counter()
     n = len(games)
     wins: Counter = Counter()
     seats: Counter = Counter()
@@ -601,8 +804,8 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
                 wins[o] += 1.0 / max(1, len(winners))
             fb = p.get("feedback") or {}
             if "strongest" in fb:
-                votes_strong[str(fb["strongest"])] += 1
-                votes_weak[str(fb["weakest"])] += 1
+                votes_strong[_origin_in(str(fb["strongest"]), origin_name)] += 1
+                votes_weak[_origin_in(str(fb["weakest"]), origin_name)] += 1
                 try:
                     fun = int(fb.get("fun"))
                     fun_by_origin[o].append(fun)
@@ -619,6 +822,9 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
             redraw_by[origin_of.get(d["pid"], "?")] += d.get("redraws", 0)
             for p in d["picks"]:
                 cards[p.get("action")] += 1
+                t = p.get("target")
+                if t in origin_of and p.get("action") in ("ATTACK", "REPORT"):
+                    (atk_recv if p["action"] == "ATTACK" else rep_recv)[origin_of[t]] += 1
 
     # 拦人：攻击打在省级身上的比例、第一个到省级的人夺冠率（从每轮"结束后：…"的官职里推）
     top_name = cfg.rank_name(cfg.president_rank - 1)
@@ -657,12 +863,20 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     calls = sum(g["llm_calls"] for g in games)
     secs = sum(g["llm_seconds"] for g in games)
     lines.append(f"- 模型调用 {calls} 次，平均每次 {secs / max(1, calls):.1f} 秒")
-    lines += ["", "## 各身份战绩（小样本，误差很大：每个身份只有约 "
-              f"{n} 局，胜率 ±{100 * 1.96 * (0.167 * 0.833 / max(1, n)) ** 0.5:.0f} 个点）", "",
-              "| 身份 | 胜率 | 平均终局官职 | 玩家打分（平均） | 被评为最强 | 被评为最弱 |", "|---|---|---|---|---|---|"]
+    ref_path = RUN_DIR / "python_reference.json"
+    ref = json.loads(ref_path.read_text(encoding="utf-8")) if ref_path.exists() else {}
+    ref_win = ref.get(variant, {}).get("win", {})
+    ta, tr = sum(atk_recv.values()) or 1, sum(rep_recv.values()) or 1
+    lines += ["", f"## 各身份战绩（每个身份约 {n} 局）", "",
+              "| 身份 | 胜率 | ±95% | Python AI 同规则 | 平均终局官职 | 挨攻击份额 | 被举报份额 | 玩家打分 | 被评为最强 | 被评为最弱 |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for o in sorted(seats, key=lambda k: -wins[k]):
         fun = fun_by_origin.get(o, [])
-        lines.append(f"| {o} | {100 * wins[o] / seats[o]:.0f}% | {rank_sum[o] / seats[o]:.2f} | "
+        p = wins[o] / seats[o]
+        half = 196 * (p * (1 - p) / seats[o]) ** 0.5
+        lines.append(f"| {o} | {100 * p:.1f}% | ±{half:.1f} | "
+                     + (f"{ref_win[o]:.1f}%" if o in ref_win else "—")
+                     + f" | {rank_sum[o] / seats[o]:.2f} | {100 * atk_recv[o] / ta:.0f}% | {100 * rep_recv[o] / tr:.0f}% | "
                      f"{(sum(fun) / len(fun)) if fun else 0:.1f} | {votes_strong.get(o, 0)} | {votes_weak.get(o, 0)} |")
     lines += ["", "## 出牌习惯（所有玩家打出的牌）", ""]
     tot = sum(cards.values()) or 1
@@ -673,6 +887,50 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     lines += ["", "## 体验打分", ""]
     for k, v in fun_by_result.items():
         lines.append(f"- {k}：平均 {sum(v) / len(v):.1f} / 10（{len(v)} 份）")
+    nb = out_dir / "notebook.md"
+    if nb.exists():
+        lines += ["", "## 学习曲线（跨局笔记本：按局号每 25 局一段）", "",
+                  "| 局号 | 平均局长 | 攻击打在省级 | 第一个到省级的人夺冠 | 换牌/局 | 体验 | 胜率最高的身份 |",
+                  "|---|---|---|---|---|---|---|"]
+        for lo in range(0, max(g["game"] for g in games) + 1, 25):
+            seg = [g for g in games if lo <= g["game"] < lo + 25]
+            if not seg:
+                continue
+            a_t = a_n = f_n = f_w = rd = 0
+            seg_fun: list[int] = []
+            seg_win: Counter = Counter()
+            for gm in seg:
+                names = {p["pid"]: p["name"] for p in gm["players"]}
+                ra: dict[int, dict[str, str]] = {}
+                for line in gm["history"]:
+                    m = re.match(r"第 (\d+) 轮.*结束后：(.*)$", line)
+                    if m:
+                        ra[int(m.group(1))] = dict(x.split(" ", 1) for x in m.group(2).split("、") if " " in x)
+                for d in gm["decisions"]:
+                    rd += d.get("redraws", 0)
+                    for p in d["picks"]:
+                        if p.get("action") == "ATTACK" and p.get("target") in names:
+                            a_n += 1
+                            a_t += ra.get(d["round"] - 1, {}).get(names[p["target"]]) == top_name
+                for r in sorted(ra):
+                    tops = [nm for nm, rk in ra[r].items() if rk in (top_name, cfg.rank_name(cfg.president_rank))]
+                    if tops:
+                        f_n += 1
+                        f_w += any(p["winner"] and p["name"] == tops[0] for p in gm["players"])
+                        break
+                w = [p for p in gm["players"] if p["winner"]]
+                for p in w:
+                    seg_win[origin_name.get(p["origin"], p["origin"])] += 1 / len(w)
+                for p in gm["players"]:
+                    try:
+                        seg_fun.append(int((p.get("feedback") or {}).get("fun")))
+                    except (TypeError, ValueError):
+                        pass
+            best = "、".join(f"{o} {100 * v / len(seg):.0f}%" for o, v in seg_win.most_common(2))
+            lines.append(f"| {lo}~{lo + len(seg) - 1} | {sum(g['rounds'] for g in seg) / len(seg):.1f} | "
+                         f"{100 * a_t / max(1, a_n):.0f}% | {100 * f_w / max(1, f_n):.0f}% | {rd / len(seg):.1f} | "
+                         f"{(sum(seg_fun) / len(seg_fun)) if seg_fun else 0:.1f} | {best} |")
+        lines += ["", "## 最终笔记本", "", nb.read_text(encoding="utf-8")]
     lines += ["", "## 投票", "",
               "最强：" + "、".join(f"{k} {v}" for k, v in votes_strong.most_common()),
               "", "最弱：" + "、".join(f"{k} {v}" for k, v in votes_weak.most_common())]
@@ -695,7 +953,10 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
             lines += ["", f"（归纳失败：{exc}）"]
     lines += ["", "## 全部反馈原文", ""] + [f"- {t}" for t in texts]
     text = "\n".join(lines)
-    (out_dir / "report.md").write_text(text, encoding="utf-8")
+    # 带模型归纳的完整报告写 report.md；快速报告（阶段报告 / 预览）写 report_quick.md，
+    # 免得覆盖掉之前那份花了几十次调用归纳出来的
+    name = "report.md" if (summarize and backend_name != "mock") else "report_quick.md"
+    (out_dir / name).write_text(text, encoding="utf-8")
     return text
 
 
@@ -714,6 +975,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--report", default="", help="只对这个目录出报告")
     ap.add_argument("--no-summary", action="store_true", help="报告里不请模型归纳反馈")
+    ap.add_argument("--resume", default="", help="接着这个目录跑：已经跑完的局跳过")
+    ap.add_argument("--feedback-every", type=int, default=1,
+                    help="每 N 局收一次赛后反馈（局号能被 N 整除的那些局；1 = 每局都收）")
+    ap.add_argument("--notebook", action="store_true",
+                    help="跨局学习：六个座位共用一本心得笔记本，每局开局读最新版、打完把心得合并进去")
+    ap.add_argument("--seed-notebook", default=str(Path(__file__).resolve().parent / "llm_notebook_seed.md"),
+                    help="笔记本的初始版（入门套路）；传空字符串就从空白开始")
+    ap.add_argument("--min-free-gb", type=float, default=3.0,
+                    help="开新一局前系统可用内存低于这么多 GB 就先等（避免几十个 claude 进程把机器拖死）")
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -722,29 +992,86 @@ def main(argv: list[str] | None = None) -> int:
         print(report(Path(args.report), not args.no_summary, args.model, args.backend))
         return 0
     variant_cfg(args.variant)  # 变体名写错就当场报
-    out_dir = RUN_DIR / (time.strftime("%Y%m%d-%H%M%S") + f"-{args.variant.replace('+', '_')}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"输出目录：{out_dir}", flush=True)
+    if args.resume:
+        out_dir = Path(args.resume)
+        done_games = {int(p.stem.split("_")[1]) for p in out_dir.glob("game_*.json")}
+        print(f"接着跑：{out_dir}（已完成 {len(done_games)} 局）", flush=True)
+    else:
+        out_dir = RUN_DIR / (time.strftime("%Y%m%d-%H%M%S") + f"-{args.variant.replace('+', '_')}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        done_games = set()
+        print(f"输出目录：{out_dir}", flush=True)
     import shlex
 
+    global NOTEBOOK
+    if args.notebook:
+        NOTEBOOK = Notebook(out_dir, args.model, args.backend, args.seed_notebook)
+        print(f"跨局笔记本：{NOTEBOOK.path}（当前第 {NOTEBOOK.version} 版）", flush=True)
     extra = shlex.split(args.extra)
-    jobs = [(g, args.seed * 1000 + g, args.model, args.backend, out_dir, extra, args.variant)
-            for g in range(args.games)]
+    todo = [g for g in range(args.games) if g not in done_games]
+    jobs = [(g, args.seed * 1000 + g, args.model, args.backend, out_dir, extra, args.variant,
+             g % max(1, args.feedback_every) == 0, args.min_free_gb)
+            for g in todo]
+    log = open(out_dir / "progress.log", "a", encoding="utf-8")
+    t_start = time.time()
     done = 0
+    totals: Counter = Counter()
     with ThreadPoolExecutor(max_workers=args.parallel) as ex:
-        for res in ex.map(lambda j: _safe(play_one, j), jobs):
+        for res in ex.map(lambda j: _safe(_wait_for_memory_then_play, j), jobs):
             done += 1
+            elapsed = time.time() - t_start
+            rate = done / max(1e-9, elapsed / 60)
+            eta = (len(todo) - done) / max(1e-9, rate)
+            finished = len(done_games) + done
             if "error" in res:
-                print(f"[{done}/{args.games}] 第 {res['game']} 局出错：{res['error']}", flush=True)
-                continue
-            w = [p for p in res["players"] if p["winner"]]
-            print(f"[{done}/{args.games}] 第 {res['game']} 局：{res['rounds']} 轮，冠军 "
-                  + "、".join(f"{p['name']}({p['origin']})" for p in w)
-                  + f"，模型调用 {res['llm_calls']} 次，用时 {res['wall_seconds']:.0f} 秒"
-                  + (f"，退回程序 AI {res['stats'].get('llm_fallback', 0)} 次" if res["stats"].get("llm_fallback") else ""),
-                  flush=True)
+                totals["game_errors"] += 1
+                line = f"[{finished}/{args.games}] 第 {res['game']} 局出错：{res['error'][:300]}"
+            else:
+                st = res["stats"]
+                for k in ("llm_fallback", "llm_retry", "gateway_retries", "session_restarts"):
+                    totals[k] += st.get(k, 0)
+                w = [p for p in res["players"] if p["winner"]]
+                line = (f"[{finished}/{args.games}] 第 {res['game']} 局：{res['rounds']} 轮，冠军 "
+                        + "、".join(f"{p['name']}({p['origin']})" for p in w)
+                        + f"，用时 {res['wall_seconds']:.0f} 秒")
+            line += (f"  | 每分钟 {rate:.2f} 局，预计还要 {eta / 60:.1f} 小时"
+                     f" | 退回程序AI {totals['llm_fallback']}、网关重试 {totals['gateway_retries']}、"
+                     f"会话重开 {totals['session_restarts']}、整局出错 {totals['game_errors']}"
+                     f" | claude 进程内存 {_claude_rss_gb():.1f} GB、系统可用 {_free_gb():.1f} GB")
+            print(line, flush=True)
+            log.write(time.strftime("%H:%M:%S ") + line + "\n")
+            log.flush()
+            if finished % 100 == 0:
+                report(out_dir, False, args.model, args.backend)  # 阶段报告：不调模型，秒出
+    log.close()
     print("\n" + report(out_dir, not args.no_summary, args.model, args.backend))
     return 0
+
+
+def _free_gb() -> float:
+    """macOS 可用内存（空闲 + 可回收），GB。拿不到就返回一个很大的数（不拦）。"""
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        page = int(re.search(r"page size of (\d+)", out).group(1))
+        pages = sum(int(m) for k, m in re.findall(r"Pages (free|inactive|speculative|purgeable):\s+(\d+)", out))
+        return pages * page / 1024 ** 3
+    except Exception:  # noqa: BLE001
+        return 999.0
+
+
+def _claude_rss_gb() -> float:
+    try:
+        out = subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True, timeout=5).stdout
+        return sum(int(l.split()[0]) for l in out.splitlines() if "claude" in l) / 1024 ** 2
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _wait_for_memory_then_play(job: tuple) -> dict[str, Any]:
+    min_free = job[8] if len(job) > 8 else 0.0
+    while min_free and _free_gb() < min_free:
+        time.sleep(30)
+    return play_one(job)
 
 
 def selftest(model: str) -> int:

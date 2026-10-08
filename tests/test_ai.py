@@ -737,12 +737,17 @@ class TestStoppingAnImminentWinner(unittest.TestCase):
         self.assertLess(a + r, b)
         _, r_broke, _ = agent._endgame_cover(opp, broke)
         self.assertGreater(r_broke, r, "他得现贪才凑得齐钱，举报单张就该几乎稳拦")
-        # 贫农只挡得住一个人：攻击要靠别人也一起打才管用，把握打折但不是 0
+        # 默认（旧版贫农）：几个人攻击都按不住他升职，攻击把握为 0，只能靠举报
         a_p, r_p, b_p = agent._endgame_cover(dict(opp, origin="PEASANT"), rich)
-        k = agent.w.peasant_second_attacker
-        self.assertAlmostEqual(a_p, k * a)
+        self.assertEqual(a_p, 0.0)
         self.assertEqual(r_p, r)
-        self.assertTrue(r_p < b_p < b)
+        self.assertAlmostEqual(b_p, r_p)
+        # 只挡一个人的版本：攻击要靠别人也一起打才管用，把握打折但不是 0
+        one = ai.SmartAgent(1, cfg=_dc.replace(CFG, origin_peasant_max_attackers=1))
+        a1, r1, b1 = one._endgame_cover(dict(opp, origin="PEASANT"), rich)
+        k = one.w.peasant_second_attacker
+        self.assertAlmostEqual(a1, k * a)
+        self.assertTrue(r1 < b1 < b)
 
     def test_decide_plays_the_top_of_its_own_scores(self):
         """decide 和复盘工具共用 score_combos。零噪声时 decide 挑的必须就是 last_scores

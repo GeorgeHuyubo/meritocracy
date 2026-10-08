@@ -2980,15 +2980,16 @@ class TestOrigins(unittest.TestCase):
         self.assertEqual(out.outcomes[2].promotion, PromotionKind.NONE)  # 对照组被拦
 
     def test_two_attackers_get_through_the_peasant(self):
-        """贫农只挡得住一个人：两个人一起攻击，穿小鞋照样生效。"""
-        tc = REAL_CFG.merit_cost(0)
+        """（开关 ORIGIN_PEASANT_MAX_ATTACKERS=1 时）贫农只挡得住一个人：两个人一起攻击，穿小鞋照样生效。"""
+        cfg = dataclasses.replace(REAL_CFG, origin_peasant_max_attackers=1)
+        tc = cfg.merit_cost(0)
         peasant = player(1, rank=0, merit=tc, origin=Origin.PEASANT)
         a, b = player(2, rank=0), player(3, rank=0)
         out = resolve(
             [peasant, a, b],
             {1: [Action(Card.PROMOTE_MERIT)],
              2: [Action(Card.ATTACK, 1)], 3: [Action(Card.ATTACK, 1)]},
-            cfg=REAL_CFG,
+            cfg=cfg,
         )
         self.assertEqual(out.outcomes[1].attacker_count, 2)
         self.assertTrue(out.outcomes[1].merit_promotion_blocked)
@@ -3026,8 +3027,9 @@ class TestOrigins(unittest.TestCase):
         self.assertEqual(out.outcomes[1].promotion, PromotionKind.MERIT)
 
     def test_attacker_count_is_recorded_even_when_attacks_are_anonymous(self):
-        """不公开署名时 attacked_by 是空的，贫农的判定不能靠它。"""
-        cfg = dataclasses.replace(REAL_CFG, attack_announces_attacker=False)
+        """（只挡一个人的版本）不公开署名时 attacked_by 是空的，贫农的判定不能靠它。"""
+        cfg = dataclasses.replace(REAL_CFG, attack_announces_attacker=False,
+                                  origin_peasant_max_attackers=1)
         tc = cfg.merit_cost(0)
         peasant = player(1, rank=0, merit=tc, origin=Origin.PEASANT)
         a, b = player(2, rank=0), player(3, rank=0)
