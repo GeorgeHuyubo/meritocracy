@@ -8,3 +8,5 @@ llm_runs/
 policies/focus_*.json
 policies/var_*.json
 policies/best_by_origin.json
+search_runs/
+search_runs_*.log

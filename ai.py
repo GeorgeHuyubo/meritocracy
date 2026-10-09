@@ -974,6 +974,17 @@ class SmartAgent:
         先验是 base_report_pressure，然后用**实际观测到的**"贪污次数 vs 降级次数"
         把它修正过来——这桌人要是根本不举报，就该放心去贪。
         """
+        # 一次打分里每个组合都要问一遍，答案只看局面不看组合。只在 score_combos 执行期间缓存
+        # （那段时间里我的状态不变；拿 `is` 比 payload）。搜索型 AI 的推演里这一项占了三成多。
+        cached = getattr(self, "_rp_cache", None)
+        if cached is not None and cached[0] is public and cached[1] is private:
+            return cached[2]
+        p = self._report_pressure_uncached(public, private)
+        if getattr(self, "_rp_cache_on", False):
+            self._rp_cache = (public, private, p)
+        return p
+
+    def _report_pressure_uncached(self, public: dict[str, Any], private: dict[str, Any]) -> float:
         n_opp = len(public["players"]) - 1
         if n_opp <= 0:
             return 0.0
@@ -1102,6 +1113,15 @@ class SmartAgent:
         return {"p_caught": p_caught, "reports": reports, "closing": closing}
 
     def score_combos(
+        self, public: dict[str, Any], private: dict[str, Any]
+    ) -> list[tuple[float, list[Card]]]:
+        self._rp_cache_on, self._rp_cache = True, None
+        try:
+            return self._score_combos(public, private)
+        finally:
+            self._rp_cache_on, self._rp_cache = False, None
+
+    def _score_combos(
         self, public: dict[str, Any], private: dict[str, Any]
     ) -> list[tuple[float, list[Card]]]:
         """给手里每一组可出的牌打分（不含噪声），按枚举顺序返回 [(分数, 牌), ...]。

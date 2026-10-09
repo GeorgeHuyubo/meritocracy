@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -177,3 +178,29 @@ class TestLlmPlayPipeline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMixedSeats(unittest.TestCase):
+    """混坐：1 个大模型 + 5 个 Python 陪练，大模型坐的身份按局号轮换，附带同种子的 Python 对照局。"""
+
+    def test_mock_mixed_matches_control_and_report(self):
+        out = Path(tempfile.mkdtemp())
+        opts = {"llm_seats": 1, "crowd": "learned", "control": 2, "base_seed": 3}
+        origins = list(llm_play.DEFAULT_CONFIG.origin_ids())
+        for g in range(6):
+            res = llm_play.play_one((g, 3000 + g, "sonnet", "mock", out, [], "base", True, 0.0, opts))
+            llm = [p for p in res["players"] if p["controller"] == "llm"]
+            self.assertEqual(len(llm), 1)
+            self.assertEqual(llm[0]["origin"], origins[g % 6])
+            self.assertEqual(res["focal"]["origin"], origins[g % 6])
+            self.assertEqual(len(res["telemetry"]), res["rounds"])
+            # mock 的"大模型"就是同种子的学习型 AI：和第 0 份对照局必须逐局一模一样（同一套代码路径）
+            c0 = json.loads((out / f"control_{g:03d}_0.json").read_text(encoding="utf-8"))
+            self.assertTrue((out / f"control_{g:03d}_1.json").exists())
+            self.assertEqual(c0["winners"], res["winners"])
+            strip = lambda tel: [[{k: v for k, v in p.items() if k != "controller"} for p in r["players"]]
+                                 for r in tel]
+            self.assertEqual(strip(c0["telemetry"]), strip(res["telemetry"]))
+        text = llm_play.report(out, summarize=False, model="sonnet", backend_name="mock")
+        self.assertIn("1 个大模型 + 5 个 Python 陪练", text)
+        self.assertIn("| +0.0 |", text)  # 和对照逐局相同，差值恰好是 0

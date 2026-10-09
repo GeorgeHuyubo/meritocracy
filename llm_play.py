@@ -38,6 +38,7 @@ import ai  # noqa: E402
 from config import DEFAULT_CONFIG, Config  # noqa: E402
 from game import Game, GameError  # noqa: E402
 from models import Card, Origin  # noqa: E402
+import telemetry as T  # noqa: E402
 
 N = 6
 RUN_DIR = Path(__file__).resolve().parent / "llm_runs"
@@ -585,14 +586,23 @@ MAX_REDRAWS = 3
 
 def decide(cfg: Config, game: Game, pid: int, backend, pool: ai.AgentPool,
            history: list[str], memory: list[str], stats: Counter, mock: bool,
-           session: "ClaudeSession | None" = None) -> tuple[list, str, int]:
-    """返回 (出牌, 理由, 这轮换了几次牌)。换不换牌由大模型自己决定（mock 时交给程序 AI）。"""
+           session: "ClaudeSession | None" = None,
+           extra: dict[str, Any] | None = None) -> tuple[list, str, int]:
+    """返回 (出牌, 理由, 这轮换了几次牌)。换不换牌由大模型自己决定（mock 时交给程序 AI）。
+
+    extra 给了的话顺手记下：同一手牌程序 AI 会怎么打（base_picks）、当时的手牌。"""
     agent = pool.get(pid)
     if mock:
         picks = ai.turn(game, pid, pool)  # 程序 AI 冒充：连换牌一起它来
         stats["prompt_chars"] += len(player_prompt(cfg, game, pid, agent, history, memory))
+        if extra is not None:
+            extra["base_picks"] = [{"action": n, "target": b.get("target")}
+                                   for n, b in zip(T.card_names(picks), picks)]
         return picks, "（mock：程序 AI 出牌）", 0
-    ai.choose(game, pid, pool)  # 只为让程序 AI 的观察跟上（提示里的估计存款要用），不换牌
+    base = ai.choose(game, pid, pool)  # 只为让程序 AI 的观察跟上（提示里的估计存款要用），不换牌
+    if extra is not None:
+        extra["base_picks"] = [{"action": n, "target": b.get("target")}
+                               for n, b in zip(T.card_names(base), base)]
 
     def make_prompt(after_redraw: bool) -> str:
         if session is not None:
@@ -631,6 +641,8 @@ def decide(cfg: Config, game: Game, pid: int, backend, pool: ai.AgentPool,
             reason = str(ans.get("reason", ""))[:300]
             if ans.get("threat") is not None:
                 reason = f"[威胁:{ans.get('threat')}] " + reason
+            if extra is not None:
+                extra["hand"] = [d["card"] for d in hand]
             return picks, reason, redraws
         except (ValueError, KeyError, TypeError, GameError, RuntimeError,
                 subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
@@ -644,28 +656,64 @@ def decide(cfg: Config, game: Game, pid: int, backend, pool: ai.AgentPool,
 
 
 def play_one(args: tuple) -> dict[str, Any]:
+    """打一局。args 的前 9 项含义不变；第 10 项是可选的 opts：
+
+        llm_seats  大模型坐几个座位（默认 6 = 全大模型桌；1 = 混坐：1 个大模型 + 5 个 Python 陪练）
+        crowd      混坐时陪练用什么 AI：learned（policies/best.json）| smart（手写）
+        control    混坐时每局再跑几份 Python 对照局（同一个种子，大模型的座位换成学习型 AI）
+        base_seed  混坐时的焦点分层种子（第 g 局被测身份 = ORIGINS[g % 6]、座位轮换，见 telemetry.py）
+
+    混坐局的发牌、事件按 (种子, 轮次) 重新播种，陪练先出、大模型最后出，所以和对照局逐局可比。
+    """
     g, seed, model, backend_name, out_dir = args[:5]
     extra = list(args[5]) if len(args) > 5 else []
     variant = args[6] if len(args) > 6 else "base"
     want_feedback = args[7] if len(args) > 7 else True
+    opts = dict(args[9]) if len(args) > 9 and args[9] else {}
+    llm_seats = int(opts.get("llm_seats", N))
+    mixed = llm_seats < N
+    if mixed and llm_seats != 1:
+        raise ValueError("混坐目前只支持 1 个大模型座位（--llm-seats 1）")
+    crowd = opts.get("crowd", "learned")
     cfg = variant_cfg(variant)
     rng = random.Random(seed)
     mock = backend_name == "mock"
     backend = MockBackend() if mock else ClaudeCLI(model)
     sessions: dict[int, ClaudeSession] = {}
-    game = Game(game_id=f"llm{g}", cfg=cfg, rng=rng)
     names = ["老张", "老李", "老王", "老赵", "老刘", "老陈"]
-    for name in names:
-        game.add_player(name, is_ai=True)
-    origins = list(cfg.origin_ids())
-    rng.shuffle(origins)
-    for pid, oid in zip(sorted(game.players), origins):
-        game.players[pid].origin = Origin(oid)
-    pool = ai.make_pool(cfg, rng)
-    game.start_game()
+    focal: dict[str, Any] | None = None
+    if mixed:
+        import probe  # 延迟导入：probe 依赖 search_ai，全大模型桌用不上
+
+        base_seed = int(opts.get("base_seed", seed // 1000))
+        focal_origin, focal_seat, seats = T.focal_assignment(g, base_seed, cfg)
+        gs = T.game_seed(base_seed, g)
+        game = T.new_game(cfg, seats, gs, game_id=f"llm{g}", names=names)
+        llm_pids = {focal_seat + 1}
+        focal = {"pid": focal_seat + 1, "origin": focal_origin, "seat": focal_seat, "base_seed": base_seed}
+        # 大模型座位的"观察助手"（提示里的估计存款）和对照局里坐这个座位的学习型 AI 同一个种子
+        pool = probe.arm_pool(cfg, "learned", random.Random(f"{gs}/base"))
+        crowd_pool = probe.arm_pool(cfg, crowd, random.Random(f"{gs}/crowd"))
+        order = T.focal_order(N, focal_seat + 1)
+    else:
+        gs = seed
+        game = Game(game_id=f"llm{g}", cfg=cfg, rng=rng)
+        for name in names:
+            game.add_player(name, is_ai=True)
+        origins = list(cfg.origin_ids())
+        rng.shuffle(origins)
+        for pid, oid in zip(sorted(game.players), origins):
+            game.players[pid].origin = Origin(oid)
+        pool = ai.make_pool(cfg, rng)
+        crowd_pool = None
+        llm_pids = set(game.players)
+        order = sorted(game.players)
+        game.start_game()
+    controller = {pid: ("llm" if pid in llm_pids else crowd) for pid in game.players}
     notebook_text, notebook_version = NOTEBOOK.read() if NOTEBOOK is not None else ("", None)
     if backend_name == "session":
-        for pid, p in game.players.items():
+        for pid in sorted(llm_pids):
+            p = game.players[pid]
             oname = (cfg.origin(p.origin.value) or {}).get("name", "?")
             sessions[pid] = ClaudeSession(
                 model, session_system_prompt(cfg, p.name, oname, notebook_text), extra)
@@ -673,14 +721,27 @@ def play_one(args: tuple) -> dict[str, Any]:
     history: list[str] = []
     memory: dict[int, list[str]] = defaultdict(list)
     decisions: list[dict[str, Any]] = []
+    tele: list[dict[str, Any]] = []
     stats: Counter = Counter()
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=N) as ex:
         while not game.is_over:
             rnd = game.round_number
+            # 陪练先在主线程按座位出牌（混坐时），大模型的座位再并行去问
+            for pid in order:
+                if pid in llm_pids:
+                    continue
+                picks = ai.turn(game, pid, crowd_pool)
+                game.select_actions(pid, picks)
+                game.lock_action(pid)
+                decisions.append({"round": rnd, "pid": pid, "controller": crowd,
+                                  "picks": [{"action": n, "target": p.get("target")}
+                                            for n, p in zip(T.card_names(picks), picks)],
+                                  "reason": "", "redraws": game.redraw_count.get(pid, 0)})
+            extras = {pid: {} for pid in llm_pids}
             futs = {pid: ex.submit(decide, cfg, game, pid, backend, pool, history,
-                                   memory[pid], stats, mock, sessions.get(pid))
-                    for pid in sorted(game.players)}
+                                   memory[pid], stats, mock, sessions.get(pid), extras[pid])
+                    for pid in sorted(llm_pids)}
             # 并行时 decide 里已经各自 select_actions 过；mock / 退回程序 AI 的那几席在这里补上
             for pid, f in futs.items():
                 picks, reason, redraws = f.result()
@@ -690,13 +751,19 @@ def play_one(args: tuple) -> dict[str, Any]:
                 game.lock_action(pid)
                 cards = [p.get("action") for p in picks]
                 memory[pid].append(f"第 {rnd} 轮：出了 {[CARD_NAMES.get(c, c) for c in cards]}。{reason}")
-                decisions.append({"round": rnd, "pid": pid, "picks": picks, "reason": reason,
-                                  "redraws": redraws})
+                d = {"round": rnd, "pid": pid, "picks": picks, "reason": reason, "redraws": redraws}
+                if mixed:
+                    d["controller"] = "llm"
+                d.update(extras[pid])
+                decisions.append(d)
             game.force_lock_all()
             game.reveal_event()
             outcome = game.resolve()
             history.append(round_summary(cfg, game, outcome))
+            tele.append(T.round_record(game, outcome, controller))
             if not game.is_over:
+                if mixed:
+                    T.reseed_round(game, gs)
                 game.advance_round()
 
         fb_futs = {}
@@ -708,10 +775,10 @@ def play_one(args: tuple) -> dict[str, Any]:
                 if want_feedback else LESSONS_IN_SESSION
             fb_futs = {pid: ex.submit(sessions[pid].ask, tpl.format(
                            reason=game.game_over_reason, last=history[-1] if history else ""))
-                       for pid in sorted(game.players)}
+                       for pid in sorted(sessions)}
         elif want_feedback:
             fb_futs = {pid: ex.submit(backend.ask, feedback_prompt(cfg, game, pid, history, memory[pid]))
-                       for pid in sorted(game.players)}
+                       for pid in sorted(llm_pids)}
         feedback = {}
         for pid, f in fb_futs.items():
             try:
@@ -745,25 +812,47 @@ def play_one(args: tuple) -> dict[str, Any]:
     stats["gateway_retries"] += backend.retries
     stats["session_restarts"] += backend.restarts
 
+    summ = T.game_summary(game, controller)
+    place = {p["pid"]: p["place"] for p in summ["players"]}
     players = []
     for p in game.ordered_players():
         players.append({
             "pid": p.id, "name": p.name, "origin": p.origin.value if p.origin else None,
             "rank": p.rank, "money": p.money, "merit": p.merit,
             "winner": p.id in game.winners, "feedback": feedback.get(p.id),
+            "controller": controller[p.id], "place": place[p.id], "warnings": p.warnings,
         })
     result = {
-        "game": g, "seed": seed, "model": model, "variant": variant, "rounds": game.round_number,
+        "schema": 2, "game": g, "seed": seed, "model": model, "variant": variant, "rounds": game.round_number,
         "president": any(p.rank >= cfg.president_rank for p in game.players.values()),
+        "end": summ["end"], "winners": summ["winners"], "final_standing": summ["final_standing"],
+        "llm_seats": len(llm_pids), "crowd": crowd if mixed else None, "focal": focal,
+        "rules_fp": T.rules_fingerprint(cfg),
         "reason": game.game_over_reason, "players": players, "history": history,
-        "decisions": decisions, "stats": dict(stats),
+        "decisions": decisions, "telemetry": tele, "stats": dict(stats),
         "notebook_version": notebook_version, "lessons": lessons,
         "llm_calls": backend.calls, "llm_seconds": round(backend.seconds, 1),
         "wall_seconds": round(time.time() - t0, 1),
     }
     (out_dir / f"game_{g:03d}.json").write_text(json.dumps(result, ensure_ascii=False, indent=1),
                                                encoding="utf-8")
+    if mixed:
+        for k in range(int(opts.get("control", 0))):
+            write_control(out_dir, cfg, g, focal["base_seed"], crowd, k)
     return result
+
+
+def write_control(out_dir: Path, cfg: Config, g: int, base_seed: int, crowd: str, k: int) -> dict[str, Any]:
+    """Python 对照局：和第 g 局大模型混坐局同身份、同座位、同种子，大模型的座位换成学习型 AI。
+    k = 0 用同一套陪练种子（逐局配对），k > 0 只换陪练的随机数（多几份样本）。"""
+    import probe
+    import search_ai
+
+    r = probe.play_probe_game(cfg, g, base_seed, "learned", crowd, search_ai.SearchConfig(budget=0),
+                              want_telemetry=True, crowd_tag="" if k == 0 else str(k))
+    r.update({"schema": 2, "control": k, "rules_fp": T.rules_fingerprint(cfg)})
+    (out_dir / f"control_{g:03d}_{k}.json").write_text(json.dumps(r, ensure_ascii=False), encoding="utf-8")
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -803,10 +892,14 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     stats: Counter = Counter()
     texts: list[str] = []
     origin_name = {o["id"]: o["name"] for o in cfg.origin_definitions}
+    # 混坐局（1 个大模型 + 5 个 Python）：身份战绩、出牌习惯只统计大模型的座位
+    mixed = any(gm.get("llm_seats", N) < N for gm in games)
     for gm in games:
         stats.update(gm.get("stats", {}))
         winners = [p for p in gm["players"] if p["winner"]]
         for p in gm["players"]:
+            if mixed and p.get("controller") != "llm":
+                continue
             o = origin_name.get(p["origin"], p["origin"])
             seats[o] += 1
             rank_sum[o] += p["rank"]
@@ -829,6 +922,8 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
                 )
         origin_of = {p["pid"]: origin_name.get(p["origin"], p["origin"]) for p in gm["players"]}
         for d in gm["decisions"]:
+            if mixed and d.get("controller", "llm") != "llm":
+                continue
             redraw_by[origin_of.get(d["pid"], "?")] += d.get("redraws", 0)
             for p in d["picks"]:
                 cards[p.get("action")] += 1
@@ -877,18 +972,12 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     ref = json.loads(ref_path.read_text(encoding="utf-8")) if ref_path.exists() else {}
     ref_win = ref.get(variant, {}).get("win", {})
     ta, tr = sum(atk_recv.values()) or 1, sum(rep_recv.values()) or 1
-    lines += ["", f"## 各身份战绩（每个身份约 {n} 局）", "",
-              "| 身份 | 胜率 | ±95% | Python AI 同规则 | 平均终局官职 | 挨攻击份额 | 被举报份额 | 玩家打分 | 被评为最强 | 被评为最弱 |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
-    for o in sorted(seats, key=lambda k: -wins[k]):
-        fun = fun_by_origin.get(o, [])
-        p = wins[o] / seats[o]
-        half = 196 * (p * (1 - p) / seats[o]) ** 0.5
-        lines.append(f"| {o} | {100 * p:.1f}% | ±{half:.1f} | "
-                     + (f"{ref_win[o]:.1f}%" if o in ref_win else "—")
-                     + f" | {rank_sum[o] / seats[o]:.2f} | {100 * atk_recv[o] / ta:.0f}% | {100 * rep_recv[o] / tr:.0f}% | "
-                     f"{(sum(fun) / len(fun)) if fun else 0:.1f} | {votes_strong.get(o, 0)} | {votes_weak.get(o, 0)} |")
-    lines += ["", "## 出牌习惯（所有玩家打出的牌）", ""]
+    if mixed:
+        lines += [""] + mixed_origin_table(games, out_dir, cfg, fun_by_origin, votes_strong, votes_weak)
+    else:
+        lines += _symmetric_origin_table(n, seats, wins, ref_win, rank_sum, atk_recv, rep_recv, ta, tr,
+                                         fun_by_origin, votes_strong, votes_weak)
+    lines += ["", "## 出牌习惯（" + ("大模型座位" if mixed else "所有玩家") + "打出的牌）", ""]
     tot = sum(cards.values()) or 1
     lines.append("、".join(f"{CARD_NAMES.get(c, c)} {100 * v / tot:.0f}%" for c, v in cards.most_common()))
     if stats["redraws"]:
@@ -970,6 +1059,92 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     return text
 
 
+def _symmetric_origin_table(n, seats, wins, ref_win, rank_sum, atk_recv, rep_recv, ta, tr,
+                            fun_by_origin, votes_strong, votes_weak) -> list[str]:
+    """全大模型桌：六个座位都算。"""
+    lines = ["", f"## 各身份战绩（每个身份约 {n} 局）", "",
+             "| 身份 | 胜率 | ±95% | Python AI 同规则 | 平均终局官职 | 挨攻击份额 | 被举报份额 | 玩家打分 | 被评为最强 | 被评为最弱 |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
+    for o in sorted(seats, key=lambda k: -wins[k]):
+        fun = fun_by_origin.get(o, [])
+        p = wins[o] / seats[o]
+        half = 196 * (p * (1 - p) / seats[o]) ** 0.5
+        lines.append(f"| {o} | {100 * p:.1f}% | ±{half:.1f} | "
+                     + (f"{ref_win[o]:.1f}%" if o in ref_win else "—")
+                     + f" | {rank_sum[o] / seats[o]:.2f} | {100 * atk_recv[o] / ta:.0f}% | {100 * rep_recv[o] / tr:.0f}% | "
+                     f"{(sum(fun) / len(fun)) if fun else 0:.1f} | {votes_strong.get(o, 0)} | {votes_weak.get(o, 0)} |")
+    return lines
+
+
+def load_controls(out_dir: Path) -> dict[int, list[dict[str, Any]]]:
+    out: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for p in sorted(out_dir.glob("control_*.json")):
+        r = json.loads(p.read_text(encoding="utf-8"))
+        out[r["g"]].append(r)
+    return out
+
+
+def mixed_origin_table(games, out_dir: Path, cfg: Config, fun_by_origin, votes_strong, votes_weak) -> list[str]:
+    """混坐局：大模型坐的那个身份 vs 同一局同一座位换成学习型 AI（对照局，逐局配对）。"""
+    import balance_stats as bs
+
+    origin_name = {o["id"]: o["name"] for o in cfg.origin_definitions}
+    controls = load_controls(out_dir)
+    rows: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for gm in games:
+        f = gm.get("focal") or {}
+        pid = f.get("pid")
+        me = next((p for p in gm["players"] if p["pid"] == pid), None)
+        if me is None:
+            continue
+        o = origin_name.get(me["origin"], me["origin"])
+        nw = max(1, len(gm.get("winners") or [p for p in gm["players"] if p["winner"]]))
+        share = (1.0 / nw) if me["winner"] else 0.0
+        r = rows[o]
+        r["share"].append(share)
+        r["place"].append(me.get("place", 0))
+        r["rank"].append(me["rank"])
+        r["rounds"].append(gm["rounds"])
+        atk = rep = 0
+        for t in gm.get("telemetry") or []:
+            for pl in t["players"]:
+                if pl["pid"] == pid:
+                    atk += pl["attacker_count"]
+                    rep += pl["report_count_players"]
+        r["atk"].append(atk / max(1, gm["rounds"]))
+        r["rep"].append(rep / max(1, gm["rounds"]))
+        cs = controls.get(gm["game"], [])
+        if cs:
+            r["ctrl"].append(sum(c["focal_share"] for c in cs) / len(cs))
+            c0 = next((c for c in cs if c.get("control") == 0), None)
+            if c0 is not None:
+                r["paired_llm"].append(share)
+                r["paired_ctrl"].append(c0["focal_share"])
+                r["paired_place_llm"].append(me.get("place", 0))
+                r["paired_place_ctrl"].append(c0["place"])
+    n = sum(len(r["share"]) for r in rows.values())
+    lines = [f"## 各身份战绩：1 个大模型 + 5 个 Python 陪练（{n} 局，只统计大模型的座位）", "",
+             "对照 = 同一局、同一座位换成学习型 AI（同种子），差值逐局配对；公平线 16.67%。", "",
+             "| 身份 | 局数 | 大模型胜率 | 对照（学习型）胜率 | 差值 | 大模型平均名次 | 对照平均名次 | 终局官职 | 挨攻击/轮 | 被举报/轮 | 玩家打分 | 被评为最强 | 被评为最弱 |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for o in sorted(rows, key=lambda k: -sum(rows[k]["share"]) / len(rows[k]["share"])):
+        r = rows[o]
+        m, se = bs.mean_se(r["share"])
+        cm, cse = bs.mean_se(r["ctrl"]) if r["ctrl"] else (float("nan"), float("nan"))
+        d, dse = bs.paired_diff(r["paired_llm"], r["paired_ctrl"]) if r["paired_llm"] else (float("nan"), float("nan"))
+        pl, _ = bs.mean_se(r["paired_place_llm"]) if r["paired_place_llm"] else bs.mean_se(r["place"])
+        pc, _ = bs.mean_se(r["paired_place_ctrl"]) if r["paired_place_ctrl"] else (float("nan"), 0)
+        fun = fun_by_origin.get(o, [])
+        dtxt = "—" if d != d else (f"{100 * d:+.1f}" if dse != dse else f"{100 * d:+.1f} ±{100 * bs.Z * dse:.1f}")
+        lines.append(
+            f"| {o} | {len(r['share'])} | {bs.fmt_pct(m, se)} | {bs.fmt_pct(cm, cse)} | {dtxt} | {pl:.2f} | "
+            + ("—" if pc != pc else f"{pc:.2f}")
+            + f" | {sum(r['rank']) / len(r['rank']):.2f} | {sum(r['atk']) / len(r['atk']):.2f} | "
+            f"{sum(r['rep']) / len(r['rep']):.2f} | {(sum(fun) / len(fun)) if fun else 0:.1f} | "
+            f"{votes_strong.get(o, 0)} | {votes_weak.get(o, 0)} |")
+    return lines
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--games", type=int, default=10)
@@ -992,6 +1167,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="跨局学习：六个座位共用一本心得笔记本，每局开局读最新版、打完把心得合并进去")
     ap.add_argument("--seed-notebook", default=str(Path(__file__).resolve().parent / "llm_notebook_seed.md"),
                     help="笔记本的初始版（入门套路）；传空字符串就从空白开始")
+    ap.add_argument("--llm-seats", type=int, default=N, choices=[1, N],
+                    help="大模型坐几个座位：6 = 全大模型桌（默认）；1 = 混坐（1 个大模型 + 5 个 Python 陪练，"
+                         "大模型坐的身份按局号轮换，每个身份局数一样）")
+    ap.add_argument("--crowd", default="learned", choices=["learned", "smart"],
+                    help="混坐时陪练用的 AI")
+    ap.add_argument("--control", type=int, default=1,
+                    help="混坐时每局附带几份 Python 对照局（同种子，大模型的座位换成学习型 AI；几乎不花时间）")
     ap.add_argument("--min-free-gb", type=float, default=3.0,
                     help="开新一局前系统可用内存低于这么多 GB 就先等（避免几十个 claude 进程把机器拖死）")
     args = ap.parse_args(argv)
@@ -1019,8 +1201,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"跨局笔记本：{NOTEBOOK.path}（当前第 {NOTEBOOK.version} 版）", flush=True)
     extra = shlex.split(args.extra)
     todo = [g for g in range(args.games) if g not in done_games]
+    opts = ({"llm_seats": args.llm_seats, "crowd": args.crowd, "control": args.control,
+             "base_seed": args.seed} if args.llm_seats < N else {})
     jobs = [(g, args.seed * 1000 + g, args.model, args.backend, out_dir, extra, args.variant,
-             g % max(1, args.feedback_every) == 0, args.min_free_gb)
+             g % max(1, args.feedback_every) == 0, args.min_free_gb, opts)
             for g in todo]
     log = open(out_dir / "progress.log", "a", encoding="utf-8")
     t_start = time.time()

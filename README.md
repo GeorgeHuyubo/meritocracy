@@ -22,7 +22,7 @@ AI 玩家由服务器上的 `ai.py` 驱动，走的是和真人**完全一样**�
 只吃 `public_state()` 和它自己的 `private_state()`，看不到你的钱和手牌。
 
 ```bash
-python3 -m unittest discover -s tests -t .              # 单元测试（463 个）
+python3 -m unittest discover -s tests -t .              # 单元测试（484 个）
 python3 simulator.py --players 6 --games 10000          # 模拟器
 python3 analysis.py --section full --games 2500 --agents smart   # 完整平衡报告
 python3 analysis.py --section triangle               # 鹬蚌相争的目标动态成不成立
@@ -30,6 +30,9 @@ python3 analysis.py --section ablation               # 每张牌的因果价值�
 python3 analysis.py --section funnel                 # 金钱/政绩两条路线的端到端漏斗
 python3 analysis.py --section replay --rounds 8-10   # 复盘库里最新一局：AI 每轮怎么想的
 python3 sweep.py --variants base,hat2,blk4           # 规则变体对比实验（消融 + 六身份混战，并行）
+python3 probe.py --crowd learned --games 2400        # 搜索探针：搜索型 AI 坐各身份 vs 学习型 AI
+python3 crosscheck.py --a llm_runs/<目录> --b control:llm_runs/<目录>   # 大模型局 vs Python 局逐项对比
+python3 scorecard.py --src ... --src ...             # 身份平衡综合记分卡（多把尺子同向才下结论）
 ```
 
 > 目录本应放在 `/meritocracy`。macOS 的系统完整性保护不允许在根目录下新建目录，
@@ -562,6 +565,29 @@ python3 analysis.py --agents smart --section choices   # AI 到底会选哪张�
 python3 analysis.py --agents smart --section leader    # 高水平对局的平衡性
 ```
 
+## 身份平衡：多把尺子交叉验证
+
+只看 Python AI 自对弈会被 AI 自己的盲点带偏（以前调到"很平衡"之后才发现是 AI 打法有问题）。
+现在身份强弱要几把独立的"尺子"一起看：
+
+* **搜索探针**（`search_ai.py` + `probe.py`）：搜索型 AI 出牌前把几个候选打法各往后推演几十局再选
+  （对手手牌、存款、本轮事件按它看得到的信息重采样，测试保证不偷看）。让它坐某个身份、和 5 个学习型 AI 同桌，
+  同一个种子下再让学习型 AI 坐同一个座位，逐局相减 = **搜索提升**。某个身份提升特别大，说明普通 AI 把它打亏了。
+  对手存款的估计偏差表：`python3 search_ai.py --calibrate-money 2000`（写 `policies/money_residuals.json`）。
+* **大模型混坐**（`llm_play.py --llm-seats 1 --control 3`）：1 个大模型 + 5 个 Python 陪练，大模型坐的身份按局号轮换；
+  每局附带同种子的 Python 对照局（大模型的座位换成学习型 AI），报告里给逐局配对的差值。存档带每轮遥测（`telemetry.py`）。
+* **对比工具**（`crosscheck.py`）：大模型局、对照局、探针、现跑的 Python 局走同一套指标（胜率拆解、升职路线、
+  挨打、第一个到省级、出牌结构、和 Python AI 出同一手牌的比例……），按 |z| 列出差异最大的几项。旧格式大模型局从战报文字还原。
+* **记分卡**（`scorecard.py`）：至少 3 个来源、来自至少 2 个家族（学习型 / 手写 / 搜索 / 大模型）同向显著、没有显著反向，
+  才算"确认强 / 弱"。焦点设计的来源扣掉被测玩家本身的水平（搜索 AI 整体就强）。
+
+焦点座位设计（`telemetry.py`）：第 g 局被测身份 = 第 g % 6 个、座位每 6 局轮换，每轮发牌前按（种子, 轮次）重新播种，
+所以同一个 g 下大模型局、搜索局、对照局的身份、座位、每轮手牌和事件都一样。
+
+2026-10 的结论：红二代偏强、会计偏弱（几把尺子同向）；富二代在 Python 自对弈里垫底，但搜索提升最大
+（+18.5，其他身份平均 +11.4），约 9 个点来自"什么时候用免费换牌"——这是要推演才用得好的技能，
+固定规则学不来（试过按期望换牌、按搜索结果拟合规则，都无效），所以 Python 自对弈里富二代的数字不可信。
+
 ## 模拟器输出
 
 平均轮数、结束轮次分布、国家主席胜率、打满 12 轮的比例、终局金钱/政绩/官职、
@@ -569,7 +595,7 @@ python3 analysis.py --agents smart --section leader    # 高水平对局的平�
 攻击命中与晋升阻断次数、没收赃款与分赃总额、各事件出现次数、按座位的胜场分布。
 `--json` 输出结构化结果，方便接到参数扫描脚本上。
 
-`python3 -m unittest discover -s tests -t .` 共 **463 个用例**（缺 Web 依赖或 node 时
+`python3 -m unittest discover -s tests -t .` 共 **484 个用例**（缺 Web 依赖或 node 时
 会跳过对应用例），覆盖规则、状态机、隐私白名单、持久化恢复、真实 WebSocket 私密性、
 前端渲染冒烟（含**前端数字与引擎的交叉校验**），以及平衡工具自身
 （`tests/test_analysis.py`：配置覆盖的类型强转与非法输入、消融的默认值与置信区间、
