@@ -22,7 +22,7 @@ AI 玩家由服务器上的 `ai.py` 驱动，走的是和真人**完全一样**�
 只吃 `public_state()` 和它自己的 `private_state()`，看不到你的钱和手牌。
 
 ```bash
-python3 -m unittest discover -s tests -t .              # 单元测试（421 个）
+python3 -m unittest discover -s tests -t .              # 单元测试（463 个）
 python3 simulator.py --players 6 --games 10000          # 模拟器
 python3 analysis.py --section full --games 2500 --agents smart   # 完整平衡报告
 python3 analysis.py --section triangle               # 鹬蚌相争的目标动态成不成立
@@ -569,7 +569,7 @@ python3 analysis.py --agents smart --section leader    # 高水平对局的平�
 攻击命中与晋升阻断次数、没收赃款与分赃总额、各事件出现次数、按座位的胜场分布。
 `--json` 输出结构化结果，方便接到参数扫描脚本上。
 
-`python3 -m unittest discover -s tests -t .` 共 **421 个用例**（缺 Web 依赖或 node 时
+`python3 -m unittest discover -s tests -t .` 共 **463 个用例**（缺 Web 依赖或 node 时
 会跳过对应用例），覆盖规则、状态机、隐私白名单、持久化恢复、真实 WebSocket 私密性、
 前端渲染冒烟（含**前端数字与引擎的交叉校验**），以及平衡工具自身
 （`tests/test_analysis.py`：配置覆盖的类型强转与非法输入、消融的默认值与置信区间、

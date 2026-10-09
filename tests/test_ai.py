@@ -1080,3 +1080,40 @@ class TestStartingMoneyEstimate(unittest.TestCase):
         agent.observe(game.public_state(), game.private_state(1))
         self.assertEqual(agent.models[2].money_est, CFG.origin_old_money_start)
         self.assertEqual(agent.models[3].money_est, 0.0)
+
+
+class TestRound4Features(unittest.TestCase):
+    """第四轮新增的特征：警告数、被传闻点名、快登顶的人走哪条路、目标的警告 / 钱的名次。"""
+
+    def test_new_feature_values(self):
+        game = Game(game_id="f4", cfg=CFG, rng=random.Random(5))
+        for i in range(4):
+            game.add_player(f"P{i + 1}")
+        game.start_game()
+        top = CFG.president_rank - 1
+        me, leader = game.players[1], game.players[2]
+        me.warnings = 1
+        leader.rank, leader.merit, leader.warnings = top, CFG.merit_cost(top), 1  # 政绩够了，钱没估够
+        game.hands[1] = [DealtCard(Card.CORRUPT, 18), DealtCard(Card.ATTACK, 0),
+                         DealtCard(Card.REPORT, 0)] + [DealtCard(Card.WORK, 6)] * 3
+        pool = ai.AgentPool(cfg=CFG, rng=random.Random(0), policy={"hand": 50.0}, record=True)
+        agent = pool.get(1)
+        agent._named_last = {1}
+        pub, priv = game.public_state(), game.private_state(1)
+        agent.observe(pub, priv)
+        agent._named_last = {1}  # observe 没有新结算时不会改它
+        agent.score_combos(pub, priv)
+        by_cards = {}
+        for (s, cards), f in zip(agent.score_combos(pub, priv), agent.last_features):
+            by_cards[tuple(sorted(c.value for c in cards))] = f
+        corrupt = next(f for k, f in by_cards.items() if "CORRUPT" in k)
+        self.assertEqual(corrupt["dirty_x_warn"], 1.0)
+        self.assertEqual(corrupt["dirty_x_named"], 1.0)
+        atk = next(f for k, f in by_cards.items() if "ATTACK" in k and "REPORT" not in k)
+        self.assertEqual(agent._closer_flags[0], 1.0)  # 最快登顶的人政绩已够
+        self.assertEqual(atk["atk_x_closer_merit"], 1.0)
+        rep = next(f for k, f in by_cards.items() if "REPORT" in k and "ATTACK" not in k)
+        self.assertEqual(rep["rep_x_closer_merit_only"], agent._closer_flags[0] * (1 - agent._closer_flags[1]))
+        tf = agent._target_features(pub, "R", next(o for o in pub["players"] if o["id"] == 2), 0.1)
+        self.assertEqual(tf["R:t_warn"], 1.0)
+        self.assertIn("R:t_money_rank", tf)

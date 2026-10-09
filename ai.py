@@ -303,6 +303,10 @@ class SmartAgent:
         self._cal_expect = 0.0
         self._times_attacked = 0  # 我自己被攻击过几次
         self._last_attackers: dict[int, int] = {}  # 谁攻击过我 -> 最近一次的轮次（明攻击才公开）
+        self._named_last: set[int] = set()  # 上一轮被坊间传闻点名的人
+        self._attacked_last: dict[int, int] = {}  # 上一轮每个人挨了几个人攻击
+        self._closer_flags: tuple[float, float] = (0.0, 0.0)  # 最快登顶那人：政绩够了？钱够了？
+        self._n_closers = 0  # 这一轮同时可能登顶的人数
         self._rounds_seen = 0
         self._my_rank = 0
         self.observed_demotions = 0  # 公开可见的"被查实"次数（举报压力的证据）
@@ -356,6 +360,11 @@ class SmartAgent:
         for a in facts.get(self.id, {}).get("attacked_by", []) or []:
             self._last_attackers[a] = result["round"]
         top_ids = set(result.get("wealth_top_ids") or [])
+        self._named_last = set(top_ids)
+        self._attacked_last = {
+            pid: (len(f.get("attacked_by") or []) or int(bool(f.get("attacked"))))
+            for pid, f in facts.items()
+        }
         # 全场最高工资。传闻排的是"工资 + 没被查实的贪污款项（毛额，打点不扣；
         # 被查实的贪污记 0）+ 举报分到的赃款"，
         # 而工资人人算得出来，所以这个数是下面两条边界的基准。
@@ -1169,6 +1178,16 @@ class SmartAgent:
         closer = max(killers, key=lambda o: self._p_reach(
             o, self.models.get(o["id"], OpponentModel())), default=None)
         closer_oid = (self.cfg.origin(closer.get("origin")) or {}).get("id") if closer else None
+        self._n_closers = len(killers)
+        if closer is not None:
+            cm = self.models.get(closer["id"], OpponentModel())
+            c_mc, c_tc = self._costs(closer["rank"], closer.get("origin"))
+            self._closer_flags = (
+                float(c_tc is not None and closer["merit"] >= c_tc),
+                float(c_mc is not None and cm.money_est >= c_mc * self.w.endgame_money_doubt),
+            )
+        else:
+            self._closer_flags = (0.0, 0.0)
         variants = [[]] + ([[Card.PROMOTE_FAMILY]] if family_ok else [])
         for combo, extra in (
             (combo, extra)
@@ -1264,6 +1283,29 @@ class SmartAgent:
             "econ_x_late": econ * late,
             "dirty_x_late": d["dirty"] * late,
         }
+        # ---- 第四轮新增（大模型 200 局反馈 / 笔记本里反复出现的因素）----
+        priv = self._seen_private or {}
+        warn = float(priv.get("warnings", 0))
+        my_rank = int(priv.get("rank", 0))
+        others = [o for o in public["players"] if o["id"] != self.id]
+        richer = sum(1 for o in others
+                     if self.models.get(o["id"], OpponentModel()).money_est > priv.get("money", 0))
+        richest = 1.0 - richer / max(1, len(others))  # 1 = 我（按估计）是全桌最有钱的
+        pres = d["promote"] if my_rank == self.cfg.president_rank - 1 else 0.0
+        c_merit, c_money = self._closer_flags
+        feats.update({
+            "dirty_x_warn": d["dirty"] * warn,            # 再记一次警告就降级
+            "bribe_x_warn": d["promote_money"] * warn,
+            "dirty_x_named": d["dirty"] * float(self.id in self._named_last),  # 上轮被传闻点名
+            "pres_x_richest": pres * richest,            # 同一轮多人登顶比家底
+            "money_x_late": d["money_gain"] * late,      # 打满 12 轮比官职再比家底
+            # 攻击只拦政绩路、举报只拦钱路：看最快登顶那个人走的是哪条
+            "atk_x_closer_merit": n_atk * c_merit,
+            "rep_x_closer_money": n_rep * c_money,
+            "atk_x_closer_money_only": n_atk * c_money * (1.0 - c_merit),
+            "rep_x_closer_merit_only": n_rep * c_merit * (1.0 - c_money),
+            "intf_x_closers": (n_atk + n_rep) * float(self._n_closers),  # 一个人拦不住好几个
+        })
         # 每个出身学自己的打法：会计被抓了一半赃款抄不走、该更敢贪；贫农一个人打不动他、
         # 该放心干活；红二代的一纸调令……共用一套权重的话，学出来的是"平均身份"的打法，
         # 第一轮训完会计胜率只有 5%、贫农 9%。所以关键特征再按"我是什么出身"各复制一份。
@@ -1977,6 +2019,15 @@ class LearnedAgent(SmartAgent):
             f"{tag}:t_money": min(2.0, m.money_est / mc) if mc else 0.0,
             f"{tag}:t_hit_me": float(self._last_attackers.get(o["id"], -9) >= rnd - 1),
         }
+        others = [x for x in public["players"] if x["id"] != self.id]
+        richer = sum(1 for x in others
+                     if self.models.get(x["id"], OpponentModel()).money_est > m.money_est)
+        f.update({
+            f"{tag}:t_warn": float(o.get("warnings", 0)),            # 再查实一次就降级
+            f"{tag}:t_money_rank": 1.0 - richer / max(1, len(others) - 1),  # 1 = 估计全桌最有钱
+            f"{tag}:t_named": float(o["id"] in self._named_last),    # 上轮被传闻点名
+            f"{tag}:t_attacked_last": float(self._attacked_last.get(o["id"], 0)),  # 上轮挨了几刀
+        })
         oid = (self.cfg.origin(o.get("origin")) or {}).get("id")
         if oid:
             f[f"{tag}:o_{oid}"] = 1.0
