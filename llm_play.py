@@ -1140,7 +1140,7 @@ def mixed_origin_table(games, out_dir: Path, cfg: Config, fun_by_origin, votes_s
             f"| {o} | {len(r['share'])} | {bs.fmt_pct(m, se)} | {bs.fmt_pct(cm, cse)} | {dtxt} | {pl:.2f} | "
             + ("—" if pc != pc else f"{pc:.2f}")
             + f" | {sum(r['rank']) / len(r['rank']):.2f} | {sum(r['atk']) / len(r['atk']):.2f} | "
-            f"{sum(r['rep']) / len(r['rep']):.2f} | {(sum(fun) / len(fun)) if fun else 0:.1f} | "
+            f"{sum(r['rep']) / len(r['rep']):.2f} | {f'{sum(fun) / len(fun):.1f}' if fun else '—'} | "
             f"{votes_strong.get(o, 0)} | {votes_weak.get(o, 0)} |")
     return lines
 
