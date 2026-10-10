@@ -623,6 +623,21 @@ AI_DOGPILE: bool = True
 # 降不了级让举报对他基本没用，调令又能绕开攻击和举报直接升一级。
 ORIGIN_RED_FAMILY_CARD: bool = False
 
+# 红二代「硬保」的打点费：警告攒满、本该降级时官职照旧不动，但要交 ceil(这个比例 × 现职买官价)
+# （现职买官价 = money_cost(rank - 1)：县级 15 / 市级 22 / 省级 30）；钱不够就全交，官照样保住。
+# 这笔钱直接充公，不进分赃池。None = 免费保官（2026-10 之前的规则）。
+# 依据：几把尺子里红二代是方向最一致的偏强身份（学习型自对弈 23.1%、搜索探针 +8.6、大模型混坐 +3.7）；
+# 他被查实的频率和别人一样，只是每局靠护盾躲掉约 0.5 次降级。
+# 试过的（学习型自对弈 6000 局，红二代胜率；免费保官 21.7%）：
+#   官一定保得住（钱不够就全交）：1/2 倍 21.9、1 倍 21.2、2 倍 19.2、3~4 倍 19.4~19.7（封顶：多收的收不到）
+#   交不起就降级：1/2 倍 19.9、1 倍 18.9
+# 交不起就降级 1 倍：三把尺子都削掉 3~4 点（自对弈 +6.5 -> +2.5、搜索 +8.6 -> +5.8、大模型 +3.7 -> -0.3），
+# 但大模型玩家把红二代投成"最弱"（22 票）：打点费正好在被没收之后最缺钱的时候要交，技能常常用不上。
+# 所以定 1/2 倍，避免矫枉过正。（AI 没有在这套规则下续训过。）
+ORIGIN_RED_SHIELD_FEE: Fraction | None = Fraction(1, 2)
+# 打点费交不起时怎么办：False = 把身上的钱全交了、官照样保住；True = 交不起就照常降级（钱不扣）。
+ORIGIN_RED_SHIELD_FEE_STRICT: bool = True
+
 ORIGIN_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "RICH",
@@ -701,6 +716,19 @@ MAX_PLAYERS: int = 6
 REVEAL_EVENT_SECONDS: float = 2.5
 
 
+def red_shield_fee(cfg: "Config", rank: int) -> int:
+    """红二代在这个官职上保一次官要交多少（没开打点费、或者在基层降无可降，就是 0）。"""
+    ratio = cfg.origin_red_shield_fee
+    if ratio is None or rank <= 0:
+        return 0
+    price = cfg.promotion_money_costs[rank - 1]
+    return -(-price * ratio.numerator // ratio.denominator)
+
+
+def red_shield_fees(cfg: "Config") -> list[int]:
+    return [red_shield_fee(cfg, r) for r in range(1, cfg.president_rank)]
+
+
 def _origin_text(cfg: "Config", oid: str) -> dict[str, str]:
     """几个受开关影响的出身技能说明（skill / description）；不受影响的返回空。"""
     ratio = cfg.origin_patronage_merit_ratio
@@ -724,6 +752,15 @@ def _origin_text(cfg: "Config", oid: str) -> dict[str, str]:
     if oid == "RED":
         hard = (f"上头有人：降职警告照记、赃款照抄，但官职动不了——"
                 f"攒满 {cfg.warnings_before_demotion} 次也降不下来")
+        fee = cfg.origin_red_shield_fee
+        if fee is not None:
+            costs = "/".join(str(c) for c in red_shield_fees(cfg))
+            price = f"现职买官价的 {fee} 倍（县级/市级/省级分别 {costs}）"
+            if cfg.origin_red_shield_fee_strict:
+                hard = (f"上头有人：降职警告照记、赃款照抄；警告攒满 {cfg.warnings_before_demotion} 次"
+                        f"本该降级时，花钱打点就能保住官职，打点费是{price}，交不起就照常降级")
+            else:
+                hard += f"，只是每次保官都要花钱打点：{price}，钱不够就全交，官照样保住"
         if not cfg.origin_red_family_card:
             return {"skill": "硬保", "description": hard + "。"}
         return {"skill": "硬保 · 一纸调令",
@@ -849,6 +886,8 @@ class Config:
     origin_peasant_max_attackers: int | None = ORIGIN_PEASANT_MAX_ATTACKERS
     ai_dogpile: bool = AI_DOGPILE
     origin_red_family_card: bool = ORIGIN_RED_FAMILY_CARD
+    origin_red_shield_fee: Fraction | None = ORIGIN_RED_SHIELD_FEE
+    origin_red_shield_fee_strict: bool = ORIGIN_RED_SHIELD_FEE_STRICT
     origin_definitions: list[dict[str, Any]] = field(
         default_factory=lambda: [dict(o) for o in ORIGIN_DEFINITIONS]
     )

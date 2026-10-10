@@ -31,7 +31,7 @@ from fractions import Fraction
 from typing import Any
 
 import rules
-from config import Config, DEFAULT_CONFIG
+from config import Config, DEFAULT_CONFIG, red_shield_fee
 from models import Card
 
 EXPECTED_CARD_VALUE = 10  # 兜底用的牌面期望（正常情况下用发牌时摇好的真实点数）
@@ -482,6 +482,13 @@ class SmartAgent:
                 model.money_est = max(
                     0.0, model.money_est - gained * self._exposed_share(cur.get("origin"))
                 )
+
+            # --- 红二代保官的打点费：警告攒满却没降级，说明交了钱（钱不够就是全交了） ---
+            if (self.cfg.origin_red_shield_fee is not None and fact.get("warnings_issued", 0) > 0
+                    and (self.cfg.origin(cur.get("origin")) or {}).get("id") == "RED"
+                    and prev.get("warnings", 0) + fact["warnings_issued"] >= self.cfg.warnings_before_demotion):
+                fee = red_shield_fee(self.cfg, fact["rank_after"])
+                model.money_est = max(0.0, model.money_est - fee)
 
             # --- 晋升对钱的影响 ---
             if fact["promotion"] == "MONEY":
@@ -1896,10 +1903,15 @@ class SmartAgent:
         if about_to_promote:
             setback += (1.0 + self.w.promotion_bonus) * threat
         # 离降级越近，这一次警告越值钱。
-        # 红二代「硬保」例外：他降不下来，警告攒到天上也没用，这一项归零。
+        # 红二代「硬保」例外：他降不下来——免费保官时这一项归零；要交打点费时
+        # 攒满的后果是掏钱而不是降级，按 打点费 / 他现职的买官价 打折。
+        wmax = max(1, cfg.warnings_before_demotion)
+        near = (opp.get("warnings", 0) + 1) / wmax * threat * 0.5
         if (cfg.origin(t_origin) or {}).get("id") != "RED":
-            wmax = max(1, cfg.warnings_before_demotion)
-            setback += (opp.get("warnings", 0) + 1) / wmax * threat * 0.5
+            setback += near
+        elif cfg.origin_red_shield_fee is not None and t_rank > 0:
+            price = cfg.money_cost(t_rank - 1) or 1
+            setback += near * min(1.0, red_shield_fee(cfg, t_rank) / price)
 
         # 把人按住基本是公共品，赃款才是我的；但他越接近登顶，这份好处越是我自己的
         setback *= self._share(public, threat)

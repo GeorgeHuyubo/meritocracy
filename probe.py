@@ -96,8 +96,17 @@ def play_probe_game(cfg: Config, g: int, seed: int, arm: str, crowd: str,
     return out
 
 
+def variant_cfg(variant: str) -> Config:
+    """sweep.py 的规则变体（陪练和被测座位都用这个变体续训出来的 AI，有的话）。"""
+    if not variant or variant == "base":
+        return DEFAULT_CONFIG
+    import sweep
+
+    return sweep.build(variant, own_ai=True)
+
+
 def run_block(params: dict[str, Any]) -> list[dict[str, Any]]:
-    cfg = DEFAULT_CONFIG
+    cfg = variant_cfg(params.get("variant", ""))
     scfg = search_ai.SearchConfig(**params["scfg"])
     residuals = search_ai.load_residuals(Path(params["residuals"])) if params.get("residuals") else None
     out = []
@@ -250,6 +259,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--money-model", default="residual", choices=["residual", "lognormal"])
     ap.add_argument("--residuals", default=str(search_ai.RESIDUALS_PATH))
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 0))
+    ap.add_argument("--variant", default="", help="sweep.py 的规则变体（如 redfee100）")
     ap.add_argument("--only-origin", default="", help="只跑被测身份是这个的局（RICH 等），局号仍按 g 分层")
     ap.add_argument("--block", type=int, default=6, help="每个任务打几局（每局里各打法都跑）")
     ap.add_argument("--time-limit-hours", type=float, default=0.0)
@@ -284,14 +294,18 @@ def main(argv: list[str] | None = None) -> None:
         args.crowd, arms, args.seed, scfg = meta["crowd"], meta["arms"], meta["seed"], meta["scfg"]
         args.games = args.games or meta["games"]
         args.only_origin = args.only_origin or meta.get("only_origin", "")
+        args.variant = args.variant or meta.get("variant", "")
         residuals = meta.get("residuals", "")
     else:
         tag = "smoke" if args.smoke else ("aa" if args.aa else f"{args.crowd.replace(':', '_').replace('/', '_')}")
+        if args.variant:
+            tag += f"-{args.variant.replace('+', '_')}"
         run_dir = Path(args.out) if args.out else RUNS / f"{time.strftime('%Y%m%d-%H%M%S')}-{tag}"
         run_dir.mkdir(parents=True, exist_ok=True)
+    vcfg = variant_cfg(args.variant)
     meta = {"crowd": args.crowd, "arms": arms, "seed": args.seed, "games": args.games, "scfg": scfg,
-            "residuals": residuals, "rules_fp": T.rules_fingerprint(DEFAULT_CONFIG),
-            "ai_policy": DEFAULT_CONFIG.ai_policy, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
+            "residuals": residuals, "rules_fp": T.rules_fingerprint(vcfg), "variant": args.variant,
+            "ai_policy": vcfg.ai_policy, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
     (run_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
     done = {(r["g"], r["arm"]) for r in load_rows(run_dir)}
@@ -322,7 +336,7 @@ def main(argv: list[str] | None = None) -> None:
                     return False
                 pending.add(ex.submit(run_block, {
                     "games": b, "arms": arms, "seed": args.seed, "crowd": args.crowd, "scfg": scfg,
-                    "residuals": residuals, "done": {d for d in done if d[0] in b},
+                    "residuals": residuals, "done": {d for d in done if d[0] in b}, "variant": args.variant,
                     "telemetry": args.telemetry}))
                 return True
 

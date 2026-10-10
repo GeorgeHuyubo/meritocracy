@@ -33,7 +33,7 @@ from collections import defaultdict
 from fractions import Fraction
 from typing import Iterable, Sequence
 
-from config import Config, DEFAULT_CONFIG
+from config import Config, DEFAULT_CONFIG, red_shield_fee
 
 EXPECTED_CARD_VALUE = 10  # WORK/CORRUPT 牌面的期望点数，用作"一个回合当量"
 from models import (
@@ -1550,8 +1550,14 @@ def resolve_round(
         saved = False
         while p.warnings >= cfg.warnings_before_demotion:
             p.warnings -= cfg.warnings_before_demotion
-            if shielded:
+            fee = red_shield_fee(cfg, p.rank) if shielded else 0
+            if shielded and not (cfg.origin_red_shield_fee_strict and p.money < fee):
                 saved = True
+                # 打点费（ORIGIN_RED_SHIELD_FEE）：官照样保住，但要交钱；钱不够就全交。充公，不进分赃池。
+                # STRICT 版交不起就走下面的正常降级
+                fee = min(fee, p.money)
+                p.money -= fee
+                o.shield_fee_paid += fee
                 continue
             apply_demotion(p, DemotionKind.MINOR, cfg)
             demoted = True
@@ -1574,7 +1580,9 @@ def resolve_round(
         if saved:
             report_msgs.append(
                 f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
-                f"警告记满——上头有人打了招呼，{cfg.rank_name(p.rank)}的位子纹丝不动。"
+                f"警告记满——上头有人打了招呼"
+                f"{'、花钱打点压了下来' if cfg.origin_red_shield_fee is not None else ''}，"
+                f"{cfg.rank_name(p.rank)}的位子纹丝不动。"
             )
         elif demoted and hit_the_floor:
             report_msgs.append(

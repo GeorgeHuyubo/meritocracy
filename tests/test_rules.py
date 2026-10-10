@@ -44,6 +44,8 @@ CFG = dataclasses.replace(
     report_reward_fee=0,
 )
 REAL_CFG = DEFAULT_CONFIG
+# 红二代免费保官（2026-10 之前的规则），测「硬保」本身的用例用这个
+FREE_RED_CFG = dataclasses.replace(DEFAULT_CONFIG, origin_red_shield_fee=None)
 CALM = rules.event_by_id("CALM")
 KEY_PROJECT = rules.event_by_id("KEY_PROJECT")
 # 规则书第 18 节的算例写的是"重点项目 +1"。真实配置已经调到 +4（+1 实测毫无存在感），
@@ -3243,7 +3245,7 @@ class TestOrigins(unittest.TestCase):
             out.outcomes[1].corrupt_amount, out.outcomes[2].corrupt_amount
         )
 
-    # ---- 红二代 · 硬保 ----
+    # ---- 红二代 · 硬保（免费保官那一版：打点费开关关掉）----
 
     def _caught_twice(self, origin):
         """连吃两次查实（刚好攒满降职线），看官职动没动。"""
@@ -3255,7 +3257,7 @@ class TestOrigins(unittest.TestCase):
             last = resolve(
                 [victim, reporter],
                 {1: [Action(Card.CORRUPT, value=40)], 2: [Action(Card.REPORT, 1)]},
-                cfg=REAL_CFG,
+                cfg=FREE_RED_CFG,
             )
         return victim, last.outcomes[1]
 
@@ -3288,7 +3290,7 @@ class TestOrigins(unittest.TestCase):
                 resolve(
                     [victim, reporter],
                     {1: [Action(Card.CORRUPT, value=40)], 2: [Action(Card.REPORT, 1)]},
-                    cfg=REAL_CFG,
+                    cfg=FREE_RED_CFG,
                 )
             return reporter.money
 
@@ -3304,7 +3306,7 @@ class TestOrigins(unittest.TestCase):
         """他降不下来，"离降级越近越值钱"那一项对他应该归零。"""
         import ai as ai_mod
 
-        pool = ai_mod.AgentPool(cfg=REAL_CFG, rng=random.Random(0))
+        pool = ai_mod.AgentPool(cfg=FREE_RED_CFG, rng=random.Random(0))
         agent = pool.get(1)
         wmax = REAL_CFG.warnings_before_demotion
         public = {
@@ -3326,6 +3328,129 @@ class TestOrigins(unittest.TestCase):
         red = agent._score_report(public, private, opp[2])[0]
         plain = agent._score_report(public, private, opp[3])[0]
         self.assertLess(red, plain, "两人都差一次降级，举报红二代不该一样值钱")
+
+
+class TestRedShieldFee(unittest.TestCase):
+    """红二代「硬保」的打点费（ORIGIN_RED_SHIELD_FEE）：官照样保住，但每次保官要交钱，钱不够就全交。"""
+
+    # "官一定保得住"那一版（钱不够就全交）；默认规则是"交不起就降级"，见 test_default_rule
+    FEE_CFG = dataclasses.replace(REAL_CFG, origin_red_shield_fee=Fraction(1, 2),
+                                  origin_red_shield_fee_strict=False)
+
+    def test_default_rule(self):
+        """现行规则：现职买官价的一半，交不起就照常降级。"""
+        self.assertEqual(REAL_CFG.origin_red_shield_fee, Fraction(1, 2))
+        self.assertTrue(REAL_CFG.origin_red_shield_fee_strict)
+
+    def _caught_twice(self, cfg, money=60, warnings=0):
+        wmax = cfg.warnings_before_demotion
+        victim = PlayerState(id=1, name="红", rank=2, money=money, warnings=warnings, origin=Origin.RED)
+        reporter = PlayerState(id=2, name="举报人")
+        last = None
+        for _ in range(wmax - warnings if warnings < wmax else 1):
+            last = resolve(
+                [victim, reporter],
+                {1: [Action(Card.CORRUPT, value=40)], 2: [Action(Card.REPORT, 1)]},
+                cfg=cfg,
+            )
+        return victim, last
+
+    def test_switch_off_is_free(self):
+        red, out = self._caught_twice(FREE_RED_CFG)
+        self.assertEqual(out.outcomes[1].shield_fee_paid, 0)
+        self.assertNotIn("花钱打点", "".join(out.public_messages))
+
+    def test_fee_is_paid_and_rank_kept(self):
+        from config import red_shield_fee
+        free, _ = self._caught_twice(FREE_RED_CFG)
+        paid, out = self._caught_twice(self.FEE_CFG)
+        fee = red_shield_fee(self.FEE_CFG, 2)
+        self.assertEqual(fee, -(-REAL_CFG.money_cost(1) // 2))  # 市级的买官价是 money_cost(1)
+        self.assertEqual(paid.rank, 2)
+        self.assertEqual(free.money - paid.money, fee)
+        o = out.outcomes[1]
+        self.assertEqual(o.shield_fee_paid, fee)
+        self.assertTrue(o.origin_shielded_demotion)
+        self.assertIn("花钱打点", "".join(out.public_messages))
+        self.assertIn("上头打点保住官职", [r["label"] for r in o.ledger_lines("市级干部")])
+
+    def test_poor_red_pays_everything_and_still_keeps_rank(self):
+        red, out = self._caught_twice(self.FEE_CFG, money=0)
+        self.assertEqual(red.rank, 2)
+        self.assertEqual(red.money, 0)
+        self.assertEqual(out.outcomes[1].demotion, DemotionKind.NONE)
+
+    def test_two_triggers_in_one_round_pay_twice(self):
+        from config import red_shield_fee
+        wmax = REAL_CFG.warnings_before_demotion
+        red, out = self._caught_twice(self.FEE_CFG, money=200, warnings=2 * wmax - 1)
+        self.assertEqual(out.outcomes[1].shield_fee_paid, 2 * red_shield_fee(self.FEE_CFG, 2))
+        self.assertEqual(red.rank, 2)
+
+    def test_strict_version_demotes_when_he_cannot_pay(self):
+        strict = dataclasses.replace(self.FEE_CFG, origin_red_shield_fee_strict=True)
+        poor, out = self._caught_twice(strict, money=0)
+        self.assertEqual(poor.rank, 1)
+        self.assertEqual(out.outcomes[1].shield_fee_paid, 0)
+        self.assertEqual(out.outcomes[1].demotion, DemotionKind.MINOR)
+        rich, out = self._caught_twice(strict, money=200)
+        self.assertEqual(rich.rank, 2)
+        self.assertGreater(out.outcomes[1].shield_fee_paid, 0)
+        self.assertIn("交不起就照常降级", strict.origin("RED")["description"])
+
+    def test_skill_text_follows_the_switch(self):
+        self.assertNotIn("打点", FREE_RED_CFG.origin("RED")["description"])
+        self.assertIn("打点", self.FEE_CFG.origin("RED")["description"])
+
+    def test_ai_counts_warnings_against_a_red_who_must_pay(self):
+        """免费保官时"离降级越近越值钱"对红二代归零；要交钱了，这一项按打点费打折回来。"""
+        import ai as ai_mod
+
+        wmax = REAL_CFG.warnings_before_demotion
+        public = {
+            "players": [
+                {"id": 1, "name": "我", "rank": 2, "merit": 0, "tenure": 0, "origin": None, "warnings": 0},
+                {"id": 2, "name": "红", "rank": 2, "merit": 0, "tenure": 0, "origin": "RED", "warnings": wmax - 1},
+            ],
+            "round": 5, "last_result": None,
+            "picks_per_round": REAL_CFG.picks_per_round, "max_rounds": REAL_CFG.max_rounds,
+        }
+        private = {"rank": 2, "merit": 0, "money": 0, "origin": None}
+        scores = []
+        for cfg in (FREE_RED_CFG, self.FEE_CFG):
+            agent = ai_mod.AgentPool(cfg=cfg, rng=random.Random(0)).get(1)
+            agent.observe(public)
+            scores.append(agent._score_report(public, private, public["players"][1])[0])
+        self.assertGreater(scores[1], scores[0])
+
+    def test_ai_deducts_the_fee_from_its_money_estimate(self):
+        """看到红二代警告攒满却没降级：他交了打点费，估计里要扣掉。"""
+        import ai as ai_mod
+        from config import red_shield_fee
+
+        wmax = REAL_CFG.warnings_before_demotion
+        ests = []
+        for cfg in (FREE_RED_CFG, self.FEE_CFG):
+            agent = ai_mod.SmartAgent(1, cfg=cfg, rng=random.Random(0))
+            base = {"id": 2, "name": "红", "rank": 2, "merit": 0, "tenure": 0, "origin": "RED"}
+            me = {"id": 1, "name": "我", "rank": 2, "merit": 0, "tenure": 0, "origin": None, "warnings": 0}
+            pub0 = {"players": [me, dict(base, warnings=wmax - 1)], "round": 3, "last_result": None,
+                    "picks_per_round": 2, "max_rounds": 12}
+            agent.observe(pub0)
+            agent.models[2].money_est = 50.0
+            fact = {"player_id": 2, "attacked": False, "attacked_by": [], "attack_merit_loss": 0,
+                    "tenure_reset_by_attack": 0, "merit_promotion_blocked": False,
+                    "reported_by_player": True, "report_from_event": "", "warnings_issued": 1,
+                    "warnings_after": 0, "promotion": "NONE", "demotion": "NONE",
+                    "rank_before": 2, "rank_after": 2, "merit_after": 0, "tenure_after": 0}
+            mine = dict(fact, player_id=1, reported_by_player=False, warnings_issued=0)
+            pub1 = {"players": [me, dict(base, warnings=0)], "round": 4,
+                    "last_result": {"round": 3, "player_facts": [mine, fact], "wealth_top_ids": [],
+                                    "messages": [], "presidents": []},
+                    "picks_per_round": 2, "max_rounds": 12}
+            agent.observe(pub1)
+            ests.append(agent.models[2].money_est)
+        self.assertAlmostEqual(ests[0] - ests[1], red_shield_fee(self.FEE_CFG, 2))
 
 
 if __name__ == "__main__":

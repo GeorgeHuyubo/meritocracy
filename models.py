@@ -280,6 +280,8 @@ class PlayerRoundOutcome:
     laundered: int = 0
     # 红二代「硬保」这一轮替他挡掉了一次降职
     origin_shielded_demotion: bool = False
+    # 红二代保官交的打点费（ORIGIN_RED_SHIELD_FEE；私密，金额不进公报）
+    shield_fee_paid: int = 0
     # 这一轮的晋升是**花钱**买的（而不是凭政绩）。查实之后要据此把官撤回来。
     bought_rank_this_round: bool = False
 
@@ -326,6 +328,8 @@ class PlayerRoundOutcome:
             add("赃款被没收", money=-self.money_confiscated)
         if self.bribe_lost:
             add("行贿的钱打了水漂", money=-self.bribe_lost)
+        if self.shield_fee_paid:
+            add("上头打点保住官职", money=-self.shield_fee_paid)
         if self.promotion_money_cost or self.promotion_merit_cost:
             add(
                 f"晋升为{rank_name}",

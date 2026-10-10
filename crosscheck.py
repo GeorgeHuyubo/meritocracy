@@ -8,7 +8,7 @@
     <目录>                  大模型对局（game_*.json）；旧格式（没有遥测）从战报文字里还原能还原的
     control:<目录>          那个目录里的 Python 对照局（control_*.json）
     <文件>.jsonl            probe.py 的结果（要带 --telemetry 跑才有局内指标）
-    python:symmetric:N      现跑 N 局学习型 AI 自对弈（六个座位都算）
+    python:symmetric:N      现跑 N 局学习型 AI 自对弈（六个座位都算）；末尾加 @变体 = 在 sweep.py 的规则变体下跑
     python:focal:N[:陪练]   现跑 N 局焦点座位局（学习型 AI 坐焦点，陪练默认 learned）
 
 被统计的座位：有焦点座位的局只算焦点座位，否则六个座位都算。
@@ -115,6 +115,7 @@ def normalize_llm(gm: dict, cfg: Config = CFG) -> dict[str, Any]:
         "rounds_data": _rounds_from_telemetry(tel) if tel else _rounds_from_legacy(gm, cfg),
         "legacy": not tel,
         "decisions": [d for d in gm.get("decisions", []) if d.get("controller", "llm") == "llm"],
+        "rules_fp": gm.get("rules_fp"),
     }
 
 
@@ -138,10 +139,12 @@ def load_source(spec: str, workers: int = 8, seed: int = 11) -> tuple[str, list[
         return f"Python 对照（{d.name}）", [normalize_probe(json.loads(p.read_text(encoding="utf-8")))
                                           for p in sorted(d.glob("control_*.json"))]
     if spec.startswith("python:"):
-        parts = spec.split(":")
+        body, _, variant = spec.partition("@")
+        parts = body.split(":")
         kind, n = parts[1], int(parts[2])
         crowd = parts[3] if len(parts) > 3 else "learned"
-        return f"Python {kind}", run_python(kind, n, crowd, workers, seed)
+        return (f"Python {kind}" + (f"（{variant}）" if variant else ""),
+                run_python(kind, n, crowd, workers, seed, variant))
     p = Path(spec)
     if p.suffix == ".jsonl":
         rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -151,22 +154,23 @@ def load_source(spec: str, workers: int = 8, seed: int = 11) -> tuple[str, list[
 
 
 def _py_block(args: tuple) -> list[dict[str, Any]]:
-    kind, games, crowd, seed = args
+    kind, games, crowd, seed, variant = args
     import probe
     import search_ai
 
+    cfg = probe.variant_cfg(variant)
     out = []
     for g in games:
         if kind == "focal":
-            r = probe.play_probe_game(CFG, g, seed, "learned", crowd, search_ai.SearchConfig(budget=0),
+            r = probe.play_probe_game(cfg, g, seed, "learned", crowd, search_ai.SearchConfig(budget=0),
                                       want_telemetry=True)
-            out.append(normalize_probe(r))
+            out.append(dict(normalize_probe(r), rules_fp=T.rules_fingerprint(cfg)))
             continue
-        seats = list(CFG.origin_ids())
+        seats = list(cfg.origin_ids())
         random.Random(f"{seed}/{g}/sym").shuffle(seats)
         gs = T.game_seed(seed, g)
-        game = T.new_game(CFG, seats, gs)
-        pool = ai.make_pool(CFG, random.Random(f"{gs}/sym"))
+        game = T.new_game(cfg, seats, gs)
+        pool = ai.make_pool(cfg, random.Random(f"{gs}/sym"))
         tel = T.drive_game(game, {p: (lambda gm, pid: ai.turn(gm, pid, pool)) for p in game.players}, gs)
         summ = T.game_summary(game)
         out.append({
@@ -174,15 +178,16 @@ def _py_block(args: tuple) -> list[dict[str, Any]]:
             "players": {p["pid"]: {"origin": p["origin"], "controller": "learned", "place": p["place"],
                                    "rank": p["rank"]} for p in summ["players"]},
             "units": sorted(game.players), "rounds_data": _rounds_from_telemetry(tel),
-            "legacy": False, "decisions": [],
+            "legacy": False, "decisions": [], "rules_fp": T.rules_fingerprint(cfg),
         })
     return out
 
 
-def run_python(kind: str, n: int, crowd: str = "learned", workers: int = 8, seed: int = 11) -> list[dict]:
+def run_python(kind: str, n: int, crowd: str = "learned", workers: int = 8, seed: int = 11,
+               variant: str = "") -> list[dict]:
     chunks = [list(range(i, min(n, i + 25))) for i in range(0, n, 25)]
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        res = list(ex.map(_py_block, [(kind, c, crowd, seed) for c in chunks]))
+        res = list(ex.map(_py_block, [(kind, c, crowd, seed, variant) for c in chunks]))
     return [g for block in res for g in block]
 
 
@@ -355,8 +360,9 @@ def render(label_a: str, label_b: str, games_a: list, games_b: list, rows: list[
 def to_source(label: str, games: list[dict], family: str) -> dict[str, Any]:
     rows = unit_rows(games)
     focal = all(len(g["units"]) == 1 for g in games)
+    fp = next((g.get("rules_fp") for g in games if g.get("rules_fp")), None) or T.rules_fingerprint(CFG)
     return bs.origin_source(label, family, "focal" if focal else "symmetric", None,
-                            T.rules_fingerprint(CFG), [(r["origin"], r["win"], r["place"]) for r in rows],
+                            fp, [(r["origin"], r["win"], r["place"]) for r in rows],
                             n_games=len(games),
                             notes="legacy" if any(g["legacy"] for g in games) else "")
 

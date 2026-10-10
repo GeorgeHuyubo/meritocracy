@@ -96,6 +96,18 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "grind3": {"origin_grinder_overtime_multiplier": 3},
     "rich18": {"origin_old_money_start": 18},   # 富二代开局钱（默认 15）
     "rich20": {"origin_old_money_start": 20},
+    # 红二代「硬保」：redfree = 免费保官（2026-10 之前的规则）；现行默认 = redfee50s
+    "redfree": {"origin_red_shield_fee": None},
+    # 红二代「硬保」要交打点费（官照样保住）：现职买官价的 1/2、1、3/2、2 倍
+    "redfee50": {"origin_red_shield_fee": Fraction(1, 2)},
+    "redfee100": {"origin_red_shield_fee": Fraction(1)},
+    "redfee150": {"origin_red_shield_fee": Fraction(3, 2)},
+    "redfee200": {"origin_red_shield_fee": Fraction(2)},
+    "redfee300": {"origin_red_shield_fee": Fraction(3)},
+    "redfee400": {"origin_red_shield_fee": Fraction(4)},
+    # 交不起就照常降级的版本
+    "redfee50s": {"origin_red_shield_fee": Fraction(1, 2), "origin_red_shield_fee_strict": True},
+    "redfee100s": {"origin_red_shield_fee": Fraction(1), "origin_red_shield_fee_strict": True},
 }
 
 
