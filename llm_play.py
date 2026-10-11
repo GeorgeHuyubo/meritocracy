@@ -277,6 +277,23 @@ def variant_cfg(variant: str) -> Config:
     return sweep.build(variant, own_ai=True)
 
 
+def final_order_text(cfg: Config) -> str:
+    """打满轮数怎么比，按 cfg.final_ranking_keys 生成（默认：先比金钱、再比官职、最后比政绩）。"""
+    cn = {"money": "金钱", "rank": "官职", "merit": "政绩"}
+    keys = [cn.get(k, k) for k in cfg.final_ranking_keys]
+    if len(keys) == 1:
+        return f"比{keys[0]}"
+    words = ["先比"] + ["再比"] * (len(keys) - 2) + ["最后比"]
+    return "、".join(w + k for w, k in zip(words, keys))
+
+
+def gossip_text(cfg: Config) -> str:
+    if cfg.gossip_illegal_first:
+        return ("点名本轮非法收入（没被查实的贪污 + 举报分到的赃款）最多的人；"
+                "只有并列第一、非法收入一样多时，才按合法收入（工资、加班费、会计洗白的钱）决定点谁")
+    return "点名本轮到手钱最多的人（工资+没被查实的贪污+举报分到的赃款）"
+
+
 def rules_text(cfg: Config) -> str:
     ranks = [cfg.rank_name(r) for r in range(cfg.president_rank + 1)]
     steps = "；".join(
@@ -294,7 +311,7 @@ def rules_text(cfg: Config) -> str:
     hat_reward = " / ".join(f"{ranks[r]} {rules.work_merit(cfg.attack_hat_reward, r, None, cfg)}"
                             for r in range(cfg.president_rank))
     return f"""【游戏：Meritocracy（官场升职）】6 人，最多 {cfg.max_rounds} 轮。官职：{' < '.join(ranks)}。
-目标：第一个当上国家主席的人获胜（同一轮多人登顶，家底厚的那个当选）；打满 {cfg.max_rounds} 轮没人登顶就比官职和资源。
+目标：第一个当上国家主席的人获胜（同一轮多人登顶，先比金钱、再比政绩，家底厚的那个当选，其余退回省级）；打满 {cfg.max_rounds} 轮没人登顶就{final_order_text(cfg)}（官职低但钱多的人照样能赢）。
 升职门槛（升一级要打一张对应的晋升卡）：{steps}。升职后多余的政绩会打折，钱只扣门槛。
 
 每轮：每人发 6 张牌，最多打出 {cfg.picks_per_round} 张，按你排的顺序一张一张结算，然后公布全局事件和结算结果。
@@ -313,7 +330,7 @@ def rules_text(cfg: Config) -> str:
     主席那一步钱和政绩都要够；打政绩升职就怕攻击，打贿赂升职就怕举报
 工龄：连续 {cfg.tenure_required} 轮官职没变（没升没降），自动升一级，不用晋升卡；记一次降职警告会把工龄清零；
 工龄{'也能' if cfg.tenure_can_reach_president else '升不到'}国家主席。
-钱是暗的（别人看不到你有多少钱），政绩和官职是公开的。每轮公布"坊间传闻"：点名本轮到手钱最多的人（工资+没被查实的贪污+举报分到的赃款），不报金额。
+钱是暗的（别人看不到你有多少钱），政绩和官职是公开的。每轮公布"坊间传闻"：{gossip_text(cfg)}，不报金额。
 全局事件（反腐风暴会查办贪得多的人、经济好坏会让金钱收益翻倍或减半、重点项目让埋头工作加政绩……）在出牌**之后**才公布。
 克制关系：攻击克制走政绩路线的人，举报克制走金钱路线（贪污、买官）的人。
 

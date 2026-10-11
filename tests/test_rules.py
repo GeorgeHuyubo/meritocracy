@@ -3453,5 +3453,158 @@ class TestRedShieldFee(unittest.TestCase):
         self.assertAlmostEqual(ests[0] - ests[1], red_shield_fee(self.FEE_CFG, 2))
 
 
+class TestSmallOriginTweaks(unittest.TestCase):
+    """坊间传闻先比非法收入、官二代最后一级不打折、富二代开局钱：几个开关的行为和说明。"""
+
+    HIDE = dataclasses.replace(REAL_CFG, gossip_illegal_first=True)
+    NOTOP = dataclasses.replace(REAL_CFG, origin_patronage_top_ratio=Fraction(1))
+
+    def _gossip(self, cfg):
+        acc = PlayerState(id=1, name="会计", origin=Origin.ACCOUNTANT)
+        plain = PlayerState(id=2, name="普通")
+        out = resolve([acc, plain], {1: [Action(Card.CORRUPT, value=40)], 2: [Action(Card.CORRUPT, value=40)]},
+                      cfg=cfg)
+        return out
+
+    def test_laundered_money_is_not_gossiped_when_switched_on(self):
+        out = self._gossip(self.HIDE)
+        self.assertGreater(out.outcomes[1].laundered, 0)
+        self.assertEqual(out.wealth_top_ids, [2])  # 贪得一样多，会计洗白的那份算合法收入，只有普通人上榜
+
+    def test_illegal_income_beats_salary(self):
+        """省级拿高工资、贪得少；基层贪得多：老规则比总收入点省级，新规则比非法收入点基层。"""
+        top = REAL_CFG.president_rank - 1
+        big = PlayerState(id=1, name="高官", rank=top)
+        small = PlayerState(id=2, name="小吏", rank=0)
+        acts = {1: [Action(Card.CORRUPT, value=4)], 2: [Action(Card.CORRUPT, value=14)]}
+        old = resolve([big, small], acts, cfg=REAL_CFG)
+        big2, small2 = PlayerState(id=1, name="高官", rank=top), PlayerState(id=2, name="小吏", rank=0)
+        new = resolve([big2, small2], acts, cfg=self.HIDE)
+        self.assertGreater(old.outcomes[1].corrupt_amount + REAL_CFG.salary(top),
+                           old.outcomes[2].corrupt_amount + REAL_CFG.salary(0))  # 前提：总收入高官多
+        self.assertLess(new.outcomes[1].corrupt_amount, new.outcomes[2].corrupt_amount)  # 前提：非法收入小吏多
+        self.assertEqual(old.wealth_top_ids, [1])
+        self.assertEqual(new.wealth_top_ids, [2])
+
+    def test_tie_on_illegal_income_is_broken_by_legal_income(self):
+        """会计贪 28 洗白 14、普通人贪 14：非法收入都是 14，会计多出 14 的合法收入，点会计。"""
+        acc = PlayerState(id=1, name="会计", origin=Origin.ACCOUNTANT)
+        plain = PlayerState(id=2, name="普通")
+        out = resolve([acc, plain], {1: [Action(Card.CORRUPT, value=28)], 2: [Action(Card.CORRUPT, value=14)]},
+                      cfg=self.HIDE)
+        o1, o2 = out.outcomes[1], out.outcomes[2]
+        self.assertEqual(o1.corrupt_amount - o1.laundered, o2.corrupt_amount)  # 前提：非法收入相等
+        self.assertEqual(out.wealth_top_ids, [1])
+
+    def test_no_illegal_income_no_gossip(self):
+        top = REAL_CFG.president_rank - 1
+        out = resolve([PlayerState(id=1, name="高官", rank=top), PlayerState(id=2, name="小吏")],
+                      {1: [Action(Card.WORK, value=6)], 2: [Action(Card.WORK, value=6)]}, cfg=self.HIDE)
+        self.assertEqual(out.wealth_top_ids, [])
+
+    def test_switch_off_gossips_both(self):
+        out = self._gossip(REAL_CFG)
+        self.assertEqual(sorted(out.wealth_top_ids), [1, 2])
+
+    def test_official_last_step_not_discounted_when_switched_off(self):
+        top = REAL_CFG.president_rank - 1
+        self.assertEqual(rules.merit_cost_at(top, "OFFICIAL", self.NOTOP), REAL_CFG.merit_cost(top))
+        self.assertLess(rules.merit_cost_at(top, "OFFICIAL", REAL_CFG), REAL_CFG.merit_cost(top))
+        for r in range(top):
+            self.assertEqual(rules.merit_cost_at(r, "OFFICIAL", self.NOTOP),
+                             rules.merit_cost_at(r, "OFFICIAL", REAL_CFG))
+        mid = dataclasses.replace(REAL_CFG, origin_patronage_top_ratio=Fraction(5, 6))
+        self.assertEqual(rules.merit_cost_at(top, "OFFICIAL", mid), -(-REAL_CFG.merit_cost(top) * 5 // 6))
+        self.assertIn("5/6 折", mid.origin("OFFICIAL")["description"])
+
+    def test_skill_texts_follow_the_switches(self):
+        self.assertIn("传闻", self.HIDE.origin("ACCOUNTANT")["description"])
+        self.assertNotIn("传闻", REAL_CFG.origin("ACCOUNTANT")["description"])
+        self.assertIn("不打折", self.NOTOP.origin("OFFICIAL")["description"])
+        self.assertNotIn("不打折", REAL_CFG.origin("OFFICIAL")["description"])
+        rich20 = dataclasses.replace(REAL_CFG, origin_old_money_start=20)
+        self.assertIn("开局白拿 20 金钱", rich20.origin("RICH")["description"])
+
+    def test_ai_scales_up_an_accountant_named_in_gossip(self):
+        """会计被传闻点名：传出来的只是没洗白的那份，AI 推断他的脏钱要放大。"""
+        import ai as ai_mod
+
+        ests = []
+        for cfg in (REAL_CFG, self.HIDE):
+            agent = ai_mod.SmartAgent(1, cfg=cfg, rng=random.Random(0))
+            acc = {"id": 2, "name": "会计", "rank": 0, "merit": 0, "tenure": 0, "origin": "ACCOUNTANT", "warnings": 0}
+            me = {"id": 1, "name": "我", "rank": 0, "merit": 0, "tenure": 0, "origin": None, "warnings": 0}
+            agent.observe({"players": [me, acc], "round": 1, "last_result": None,
+                           "picks_per_round": 2, "max_rounds": 12})
+            fact = {"player_id": 2, "attacked": False, "attacked_by": [], "attack_merit_loss": 0,
+                    "tenure_reset_by_attack": 0, "merit_promotion_blocked": False,
+                    "reported_by_player": False, "report_from_event": "", "warnings_issued": 0,
+                    "warnings_after": 0, "promotion": "NONE", "demotion": "NONE",
+                    "rank_before": 0, "rank_after": 0, "merit_after": 0, "tenure_after": 1}
+            mine = dict(fact, player_id=1)
+            agent.observe({"players": [me, dict(acc, tenure=1)], "round": 2,
+                           "last_result": {"round": 1, "player_facts": [mine, fact], "wealth_top_ids": [2],
+                                           "messages": [], "presidents": []},
+                           "picks_per_round": 2, "max_rounds": 12},
+                          {"rank": 0, "merit": 0, "money": 40, "origin": None,
+                           "private_result": {"salary": REAL_CFG.salary(0), "corrupt_amount": 30,
+                                              "report_effective": False, "money_from_reports": 0}})
+            ests.append(agent.models[2].money_est)
+        self.assertGreater(ests[1], ests[0])
+
+
+class TestFeedbackClarity(unittest.TestCase):
+    """大模型反馈里指出的三处"看不懂"：抢功抢到 0 点没说原因、同轮两人都显示登顶、终局比较顺序的描述。"""
+
+    def test_zero_steal_explains_why(self):
+        """对方只攒了 2 点（可抢 1 点），三个人一起抢：每人 0 点，要说清楚是人多分不到。"""
+        target = player(1)
+        attackers = [player(i) for i in (2, 3, 4)]
+        out = resolve([target] + attackers,
+                      {1: [Action(Card.WORK, value=2)], 2: [Action(Card.ATTACK, 1)],
+                       3: [Action(Card.ATTACK, 1)], 4: [Action(Card.ATTACK, 1)]})
+        self.assertEqual(out.outcomes[2].merit_from_attacks, 0)
+        notes = "".join(out.outcomes[2].private_notes)
+        self.assertIn("3 个人", notes)
+        self.assertIn("不到 1 点", notes)
+        self.assertNotIn("抢走 0 点", "".join(out.public_messages))
+
+    def test_tiny_gain_explains_why(self):
+        """对方只攒了 1 点：按一半抢不到 1 点。"""
+        out = resolve([player(1), player(2)], {1: [Action(Card.WORK, value=1)], 2: [Action(Card.ATTACK, 1)]})
+        self.assertEqual(out.outcomes[2].merit_from_attacks, 0)
+        self.assertIn("不到 1 点", "".join(out.outcomes[2].private_notes))
+        self.assertNotIn("抢走 0 点", "".join(out.public_messages))
+
+    def test_two_presidents_same_round_messages_name_one_winner(self):
+        from game import Game
+        from models import DealtCard
+        cfg = REAL_CFG
+        top = cfg.president_rank - 1
+        game = Game(game_id="pt", cfg=cfg, rng=random.Random(1))
+        for i in range(3):
+            game.add_player(f"P{i + 1}")
+        game.start_game()
+        for pid, money in ((1, 120), (2, 80)):
+            pl = game.players[pid]
+            pl.rank, pl.merit, pl.money = top, 200, money
+            game.hands[pid] = [DealtCard(Card.PROMOTE_ANY, 0)] + [DealtCard(Card.WORK, 6)] * 5
+            game.select_actions(pid, [{"action": "PROMOTE_ANY"}])
+        game.select_actions(3, [])
+        game.force_lock_all()
+        game.reveal_event()
+        out = game.resolve()
+        self.assertEqual(game.winners, [1])
+        msgs = "".join(out.public_messages)
+        self.assertNotIn("P2 政绩金钱两手都硬，晋升为国家主席", msgs)
+        self.assertIn("退回", msgs)
+        self.assertEqual(game.players[2].rank, top)
+
+    def test_llm_rules_text_states_final_ranking_order(self):
+        import llm_play
+        text = llm_play.rules_text(REAL_CFG)
+        self.assertIn("先比金钱、再比官职、最后比政绩", text)
+
+
 if __name__ == "__main__":
     unittest.main()

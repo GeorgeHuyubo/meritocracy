@@ -374,18 +374,27 @@ class SmartAgent:
         # 我自己这轮到手多少？完全知情，作为"可证实的最高收入"的候选之一。
         my_income = 0
         mine = (private or {}).get("private_result") or {}
+        illegal_first = self.cfg.gossip_illegal_first
+        my_illegal = 0
         if mine:
-            my_income = int(mine.get("salary", 0)) + (
-                0 if mine.get("report_effective") else int(mine.get("corrupt_amount", 0))
+            hidden = int(mine.get("laundered", 0)) if illegal_first else 0
+            my_illegal = (
+                0 if mine.get("report_effective") else int(mine.get("corrupt_amount", 0)) - hidden
             ) + int(mine.get("money_from_reports", 0))
+            my_income = int(mine.get("salary", 0)) + my_illegal
         # 能证实的最高收入：每个人至少拿到自己那份工资，而我自己的是精确值
         known_income = max(top_salary, my_income)
+        # GOSSIP_ILLEGAL_FIRST 时传闻只比非法收入（工资只在并列时拿来分先后），工资那一项要去掉：
+        # "能证实的最高非法收入"就是我自己的
+        if illegal_first:
+            known_income = my_illegal
 
         # 榜首这轮脏钱有多少？先估出来，因为它同时是**所有其他人的上界**（见下）。
         # 被查实的榜首是光凭工资上的榜，他计入传闻的脏钱是 0。
         top_dirty = max(
             (
                 self._dirty_prior(f, players.get(pid), self._prev_players.get(pid))[1]
+                * self._gossip_visible(players.get(pid))
                 for pid, f in facts.items()
                 if pid in top_ids and not self._caught(f)
                 and players.get(pid) and self._prev_players.get(pid)
@@ -396,7 +405,7 @@ class SmartAgent:
             top_dirty,
             max(
                 (
-                    float(known_income - self.cfg.salary(f["rank_before"]))
+                    float(known_income - (0 if illegal_first else self.cfg.salary(f["rank_before"])))
                     for pid, f in facts.items()
                     if pid in top_ids
                 ),
@@ -441,7 +450,9 @@ class SmartAgent:
                 #    => 他的脏钱 >= 那个数 - 他自己的工资
                 # 光看工资的话，官最大的那个被点名说明不了什么；
                 # 但只要我自己这轮捞了一笔而他还是压过我，他就一定也捞了。
-                floor_dirty = float(max(0, known_income - my_salary))
+                # GOSSIP_ILLEGAL_FIRST：他的非法收入 >= 我的（工资不参与）；会计传出来的只是没洗白的那份
+                floor_dirty = float(max(0, known_income - (0 if illegal_first else my_salary))) \
+                    / self._gossip_visible(cur)
                 if floor_dirty > 0:
                     gained = max(gained, floor_dirty, self._expected_corrupt(rank_before))
                     evidence = 1.0
@@ -461,10 +472,10 @@ class SmartAgent:
                 # 一个闷头不动的人也会被每轮加一份先验，估计越飘越高。
                 # 没人被点名 = 没人贪了钱还没被查（只有工资可比时不广播），上界直接是 0
                 cap = (
-                    top_dirty + float(max(top_salary, my_salary) - my_salary)
+                    top_dirty + (0.0 if illegal_first else float(max(top_salary, my_salary) - my_salary))
                     if top_ids
                     else 0.0
-                )
+                ) / self._gossip_visible(cur)
                 if gained > cap:
                     evidence *= cap / gained if gained else 0.0
                     gained = max(0.0, cap)
@@ -504,6 +515,14 @@ class SmartAgent:
                 model.money_est = max(0.0, model.money_est)
 
         self._prev_players = players
+
+    def _gossip_visible(self, p: dict[str, Any] | None) -> float:
+        """他的脏钱有多大比例会进坊间传闻：GOSSIP_ILLEGAL_FIRST 时会计洗白的那份算合法，只传没洗白的。"""
+        if not (p and self.cfg.gossip_illegal_first):
+            return 1.0
+        if (self.cfg.origin(p.get("origin")) or {}).get("id") != "ACCOUNTANT":
+            return 1.0
+        return max(0.1, 1.0 - float(self.cfg.origin_accountant_launder_ratio))
 
     def _start_money(self, p: dict[str, Any]) -> float:
         """开局时公开可知的存款：富二代白拿 origin_old_money_start，其他人 0。

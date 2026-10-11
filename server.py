@@ -455,6 +455,7 @@ async def api_config() -> JSONResponse:
             "bribe_forfeit_ratio": str(cfg.bribe_forfeit_ratio),
             "origin_rich_free_redraws": cfg.origin_rich_free_redraws,
             "origin_red_family_card": cfg.origin_red_family_card,
+            "gossip_illegal_first": cfg.gossip_illegal_first,
             "redraw_costs": list(cfg.redraw_costs),
             "redraw_cost_growth": cfg.redraw_cost_growth,
             "warnings_before_demotion": cfg.warnings_before_demotion,

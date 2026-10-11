@@ -505,6 +505,9 @@ class Game:
         self.last_outcome = outcome
         self.history.append(outcome)
         self._accumulate_stats(outcome)
+        # 多人同轮登顶要先判出谁当选、把公报改对，再写进日志——
+        # 不然公报里落选的人也挂着"晋升为国家主席"，看起来像两个人都登顶了
+        game_over_reason = self._settle_presidents(outcome) if outcome.presidents else ""
         self.log(f"全局事件：{outcome.event.name}——{outcome.event.description}")
         for msg in outcome.public_messages:
             self.log(msg)
@@ -513,42 +516,7 @@ class Game:
 
         self.ready.clear()
         if outcome.presidents:
-            winners = list(outcome.presidents)
-            tied_count = len(winners)
-            if tied_count > 1 and self.cfg.president_tiebreak:
-                # 同一轮多人登顶：按家底（金钱 > 政绩）分高下
-                keyed = {
-                    pid: (self.players[pid].money, self.players[pid].merit) for pid in winners
-                }
-                best = max(keyed.values())
-                winners = [pid for pid in winners if keyed[pid] == best]
-            self.winners = winners
-            names = "、".join(self.players[pid].name for pid in self.winners)
-            if tied_count > len(self.winners):
-                # 主席只有一个位子（真平局除外）：落选的退回省级，钱和政绩不动。
-                # 不然终局结算里会同时挂着好几个"国家主席"。
-                for pid in outcome.presidents:
-                    if pid not in self.winners:
-                        self.players[pid].rank = self.cfg.president_rank - 1
-                        if pid in outcome.outcomes:
-                            outcome.outcomes[pid].rank_after = self.players[pid].rank
-                        # 本轮存档（_accumulate_stats）在这之前就写好了，跟着改，
-                        # 不然复盘工具重演到这一轮会报"官职对不上"
-                        for rec in self.archive[-1]["players"]:
-                            if rec["player_id"] == pid:
-                                rec["rank_after"] = self.players[pid].rank
-                candidates = "、".join(self.players[pid].name for pid in outcome.presidents)
-                verdict = (
-                    f"{names} 家底更厚，成功当选国家主席"
-                    if len(self.winners) == 1
-                    else f"{names} 家底一样厚，共同当选国家主席"
-                )
-                self.game_over_reason = (
-                    f"国家主席最大候选人为：{candidates}，最终还是因为{verdict}。"
-                )
-                outcome.presidents = list(self.winners)
-            else:
-                self.game_over_reason = f"{names} 登上国家主席之位，游戏结束！"
+            self.game_over_reason = game_over_reason
             self.log(self.game_over_reason)
             self.phase = Phase.GAME_OVER
         elif self.round_number >= self.cfg.max_rounds:
@@ -639,7 +607,7 @@ class Game:
     def final_standing(self) -> list[int]:
         """终局名次（高到低）。
 
-        口径必须和真正的胜负判定一致（见 FINAL_RANKING_KEYS，默认 官职 > 金钱 > 政绩）。
+        口径必须和真正的胜负判定一致（见 FINAL_RANKING_KEYS，默认 金钱 > 官职 > 政绩）。
         已判定的赢家（比如当上国家主席的人）直接排在最前面，
         否则会出现"结算说你赢了、复盘说你垫底"这种自相矛盾。
         """
@@ -771,6 +739,55 @@ class Game:
         if self.phase is not Phase.ROUND_RESULT:
             raise GameError("现在不能进入下一轮。")
         self.begin_round()
+
+    def _settle_presidents(self, outcome: RoundOutcome) -> str:
+        """这一轮有人登顶：判出谁当选（同轮多人按家底），落选的退回省级、公报改对。返回结局说明。"""
+        winners = list(outcome.presidents)
+        tied_count = len(winners)
+        if tied_count > 1 and self.cfg.president_tiebreak:
+            # 同一轮多人登顶：按家底（金钱 > 政绩）分高下
+            keyed = {
+                pid: (self.players[pid].money, self.players[pid].merit) for pid in winners
+            }
+            best = max(keyed.values())
+            winners = [pid for pid in winners if keyed[pid] == best]
+        self.winners = winners
+        names = "、".join(self.players[pid].name for pid in self.winners)
+        if tied_count <= len(self.winners):
+            return f"{names} 登上国家主席之位，游戏结束！"
+        # 主席只有一个位子（真平局除外）：落选的退回省级，钱和政绩不动。
+        # 不然终局结算里会同时挂着好几个"国家主席"。
+        top_name = self.cfg.rank_name(self.cfg.president_rank - 1)
+        pres_name = self.cfg.rank_name(self.cfg.president_rank)
+        losers = [pid for pid in outcome.presidents if pid not in self.winners]
+        for pid in losers:
+            self.players[pid].rank = self.cfg.president_rank - 1
+            if pid in outcome.outcomes:
+                outcome.outcomes[pid].rank_after = self.players[pid].rank
+            # 本轮存档（_accumulate_stats）在这之前就写好了，跟着改，
+            # 不然复盘工具重演到这一轮会报"官职对不上"
+            for rec in self.archive[-1]["players"]:
+                if rec["player_id"] == pid:
+                    rec["rank_after"] = self.players[pid].rank
+        # 公报里落选者那条"晋升为国家主席"改成"够格但落选"，再补一条谁当选
+        loser_names = {self.players[pid].name for pid in losers}
+        fixed = []
+        for msg in outcome.public_messages:
+            who = msg.split(" ", 1)[0]
+            if who in loser_names and f"晋升为{pres_name}" in msg:
+                msg = f"{who} 也够格登顶，但同一轮有人家底更厚，主席落选，仍是{top_name}。"
+            fixed.append(msg)
+        candidates = "、".join(self.players[pid].name for pid in outcome.presidents)
+        verdict = (
+            f"{names} 家底更厚，成功当选国家主席"
+            if len(self.winners) == 1
+            else f"{names} 家底一样厚，共同当选国家主席"
+        )
+        fixed.append(f"同一轮 {candidates} 都够格登顶，主席只有一个：{verdict}；"
+                     f"{'、'.join(sorted(loser_names))} 退回{top_name}。")
+        outcome.public_messages = fixed
+        outcome.presidents = list(self.winners)
+        return f"国家主席最大候选人为：{candidates}，最终还是因为{verdict}。"
 
     @property
     def is_over(self) -> bool:

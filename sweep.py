@@ -96,6 +96,12 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "grind3": {"origin_grinder_overtime_multiplier": 3},
     "rich18": {"origin_old_money_start": 18},   # 富二代开局钱（默认 15）
     "rich20": {"origin_old_money_start": 20},
+    # 坊间传闻先比非法收入、并列才看合法收入（会计洗白的钱算合法）；官二代最后一级（省级 -> 主席）不打折
+    "gossip2": {"gossip_illegal_first": True},
+    "offtop": {"origin_patronage_top_ratio": Fraction(1)},          # 最后一步不打折（45）
+    "offtop56": {"origin_patronage_top_ratio": Fraction(5, 6)},     # 最后一步要 38
+    "offtop45": {"origin_patronage_top_ratio": Fraction(4, 5)},     # 最后一步要 36
+    "rich25": {"origin_old_money_start": 25},
     # 红二代「硬保」：redfree = 免费保官（2026-10 之前的规则）；现行默认 = redfee50s
     "redfree": {"origin_red_shield_fee": None},
     # 红二代「硬保」要交打点费（官照样保住）：现职买官价的 1/2、1、3/2、2 倍

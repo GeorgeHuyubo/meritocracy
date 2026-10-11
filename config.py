@@ -528,6 +528,12 @@ WEALTH_BROADCAST_LINES_MULTI: list[str] = [
 ]
 WEALTH_BROADCAST_NAME_JOINER: str = " 和 "
 
+# 坊间传闻点谁的名：
+#   False = 比"本轮经手的钱"= 合法收入 + 非法收入，最多的上榜（老规则）
+#   True  = 先比非法收入（没被查实的赃款 + 举报分到的钱），最多的上榜；只有并列第一、非法收入相等时，
+#           才拿合法收入（工资、加班费、会计洗白的钱）决定写谁。没人有非法收入就不传（两种都一样）
+GOSSIP_ILLEGAL_FIRST: bool = False
+
 # 「反腐风暴」查办多大比例的人：按总人数算，向上取整。
 # 6 人局 -> ceil(6/3) = 2 人；并列卡在分界线上的一起算进去。
 # 本轮没贪污的人不会被卷进来，实际查办人数不会超过当轮贪污的人数。
@@ -569,6 +575,9 @@ ORIGIN_RICH_FREE_REDRAWS: int = 1
 # 官二代响 1.21 次，还是个要自己去对门槛表才看得出来的折扣。
 # 加深到 2/3 之后基层少一张工作牌、省级少两张多，够明显了。
 ORIGIN_PATRONAGE_MERIT_RATIO: Fraction = Fraction(2, 3)
+# 官二代最后一级（省级 -> 主席）的折扣：None = 和前面几级一样（ORIGIN_PATRONAGE_MERIT_RATIO）；
+# 1 = 最后一步不打折、照常要原价政绩；5/6、4/5 = 打轻一点的折。
+ORIGIN_PATRONAGE_TOP_RATIO: Fraction | None = None
 
 # 卷王「加班」：埋头工作的牌和普通人一样；同一轮打出两张埋头工作时，
 # **这两张的政绩最后 ×这个数**（在政治攻击之后乘：抢功只抢得到乘之前的那份）。
@@ -594,6 +603,7 @@ ORIGIN_GRINDER_MIN_WORK: int = 2
 # 这样举报他和举报别人回本一样，不会出现"没人愿意抓会计"那种副作用。
 # 1/2 和 REPORT_REWARD_RATIO 的 1/2 正好互补，充公那份刚好被吃干净。
 ORIGIN_ACCOUNTANT_LAUNDER_RATIO: Fraction = Fraction(1, 2)
+# 注意：单纯调高 ORIGIN_ACCOUNTANT_LAUNDER_RATIO 加强不了会计——没收时至少要抄够举报人那一半（rules.py）。
 
 # 官二代「透风」：选牌阶段就知道本轮全局事件。2026-10 起**取消**（False），只剩门槛折扣。
 # 依据：大模型 100 局里官二代被投"最强"270 次，理由几乎都是"门槛打折 + 提前知道事件，半个开卷考试"；
@@ -733,9 +743,20 @@ def _origin_text(cfg: "Config", oid: str) -> dict[str, str]:
     """几个受开关影响的出身技能说明（skill / description）；不受影响的返回空。"""
     ratio = cfg.origin_patronage_merit_ratio
     base = cfg.promotion_merit_costs[0]
+    if oid == "RICH":
+        return {"description": f"开局白拿 {cfg.origin_old_money_start} 金钱；每轮第一次换牌免费，"
+                               "再换才像别人一样从底价开始花钱。"}
     if oid == "OFFICIAL":
         text = (f"有人提拔：每一级的政绩门槛只要别人的 {ratio}"
                 f"（{base} 点的那一级，他只要 {-(-base * ratio.numerator // ratio.denominator)} 点）")
+        top_ratio = cfg.origin_patronage_top_ratio
+        if top_ratio is not None and top_ratio != ratio:
+            top = cfg.president_rank - 1
+            full = cfg.merit_cost(top)
+            step = f"最后一步（{cfg.rank_name(top)}→{cfg.rank_name(top + 1)}）"
+            text += (f"，但{step}不打折，照常要 {full} 点" if top_ratio >= 1 else
+                     f"，但{step}只打 {top_ratio} 折，要 "
+                     f"{-(-full * top_ratio.numerator // top_ratio.denominator)} 点")
         if cfg.origin_official_tipoff:
             return {"skill": "提携 · 透风",
                     "description": text + "；家里有人透风：选牌时就知道本轮的全局事件，"
@@ -769,11 +790,12 @@ def _origin_text(cfg: "Config", oid: str) -> dict[str, str]:
                 "攻击和举报都拦不住，不能用来升主席，打出去不管成没成都算用掉"
                 "（用钱升的那笔照样算行贿，举报查实记警告，只是官不撤）。"}
     if oid == "ACCOUNTANT":
+        hide = "；洗白的钱算合法收入，坊间传闻不拿它说事" if cfg.gossip_illegal_first else ""
         if cfg.report_reward_ratio == 0:
             return {"description": f"捞来的钱有 {cfg.origin_accountant_launder_ratio} 能做成合法收入，"
-                                   "被举报也抄不走。"}
+                                   f"被举报也抄不走{hide}。"}
         return {"description": "捞来的钱有一半能做成合法收入，被举报也抄不走"
-                               "（举报人该分的那份一分不少，少的是充公那部分）。"}
+                               f"（举报人该分的那份一分不少，少的是充公那部分）{hide}。"}
     return {}
 
 
@@ -873,6 +895,7 @@ class Config:
         default_factory=lambda: list(WEALTH_BROADCAST_LINES_MULTI)
     )
     wealth_broadcast_name_joiner: str = WEALTH_BROADCAST_NAME_JOINER
+    gossip_illegal_first: bool = GOSSIP_ILLEGAL_FIRST
 
     origins_enabled: bool = ORIGINS_ENABLED
     origin_choices_offered: int = ORIGIN_CHOICES_OFFERED
@@ -881,6 +904,7 @@ class Config:
     origin_grinder_overtime_multiplier: int = ORIGIN_GRINDER_OVERTIME_MULTIPLIER
     origin_grinder_min_work: int = ORIGIN_GRINDER_MIN_WORK
     origin_patronage_merit_ratio: Fraction = ORIGIN_PATRONAGE_MERIT_RATIO
+    origin_patronage_top_ratio: Fraction | None = ORIGIN_PATRONAGE_TOP_RATIO
     origin_accountant_launder_ratio: Fraction = ORIGIN_ACCOUNTANT_LAUNDER_RATIO
     origin_official_tipoff: bool = ORIGIN_OFFICIAL_TIPOFF
     origin_peasant_max_attackers: int | None = ORIGIN_PEASANT_MAX_ATTACKERS

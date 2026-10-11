@@ -505,8 +505,11 @@ def merit_cost_at(
         return None
     origin = cfg.origin(origin_id)
     if origin and origin["id"] == "OFFICIAL":
+        ratio = cfg.origin_patronage_merit_ratio
+        if cfg.origin_patronage_top_ratio is not None and rank == cfg.president_rank - 1:
+            ratio = cfg.origin_patronage_top_ratio  # 最后一步单独的折扣（1 = 不打折）
         # 向上取整：打折不能把门槛抹成 0，也不该出现小数
-        return math.ceil(Fraction(base) * cfg.origin_patronage_merit_ratio)
+        return math.ceil(Fraction(base) * ratio)
     return base
 
 
@@ -1304,10 +1307,20 @@ def resolve_round(
                             f"被人参了一本不务正业，{public}"
                         )
                 continue
-            pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
-            pool = min(pool, target.merit)
+            raw_pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
+            pool = min(raw_pool, target.merit)
             share = pool // len(attacker_ids)
             taken = share * len(attacker_ids)
+            # 抢到 0 点要说清楚为什么（大模型反馈："抢功抢了 0 点却不知道原因"）
+            if pool <= 0 and raw_pool > 0:
+                why_zero = "他这轮攒的政绩已经拿去升职了，没剩下能抢的"
+            elif pool <= 0:
+                why_zero = (f"他这轮只攒了 {o_target.merit_gained} 点，"
+                            f"按 {cfg.attack_steal_fraction} 抢，不到 1 点")
+            elif share <= 0:
+                why_zero = f"{len(attacker_ids)} 个人一起抢 {pool} 点，平分下来每人不到 1 点"
+            else:
+                why_zero = ""
             target.merit = max(0, target.merit - taken)
             o_target.attack_merit_loss += taken
             o_target.merit_stolen_by_attackers += taken
@@ -1332,13 +1345,24 @@ def resolve_round(
                     )
                 by_id[aid].merit += gain
                 outcome.outcomes[aid].merit_from_attacks += gain
-                outcome.outcomes[aid].private_notes.append(
-                    f"你从 {names[target_id]} 手里抢到了 {gain} 点政绩。"
-                )
+                if gain > 0:
+                    outcome.outcomes[aid].private_notes.append(
+                        f"你从 {names[target_id]} 手里抢到了 {gain} 点政绩。"
+                    )
+                else:
+                    reason = why_zero or f"按你的官职折算下来不足 1 点"
+                    outcome.outcomes[aid].private_notes.append(
+                        f"你抢 {names[target_id]} 的功劳，一点也没抢到：{reason}。"
+                    )
             # 明攻击：把抢功的人指名道姓写进公报，被抢的人才知道该报复谁。
             # （匿名举报保持暗箭，两张牌形成明/暗对照。）
-            if cfg.attack_announces_attacker:
-                who = _join_names([names[aid] for aid in attacker_ids], cfg)
+            who = (_join_names([names[aid] for aid in attacker_ids], cfg)
+                   if cfg.attack_announces_attacker else "有人")
+            if taken <= 0:
+                attack_msgs.append(
+                    f"【抢功】{who}想抢 {names[target_id]} 的功劳，但{why_zero}，没抢到什么。"
+                )
+            elif cfg.attack_announces_attacker:
                 verb = "把功劳揽了过去" if len(attacker_ids) == 1 else "一起把功劳分了"
                 attack_msgs.append(
                     f"【抢功】{names[target_id]} 埋头苦干，"
@@ -1788,22 +1812,27 @@ def resolve_round(
     #   * 举报查实分到的赃款也算 —— 钱进了谁的口袋，坊间就传谁
     #   * 但没有这些"外快"（大家都只有工资可比）就不传 —— 光拿工资不算新闻
     salaries = salaries or {}
+    # GOSSIP_ILLEGAL_FIRST：先比非法收入（没查实的赃款 + 举报分到的钱），并列第一才看合法收入
+    #   （工资、加班费、会计洗白的钱——洗白的那份算合法，不算赃款）
+    illegal_first = cfg.gossip_illegal_first
     gossip_graft = {
-        pid: (0 if o.report_effective else o.corrupt_amount) + o.money_from_reports
+        pid: (0 if o.report_effective else o.corrupt_amount - (o.laundered if illegal_first else 0))
+        + o.money_from_reports
         for pid, o in outcome.outcomes.items()
     }
-    if any(gossip_graft.values()):
-        msgs, top_names = wealth_broadcast_detail(
-            (
-                (
-                    names[pid],
-                    salaries.get(pid, cfg.salary(o.rank_before)) + o.overtime_pay
-                    + gossip_graft[pid],
-                )
-                for pid, o in outcome.outcomes.items()
-            ),
-            cfg, rng,
-        )
+    legal = {
+        pid: salaries.get(pid, cfg.salary(o.rank_before)) + o.overtime_pay
+        + (o.laundered if illegal_first and not o.report_effective else 0)
+        for pid, o in outcome.outcomes.items()
+    }
+    if any(v > 0 for v in gossip_graft.values()):
+        if illegal_first:
+            best = max((gossip_graft[pid], legal[pid]) for pid in outcome.outcomes)
+            income = ((names[pid], 1 if (gossip_graft[pid], legal[pid]) == best else 0)
+                      for pid in outcome.outcomes)
+        else:
+            income = ((names[pid], legal[pid] + gossip_graft[pid]) for pid in outcome.outcomes)
+        msgs, top_names = wealth_broadcast_detail(income, cfg, rng)
     else:
         msgs, top_names = [], []
     outcome.wealth_broadcast = msgs
