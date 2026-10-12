@@ -3457,6 +3457,10 @@ class TestSmallOriginTweaks(unittest.TestCase):
     """坊间传闻先比非法收入、官二代最后一级不打折、富二代开局钱：几个开关的行为和说明。"""
 
     HIDE = dataclasses.replace(REAL_CFG, gossip_illegal_first=True)
+    OLD_GOSSIP = dataclasses.replace(REAL_CFG, gossip_illegal_first=False)  # 2026-10 之前的传闻口径
+
+    def test_default_is_illegal_first(self):
+        self.assertTrue(REAL_CFG.gossip_illegal_first)
     NOTOP = dataclasses.replace(REAL_CFG, origin_patronage_top_ratio=Fraction(1))
 
     def _gossip(self, cfg):
@@ -3477,7 +3481,7 @@ class TestSmallOriginTweaks(unittest.TestCase):
         big = PlayerState(id=1, name="高官", rank=top)
         small = PlayerState(id=2, name="小吏", rank=0)
         acts = {1: [Action(Card.CORRUPT, value=4)], 2: [Action(Card.CORRUPT, value=14)]}
-        old = resolve([big, small], acts, cfg=REAL_CFG)
+        old = resolve([big, small], acts, cfg=self.OLD_GOSSIP)
         big2, small2 = PlayerState(id=1, name="高官", rank=top), PlayerState(id=2, name="小吏", rank=0)
         new = resolve([big2, small2], acts, cfg=self.HIDE)
         self.assertGreater(old.outcomes[1].corrupt_amount + REAL_CFG.salary(top),
@@ -3503,7 +3507,7 @@ class TestSmallOriginTweaks(unittest.TestCase):
         self.assertEqual(out.wealth_top_ids, [])
 
     def test_switch_off_gossips_both(self):
-        out = self._gossip(REAL_CFG)
+        out = self._gossip(self.OLD_GOSSIP)
         self.assertEqual(sorted(out.wealth_top_ids), [1, 2])
 
     def test_official_last_step_not_discounted_when_switched_off(self):
@@ -3519,7 +3523,7 @@ class TestSmallOriginTweaks(unittest.TestCase):
 
     def test_skill_texts_follow_the_switches(self):
         self.assertIn("传闻", self.HIDE.origin("ACCOUNTANT")["description"])
-        self.assertNotIn("传闻", REAL_CFG.origin("ACCOUNTANT")["description"])
+        self.assertNotIn("传闻", self.OLD_GOSSIP.origin("ACCOUNTANT")["description"])
         self.assertIn("不打折", self.NOTOP.origin("OFFICIAL")["description"])
         self.assertNotIn("不打折", REAL_CFG.origin("OFFICIAL")["description"])
         rich20 = dataclasses.replace(REAL_CFG, origin_old_money_start=20)
@@ -3530,7 +3534,7 @@ class TestSmallOriginTweaks(unittest.TestCase):
         import ai as ai_mod
 
         ests = []
-        for cfg in (REAL_CFG, self.HIDE):
+        for cfg in (self.OLD_GOSSIP, self.HIDE):
             agent = ai_mod.SmartAgent(1, cfg=cfg, rng=random.Random(0))
             acc = {"id": 2, "name": "会计", "rank": 0, "merit": 0, "tenure": 0, "origin": "ACCOUNTANT", "warnings": 0}
             me = {"id": 1, "name": "我", "rank": 0, "merit": 0, "tenure": 0, "origin": None, "warnings": 0}

@@ -85,7 +85,9 @@ BRIBE_BY_RECORD = [(0.7, 1.0), (9.0, 1.5)]
 
 # 按出身各复制一份的特征（见 _combo_features）
 ORIGIN_CROSSED = ("dirty", "money_gain", "merit_gain", "promote_money", "promote_merit",
-                  "n_attack", "n_report", "risk", "family", "econ", "dirty_x_rep", "intf_x_contender")
+                  "n_attack", "n_report", "risk", "family", "econ", "dirty_x_rep", "intf_x_contender",
+                  "bribe_x_seenrich", "bribe_x_suspect", "dirty_x_seenrich", "dirty_x_suspect",
+                  "bribe_x_early", "bribe_x_named")
 
 
 def _band(table, x):
@@ -1351,6 +1353,22 @@ class SmartAgent:
             "atk_x_closer_money_only": n_atk * c_money * (1.0 - c_merit),
             "rep_x_closer_merit_only": n_rep * c_merit * (1.0 - c_money),
             "intf_x_closers": (n_atk + n_rep) * float(self._n_closers),  # 一个人拦不住好几个
+        })
+        # ---- 有没有人盯着我：别人眼里我多有钱、多可疑 × 现在花钱 / 贪 ----
+        # 富二代开局 30 块是公开的，被盯着的时候先捂着、没人注意了再用（用户的思路）；
+        # 这几项按出身各复制一份（ORIGIN_CROSSED），让富二代学自己的时机。
+        seen = self.self_model.money_est
+        seen_rich = sum(1 for o in others
+                        if self.models.get(o["id"], OpponentModel()).money_est < seen) / max(1, len(others))
+        suspect = max(0.0, min(1.0, self._self_suspicion(public) - 1.0))
+        named = float(self.id in self._named_last)
+        feats.update({
+            "bribe_x_seenrich": d["promote_money"] * seen_rich,
+            "bribe_x_suspect": d["promote_money"] * suspect,
+            "dirty_x_seenrich": d["dirty"] * seen_rich,
+            "dirty_x_suspect": d["dirty"] * suspect,
+            "bribe_x_early": d["promote_money"] * (1.0 - late),
+            "bribe_x_named": d["promote_money"] * named,
         })
         # 每个出身学自己的打法：会计被抓了一半赃款抄不走、该更敢贪；贫农一个人打不动他、
         # 该放心干活；红二代的一纸调令……共用一套权重的话，学出来的是"平均身份"的打法，

@@ -10,3 +10,5 @@ policies/var_*.json
 policies/best_by_origin.json
 search_runs/
 search_runs_*.log
+policies/init_*.json
+policies/bundle_*.json

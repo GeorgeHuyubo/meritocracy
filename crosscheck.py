@@ -357,6 +357,60 @@ def render(label_a: str, label_b: str, games_a: list, games_b: list, rows: list[
     return "\n".join(lines)
 
 
+def paired(games_a: list[dict], games_b: list[dict]) -> dict[str, dict[str, float]]:
+    """两份来源按局号配对，逐局算被统计座位的胜率差（A − B），按身份汇总。
+
+    前提是同一个种子：同一个局号下身份、座位、每轮手牌都一样（telemetry.py 的焦点设计），
+    这样规则 / 打法的差别是逐局相减，误差比两个独立估计直接相减小得多。
+    焦点局按局号配对；对称局（六个座位都算）按 (局号, 身份) 配对。
+    """
+    def keyed(games: list[dict]) -> dict[tuple, tuple[str, float]]:
+        out = {}
+        for r in unit_rows_with_g(games):
+            out[(r["g"], r["origin"]) if r["sym"] else (r["g"],)] = (r["origin"], r["win"])
+        return out
+
+    ka, kb = keyed(games_a), keyed(games_b)
+    diffs: dict[str, list[float]] = defaultdict(list)
+    for k in ka.keys() & kb.keys():
+        oa, wa = ka[k]
+        ob, wb = kb[k]
+        if oa != ob:
+            continue  # 种子不同，身份对不上：不配对
+        diffs[oa].append(wa - wb)
+        diffs["ALL"].append(wa - wb)
+    res = {}
+    for o, xs in diffs.items():
+        m, se = bs.mean_se(xs)
+        res[o] = {"n": len(xs), "diff": m, "se": se}
+    return res
+
+
+def unit_rows_with_g(games: list[dict]) -> list[dict[str, Any]]:
+    rows = []
+    for gm in games:
+        nw = max(1, len(gm["winners"]))
+        sym = len(gm["units"]) > 1
+        for pid in gm["units"]:
+            rows.append({"g": gm["g"], "sym": sym, "origin": gm["players"][pid]["origin"],
+                         "win": (1.0 / nw) if pid in gm["winners"] else 0.0})
+    return rows
+
+
+def render_paired(label_a: str, label_b: str, res: dict[str, dict[str, float]]) -> str:
+    name = {o["id"]: o["name"] for o in CFG.origin_definitions}
+    name["ALL"] = "合计"
+    lines = [f"# 配对比较：A = {label_a} − B = {label_b}（同一局号逐局相减）", "",
+             "| 身份 | 配对局数 | A − B（胜率，百分点） |", "|---|---|---|"]
+    for o in list(CFG.origin_ids()) + ["ALL"]:
+        r = res.get(o)
+        if not r:
+            continue
+        mark = {1: " ↑", -1: " ↓", 0: ""}[bs.significant(r["diff"], r["se"])]
+        lines.append(f"| {name[o]} | {r['n']} | {100 * r['diff']:+.1f} ±{100 * bs.Z * r['se']:.1f}{mark} |")
+    return "\n".join(lines)
+
+
 def to_source(label: str, games: list[dict], family: str) -> dict[str, Any]:
     rows = unit_rows(games)
     focal = all(len(g["units"]) == 1 for g in games)
@@ -374,9 +428,14 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", default="", help="输出目录（默认写在 A 旁边）")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--paired", action="store_true",
+                    help="按局号配对比较两份来源每个身份的胜率差（两边要用同一个种子）")
     args = ap.parse_args(argv)
     la, ga = load_source(args.a, args.workers, args.seed)
     lb, gb = load_source(args.b, args.workers, args.seed)
+    if args.paired:
+        print(render_paired(la, lb, paired(ga, gb)))
+        return
     rows = compare(metrics(ga), metrics(gb))
     md = render(la, lb, ga, gb, rows)
     out = Path(args.out) if args.out else (Path(args.a) if Path(args.a).is_dir() else Path(args.a).parent)

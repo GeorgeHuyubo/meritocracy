@@ -57,8 +57,8 @@ def play_focus(args: tuple) -> dict[str, Any]:
     用来回答"这个出身垫底，是 AI 没学会还是身份本身弱"——专门给它找这桌人里的最优打法，
     练完还上不去，就是规则的问题。
     """
-    theta, opp_theta, origin, n_games, seed = args
-    cfg = DEFAULT_CONFIG
+    theta, opp_theta, origin, n_games, seed = args[:5]
+    cfg = _cfg(args[5] if len(args) > 5 else "")  # --variant：在规则变体下专项训练
     rng = random.Random(seed)
     grad: Counter = Counter()
     chosen: Counter = Counter()
@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.focus_origin:
                 fn = play_focus
                 jobs = [(dict(theta), opp_theta, args.focus_origin, args.games_per_worker,
-                         seed0 * 1000 + b * 100 + w) for w in range(args.workers)]
+                         seed0 * 1000 + b * 100 + w, args.variant) for w in range(args.workers)]
             else:
                 fn = play_batch
                 jobs = [(dict(theta), league, args.games_per_worker, seed0 * 1000 + b * 100 + w,

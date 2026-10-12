@@ -101,3 +101,27 @@ class TestScorecard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPaired(unittest.TestCase):
+    def _game(self, g, origin, win):
+        return {"g": g, "winners": [1] if win else [2], "units": [1],
+                "players": {1: {"origin": origin}, 2: {"origin": "X"}}}
+
+    def test_self_pairing_is_zero(self):
+        games = [self._game(g, ORIGINS[g % 6], g % 3 == 0) for g in range(24)]
+        res = crosscheck.paired(games, games)
+        for o, r in res.items():
+            self.assertEqual(r["diff"], 0.0, o)
+
+    def test_known_difference(self):
+        a = [self._game(g, "RICH", True) for g in range(10)]
+        b = [self._game(g, "RICH", g < 5) for g in range(10)]
+        res = crosscheck.paired(a, b)
+        self.assertAlmostEqual(res["RICH"]["diff"], 0.5)
+        self.assertEqual(res["RICH"]["n"], 10)
+
+    def test_mismatched_origins_are_not_paired(self):
+        a = [self._game(0, "RICH", True)]
+        b = [self._game(0, "RED", False)]
+        self.assertEqual(crosscheck.paired(a, b), {})
