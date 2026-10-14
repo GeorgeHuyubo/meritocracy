@@ -2110,23 +2110,43 @@ class LearnedAgent(SmartAgent):
 TARGET_INIT = {"A:t_base": 50.0, "R:t_base": 50.0}
 
 
+def _main_theta(d: dict[str, Any]) -> dict[str, float]:
+    """权重文件里的"主"权重：普通文件就是 theta；混合文件取权重最大的那一份。"""
+    if d.get("mixture"):
+        return dict(max(d["mixture"], key=lambda m: m["weight"])["theta"])
+    return dict(d["theta"])
+
+
 def load_policy(path: str) -> dict[str, float]:
     import json
 
     with open(path, encoding="utf-8") as fh:
-        return dict(json.load(fh)["theta"])
+        return _main_theta(json.load(fh))
 
 
 def load_policy_bundle(path: str) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     """(默认权重, {出身: 专项权重})。普通权重文件没有 theta_by_origin，第二项为空。"""
+    theta, by_origin, _ = load_policy_file(path)
+    return theta, by_origin
+
+
+def load_policy_file(path: str) -> tuple[dict[str, float], dict[str, dict[str, float]],
+                                         list[tuple[dict[str, float], float]] | None]:
+    """(主权重, {出身: 专项权重}, 混合)。
+
+    混合格式 {"mixture": [{"theta": {...}, "weight": w, "name": ...}, ...]}（psro.py 求出来的均衡）：
+    每个座位开局按权重抽一份打法、整局不变——像剪刀石头布的均衡是"三种各 1/3"。
+    """
     import json
 
     with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
-    return dict(d["theta"]), {k: dict(v) for k, v in (d.get("theta_by_origin") or {}).items()}
+    mixture = [(dict(m["theta"]), float(m["weight"])) for m in d["mixture"]] if d.get("mixture") else None
+    by_origin = {k: dict(v) for k, v in (d.get("theta_by_origin") or {}).items()}
+    return _main_theta(d), by_origin, mixture
 
 
-_POLICY_CACHE: dict[str, tuple[dict[str, float], dict[str, dict[str, float]]]] = {}
+_POLICY_CACHE: dict[str, tuple] = {}
 
 
 def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
@@ -2138,7 +2158,7 @@ def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
     """
     from pathlib import Path
 
-    policy, by_origin = None, None
+    policy, by_origin, mixture = None, None, None
     if cfg.ai_policy:
         path = Path(cfg.ai_policy)
         if not path.is_absolute():
@@ -2146,10 +2166,10 @@ def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
         if path.exists():
             key = str(path)
             if key not in _POLICY_CACHE:
-                _POLICY_CACHE[key] = load_policy_bundle(key)
-            policy, by_origin = _POLICY_CACHE[key]
+                _POLICY_CACHE[key] = load_policy_file(key)
+            policy, by_origin, mixture = _POLICY_CACHE[key]
     return AgentPool(cfg=cfg, rng=rng or random.Random(), policy=policy,
-                     policy_by_origin=by_origin or None, **flags)
+                     policy_by_origin=by_origin or None, mixture=mixture, **flags)
 
 
 # --------------------------------------------------------------------------
@@ -2171,8 +2191,23 @@ class AgentPool:
     policy: dict[str, float] | None = None  # 给了就用学习型 AI（LearnedAgent）
     policy_by_origin: dict[str, dict[str, float]] | None = None  # 每个出身的专项权重
     record: bool = False
+    # 混合打法（psro.py 求出的均衡）：[(权重, 比例), ...]。每个座位第一次建 agent 时按比例抽一份，整局不变
+    mixture: list[tuple[dict[str, float], float]] | None = None
 
     def get(self, player_id: int) -> SmartAgent:
+        if player_id not in self.agents and self.mixture:
+            total = sum(w for _, w in self.mixture)
+            r, acc = self.rng.random() * total, 0.0
+            theta = self.mixture[-1][0]
+            for th, w in self.mixture:
+                acc += w
+                if r < acc:
+                    theta = th
+                    break
+            self.agents[player_id] = LearnedAgent(
+                player_id, theta=theta, record=self.record, theta_by_origin=self.policy_by_origin,
+                cfg=self.cfg, weights=self.weights, rng=self.rng, allow_attack=self.allow_attack,
+                allow_report=self.allow_report, allow_corrupt=self.allow_corrupt)
         if player_id not in self.agents:
             kw = dict(
                 cfg=self.cfg,

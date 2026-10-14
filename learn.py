@@ -89,6 +89,57 @@ def play_focus(args: tuple) -> dict[str, Any]:
     return {"grad": dict(grad), "stats": dict(stats), "chosen": dict(chosen)}
 
 
+def _mixture_seat(cfg, rng, mixture):
+    """陪练座位：按混合比例抽一份打法（不参与学习）。"""
+    total = sum(w for _, w in mixture)
+    r, acc, theta = rng.random() * total, 0.0, mixture[-1][0]
+    for th, w in mixture:
+        acc += w
+        if r < acc:
+            theta = th
+            break
+    return _learner(cfg, rng, theta, False)[1]
+
+
+def play_br(args: tuple) -> dict[str, Any]:
+    """最佳应对（psro.py）：1 个学习座位（座位、六个身份每局随机），其余 5 席按混合比例抽打法、不学。
+
+    训出来的就是"针对这个混合的最佳打法"；它能比 1/6 多赢多少 = 这个混合的可被剥削度。
+    """
+    theta, mixture, n_games, seed = args[:4]
+    cfg = _cfg(args[4] if len(args) > 4 else "")
+    rng = random.Random(seed)
+    grad: Counter = Counter()
+    chosen: Counter = Counter()
+    stats: Counter = Counter()
+    for _ in range(n_games):
+        seat = rng.randrange(N)
+        origins = list(cfg.origin_ids())
+        rng.shuffle(origins)
+        pool, fn = _learner(cfg, rng, theta, True)
+        seats = [_mixture_seat(cfg, rng, mixture) for _ in range(N)]
+        seats[seat] = fn
+        rec = analysis.play(N, rng, cfg, seats, origins=origins[:N])
+        pid = sorted(rec.cards)[seat]
+        reward = 1.0 / len(rec.winners) if pid in rec.winners else 0.0
+        agent = pool.agents.get(pid)
+        if agent is None:
+            continue
+        for gr in agent.trace:
+            for k, v in gr.items():
+                grad[k] += (reward - 1.0 / N) * v
+        chosen.update(agent.chosen_stats)
+        oid = rec.origin_of.get(pid)
+        stats[f"origin_reward_{oid}"] += reward
+        stats[f"origin_seats_{oid}"] += 1
+        stats["trajectories"] += 1
+        stats["decisions"] += len(agent.trace)
+        stats["reward_focus"] += reward
+        stats["seats_focus"] += 1
+        stats["games"] += 1
+    return {"grad": dict(grad), "stats": dict(stats), "chosen": dict(chosen)}
+
+
 def _cfg(variant: str):
     if not variant or variant == "base":
         return DEFAULT_CONFIG
@@ -204,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--opponents", default="", help="专项训练时对手用的权重文件")
     ap.add_argument("--init", default="", help="从这份权重开始（不带 Adam 状态）")
     ap.add_argument("--variant", default="", help="在 sweep.py 的这个规则变体下训练（AI 适应新规则）")
+    ap.add_argument("--br-vs", default="",
+                    help="训练针对这个混合的最佳应对（psro.py 的混合格式文件；普通权重文件当成只有一份）")
     ap.add_argument("--merge-focus", default="",
                     help="把 policies/focus_<出身>.json 合并成一份按出身选权重的文件（写到这个路径），然后退出")
     args = ap.parse_args(argv)
@@ -235,6 +288,10 @@ def main(argv: list[str] | None = None) -> int:
         adam, league = Adam(args.lr), []
         meta = {"batches": 0, "games": 0, "history": []}
     opp_theta = ai.load_policy(args.opponents) if args.focus_origin else None
+    br_mixture = None
+    if args.br_vs:
+        main_theta, _, mix = ai.load_policy_file(args.br_vs)
+        br_mixture = mix or [(main_theta, 1.0)]
     for k, v in ai.TARGET_INIT.items():
         theta.setdefault(k, v)
 
@@ -243,7 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         while time.time() < deadline:
             b = meta["batches"]
-            if args.focus_origin:
+            if br_mixture is not None:
+                fn = play_br
+                jobs = [(dict(theta), br_mixture, args.games_per_worker,
+                         seed0 * 1000 + b * 100 + w, args.variant) for w in range(args.workers)]
+            elif args.focus_origin:
                 fn = play_focus
                 jobs = [(dict(theta), opp_theta, args.focus_origin, args.games_per_worker,
                          seed0 * 1000 + b * 100 + w, args.variant) for w in range(args.workers)]
@@ -281,9 +342,10 @@ def main(argv: list[str] | None = None) -> int:
             top = sorted(((abs(v), k, v) for k, v in theta.items() if k != "hand"), reverse=True)[:5]
             spread = (max(row["origins"].values()) - min(row["origins"].values())) \
                 if row["origins"] else 0.0
-            if args.focus_origin:
+            if args.focus_origin or br_mixture is not None:
                 row["focus"] = round(100 * stats["reward_focus"] / max(1, stats["seats_focus"]), 2)
-                print(f"批 {row['batch']:>4}  {args.focus_origin} 专项  每席胜率 {row['focus']:5.1f}%"
+                label = args.focus_origin or "最佳应对"
+                print(f"批 {row['batch']:>4}  {label} 专项  每席胜率 {row['focus']:5.1f}%"
                       f"（{stats['seats_focus']} 局）  贪{row['mix']['dirty']:.2f} "
                       f"举报{row['mix']['n_report']:.2f} 攻击{row['mix']['n_attack']:.2f}", flush=True)
                 continue
