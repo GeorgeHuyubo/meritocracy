@@ -57,8 +57,15 @@ def play_focus(args: tuple) -> dict[str, Any]:
     用来回答"这个出身垫底，是 AI 没学会还是身份本身弱"——专门给它找这桌人里的最优打法，
     练完还上不去，就是规则的问题。
     """
-    theta, opp_theta, origin, n_games, seed = args[:5]
+    theta, opp, origin, n_games, seed = args[:5]
     cfg = _cfg(args[5] if len(args) > 5 else "")  # --variant：在规则变体下专项训练
+    # 陪练可以是一份权重、一个混合（[(权重, 比例), ...]，psro.py），
+    # 或者按身份的混合（{出身: 混合}，psro_origin.py）：每席按自己的出身抽
+    if isinstance(opp, dict) and opp and all(isinstance(v, list) for v in opp.values()):
+        profile = opp
+    else:
+        mix = opp if isinstance(opp, list) else [(opp, 1.0)]
+        profile = {o: mix for o in cfg.origin_ids()}
     rng = random.Random(seed)
     grad: Counter = Counter()
     chosen: Counter = Counter()
@@ -69,7 +76,7 @@ def play_focus(args: tuple) -> dict[str, Any]:
         rng.shuffle(others)
         origins = others[:seat] + [origin] + others[seat:N - 1]
         pool, fn = _learner(cfg, rng, theta, True)
-        seats = [_learner(cfg, rng, opp_theta, False)[1] for _ in range(N)]
+        seats = [_mixture_seat(cfg, rng, profile[origins[s]]) for s in range(N)]
         seats[seat] = fn
         rec = analysis.play(N, rng, cfg, seats, origins=origins)
         pid = sorted(rec.cards)[seat]
@@ -287,7 +294,10 @@ def main(argv: list[str] | None = None) -> int:
         theta = ai.load_policy(args.init) if args.init else dict(INIT_THETA)
         adam, league = Adam(args.lr), []
         meta = {"batches": 0, "games": 0, "history": []}
-    opp_theta = ai.load_policy(args.opponents) if args.focus_origin else None
+    opp_theta = None
+    if args.focus_origin:
+        main_theta, _, mix = ai.load_policy_file(args.opponents)
+        opp_theta = ai.load_profile(args.opponents) or mix or main_theta  # 混合 / 按身份的混合就按比例抽陪练
     br_mixture = None
     if args.br_vs:
         main_theta, _, mix = ai.load_policy_file(args.br_vs)

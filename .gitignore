@@ -14,3 +14,7 @@ policies/init_*.json
 policies/bundle_*.json
 policies/pop/
 policies/best_pre_psro_*.json
+policies/focus_eq_*
+policies/pop_origin/
+policies/best_pre_psro_origin_*.json
+policies/specialists_eq.json

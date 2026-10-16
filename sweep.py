@@ -103,6 +103,9 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "offtop45": {"origin_patronage_top_ratio": Fraction(4, 5)},     # 最后一步要 36
     "rich25": {"origin_old_money_start": 25},
     "rich30": {"origin_old_money_start": 30},
+    # 政绩路线 vs 金钱路线：升职后多出来的政绩不再 ÷5（钱本来就全留）
+    "md4": {"merit_overflow_divisor": 4},
+    "md3": {"merit_overflow_divisor": 3},
     # 红二代「硬保」：redfree = 免费保官（2026-10 之前的规则）；现行默认 = redfee50s
     "redfree": {"origin_red_shield_fee": None},
     # 红二代「硬保」要交打点费（官照样保住）：现职买官价的 1/2、1、3/2、2 倍

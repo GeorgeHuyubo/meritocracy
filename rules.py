@@ -1547,9 +1547,13 @@ def resolve_round(
         # 行贿的钱打水漂：官没升成，钱也要不回来。
         # 这笔钱同样是查获的赃款，要并进分赃池——
         # 不然"抓到一个光买官没贪钱的"，举报人查实了却一分钱拿不到。
+        # 但先抄赃款、再看剩下的钱还买不买得起这一级：买不起的话买官本来就会失败，
+        # 剩下的钱不当行贿没收（以前是"有多少扣多少"，贪 18 被抄光、只剩 1 块也照扣，战报写成"行贿的 1 打了水漂"）。
+        afford = o.pending_bribe > 0 and p.money >= o.pending_bribe
         bribe = min(
             math.floor(Fraction(o.pending_bribe) * cfg.bribe_forfeit_ratio), p.money
-        )
+        ) if afford else 0
+        o.bribe_unaffordable = o.pending_bribe > 0 and not afford
         if bribe:
             p.money -= bribe
             o.bribe_lost = bribe
@@ -1598,6 +1602,8 @@ def resolve_round(
                         else f"赃款 {o.corrupt_amount} 被没收 {taken}")
         if bribe:
             bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
+        elif o.bribe_unaffordable:
+            bits.append("赃款被抄后买官的钱不够了，官也没升成")
         if family:
             bits.append(f"调令背后的 {o.family_bribe} 被认定为行贿（官照样升）")
         detail = "，".join(bits)
@@ -1680,7 +1686,8 @@ def resolve_round(
             o.promotion_frozen_by_report = True
             o.private_notes.append(
                 "举报查实，这一轮的晋升作废了"
-                + ("——行贿的钱也没能要回来。" if o.bribe_lost else "。")
+                + ("——行贿的钱也没能要回来。" if o.bribe_lost
+                   else "——赃款被抄后，买官的钱也不够了（剩下的钱不没收）。" if o.bribe_unaffordable else "。")
             )
             continue
         if o.demotion is not DemotionKind.NONE and cfg.demoted_cannot_promote_same_round:

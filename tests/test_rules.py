@@ -254,7 +254,7 @@ class TestMeritPromotion(unittest.TestCase):
 
     def test_spec_overflow_example(self):
         # 规则书第 10 节的通用例子：需要 10，玩家有 19 -> 晋升后 merit = 2
-        cfg = dataclasses.replace(CFG, promotion_merit_costs=[10, 32, 52, 80])
+        cfg = dataclasses.replace(CFG, promotion_merit_costs=[10, 32, 52, 80], merit_overflow_divisor=5)
         p = player(1, rank=0, merit=19)
         rules.apply_merit_promotion(p, cfg)
         self.assertEqual((p.rank, p.merit), (1, 2))
@@ -908,6 +908,22 @@ class TestBriberyIsReportable(unittest.TestCase):
         self.assertGreater(o.money_confiscated, 0)
         self.assertGreater(o.bribe_lost, 0)
         self.assertEqual(o.warnings_issued, 1)  # 两件事仍然只记一次警告
+
+    def test_bribe_that_only_the_loot_could_pay_is_not_forfeited(self):
+        """手里 5 块、贪 15 块才够买县级：赃款被抄后剩下的钱买不起官——买官本来就会失败，
+        剩下的钱不再当行贿没收（用户定的规则）。官照样升不成、照样记警告。"""
+        tgt, o, _ = self._run([Action(Card.CORRUPT, value=15), Action(Card.PROMOTE_MONEY)], money=5)
+        self.assertEqual(o.money_confiscated, 15)
+        self.assertEqual(o.bribe_lost, 0)
+        self.assertEqual(o.promotion, PromotionKind.NONE)
+        self.assertEqual(tgt.rank, 0)
+        self.assertEqual(o.warnings_issued, 1)
+        self.assertGreater(tgt.money, 0)  # 剩下的钱还在
+
+    def test_bribe_still_forfeited_when_he_could_still_afford_it(self):
+        """赃款被抄后剩下的钱仍然够买官：行贿本来能成，照样打水漂。"""
+        tgt, o, _ = self._run([Action(Card.CORRUPT, value=15), Action(Card.PROMOTE_MONEY)], money=30)
+        self.assertEqual(o.bribe_lost, REAL_CFG.money_cost(0))
 
     def test_the_seized_bribe_goes_to_the_reporter(self):
         """抓到一个光买官没贪钱的，举报人不能一分钱拿不到。

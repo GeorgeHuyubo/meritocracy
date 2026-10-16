@@ -244,6 +244,7 @@ class PlayerRoundOutcome:
     promotion_frozen_by_report: bool = False  # 停职待查：本轮晋升被举报冻结
     pending_bribe: int = 0  # 本轮摆上桌、但还没兑现的行贿金额
     bribe_lost: int = 0  # 拿钱买晋升却被举报：礼送出去了，事没办成
+    bribe_unaffordable: bool = False  # 想买官被查实，但赃款被抄后钱不够了：买官本来就失败，不再没收行贿
     warnings_issued: int = 0  # 本轮新记的严重警告
     warnings_after: int = 0  # 记完之后累计几次（降级后已清空）
     promotion_merit_decay: int = 0  # 晋升后政绩打折掉的量（贿赂升/熬工龄也有）

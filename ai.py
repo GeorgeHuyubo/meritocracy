@@ -1977,11 +1977,15 @@ class LearnedAgent(SmartAgent):
     """
 
     def __init__(self, *args, theta: dict[str, float], record: bool = False,
-                 theta_by_origin: dict[str, dict[str, float]] | None = None, **kw) -> None:
+                 theta_by_origin: dict[str, dict[str, float]] | None = None,
+                 mixture_by_origin: dict[str, list[tuple[dict[str, float], float]]] | None = None,
+                 **kw) -> None:
         super().__init__(*args, **kw)
         self.theta = theta
         # 每个出身专项训练出来的权重（learn.py --focus-origin）；没有的出身用 theta
         self.theta_by_origin = theta_by_origin or {}
+        # 按身份的混合打法（psro_origin.py 的均衡）：第一次知道自己是什么出身时按比例抽一份，整局不变
+        self.mixture_by_origin = mixture_by_origin or {}
         self.record = record
         self.trace: list[dict[str, float]] = []
         self.chosen_stats: Counter = Counter()  # 选中的组合里各特征的累计（learn.py 看打法怎么变）
@@ -2013,6 +2017,16 @@ class LearnedAgent(SmartAgent):
                     scored = [scored[i] for i in keep]
                     feats = [feats[i] for i in keep]
         oid = (self.cfg.origin(private.get("origin")) or {}).get("id")
+        if oid in self.mixture_by_origin and oid not in self.theta_by_origin:
+            mix = self.mixture_by_origin[oid]
+            total = sum(w for _, w in mix)
+            r, acc, pick = self.rng.random() * total, 0.0, mix[-1][0]
+            for th, w in mix:
+                acc += w
+                if r < acc:
+                    pick = th
+                    break
+            self.theta_by_origin = {**self.theta_by_origin, oid: pick}
         theta = self.theta_by_origin.get(oid, self.theta)
         self._theta_now = theta  # 挑目标（_pick_target）也用这一份
         logits = [sum(theta.get(k, 0.0) * v for k, v in f.items()) for f in feats]
@@ -2111,7 +2125,10 @@ TARGET_INIT = {"A:t_base": 50.0, "R:t_base": 50.0}
 
 
 def _main_theta(d: dict[str, Any]) -> dict[str, float]:
-    """权重文件里的"主"权重：普通文件就是 theta；混合文件取权重最大的那一份。"""
+    """权重文件里的"主"权重：普通文件就是 theta；混合文件取权重最大的那一份；按身份的混合取任一身份最大的。"""
+    if d.get("profile"):
+        best = max((m for mix in d["profile"].values() for m in mix), key=lambda m: m["weight"])
+        return dict(best["theta"])
     if d.get("mixture"):
         return dict(max(d["mixture"], key=lambda m: m["weight"])["theta"])
     return dict(d["theta"])
@@ -2146,6 +2163,17 @@ def load_policy_file(path: str) -> tuple[dict[str, float], dict[str, dict[str, f
     return _main_theta(d), by_origin, mixture
 
 
+def load_profile(path: str) -> dict[str, list[tuple[dict[str, float], float]]] | None:
+    """按身份的混合 {"profile": {出身: [{"theta", "weight", "name"}, ...]}}（psro_origin.py）；不是这种格式返回 None。"""
+    import json
+
+    with open(path, encoding="utf-8") as fh:
+        d = json.load(fh)
+    if not d.get("profile"):
+        return None
+    return {o: [(dict(m["theta"]), float(m["weight"])) for m in mix] for o, mix in d["profile"].items()}
+
+
 _POLICY_CACHE: dict[str, tuple] = {}
 
 
@@ -2158,7 +2186,7 @@ def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
     """
     from pathlib import Path
 
-    policy, by_origin, mixture = None, None, None
+    policy, by_origin, mixture, profile = None, None, None, None
     if cfg.ai_policy:
         path = Path(cfg.ai_policy)
         if not path.is_absolute():
@@ -2166,10 +2194,11 @@ def make_pool(cfg: Config = DEFAULT_CONFIG, rng: random.Random | None = None,
         if path.exists():
             key = str(path)
             if key not in _POLICY_CACHE:
-                _POLICY_CACHE[key] = load_policy_file(key)
-            policy, by_origin, mixture = _POLICY_CACHE[key]
+                _POLICY_CACHE[key] = (*load_policy_file(key), load_profile(key))
+            policy, by_origin, mixture, profile = _POLICY_CACHE[key]
     return AgentPool(cfg=cfg, rng=rng or random.Random(), policy=policy,
-                     policy_by_origin=by_origin or None, mixture=mixture, **flags)
+                     policy_by_origin=by_origin or None, mixture=mixture,
+                     mixture_by_origin=profile, **flags)
 
 
 # --------------------------------------------------------------------------
@@ -2193,8 +2222,16 @@ class AgentPool:
     record: bool = False
     # 混合打法（psro.py 求出的均衡）：[(权重, 比例), ...]。每个座位第一次建 agent 时按比例抽一份，整局不变
     mixture: list[tuple[dict[str, float], float]] | None = None
+    # 按身份的混合（psro_origin.py）：{出身: [(权重, 比例), ...]}，每个座位按自己的出身抽
+    mixture_by_origin: dict[str, list[tuple[dict[str, float], float]]] | None = None
 
     def get(self, player_id: int) -> SmartAgent:
+        if player_id not in self.agents and self.mixture_by_origin:
+            self.agents[player_id] = LearnedAgent(
+                player_id, theta=self.policy or {"hand": 50.0}, record=self.record,
+                mixture_by_origin=self.mixture_by_origin, cfg=self.cfg, weights=self.weights,
+                rng=self.rng, allow_attack=self.allow_attack, allow_report=self.allow_report,
+                allow_corrupt=self.allow_corrupt)
         if player_id not in self.agents and self.mixture:
             total = sum(w for _, w in self.mixture)
             r, acc = self.rng.random() * total, 0.0
