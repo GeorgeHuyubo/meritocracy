@@ -802,6 +802,22 @@ class TestRedraw(unittest.TestCase):
         self.assertFalse(plain["overtime"])
         self.assertEqual((mine["merit_lo"], mine["merit_hi"]), (plain["merit_lo"], plain["merit_hi"]))
 
+    def test_final_step_promotion_preview_needs_both(self):
+        """省级升主席要政绩和金钱双达标：只有一样够时，三种晋升卡都不能显示"现在可用"。"""
+        game = make_game(2)
+        game.start_game()
+        top = CFG.president_rank - 1
+        p = game.players[1]
+        p.rank, p.merit, p.money = top, CFG.merit_cost(top) + 5, CFG.money_cost(top) - 3
+        pv = game.private_state(1)["card_preview"]
+        for card in ("PROMOTE_MERIT", "PROMOTE_MONEY", "PROMOTE_ANY"):
+            self.assertFalse(pv[card]["usable"], card)
+            self.assertIn("金钱还差 3", pv[card]["why"])
+        p.money = CFG.money_cost(top)
+        pv = game.private_state(1)["card_preview"]
+        for card in ("PROMOTE_MERIT", "PROMOTE_MONEY", "PROMOTE_ANY"):
+            self.assertTrue(pv[card]["usable"], card)
+
     def test_grinder_always_holds_two_works_even_after_a_redraw(self):
         game = make_game(2)
         game.players[1].origin = Origin.GRINDER

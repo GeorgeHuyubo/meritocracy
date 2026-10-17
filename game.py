@@ -961,6 +961,15 @@ class Game:
         hat_reward = rules.work_merit(cfg.attack_hat_reward, rank, None, cfg)
 
         def promo(uses_merit: bool, uses_money: bool) -> dict[str, Any]:
+            if cfg.needs_both(rank):
+                # 省级 -> 主席：不管打哪张晋升卡，政绩和金钱都要双达标（rules.can_promote_with_both）。
+                # 以前按"哪样够就算可用"，只有一样够也显示"现在可用"，打出去却升不了。
+                gaps = []
+                if tc is not None and player.merit < tc:
+                    gaps.append(f"政绩还差 {tc - player.merit}")
+                if mc is not None and player.money < mc:
+                    gaps.append(f"金钱还差 {mc - player.money}")
+                return {"usable": not gaps, "why": "、".join(gaps) + ("（这一级两样都要够）" if gaps else "")}
             ok_merit = uses_merit and tc is not None and player.merit >= tc
             ok_money = uses_money and mc is not None and player.money >= mc
             gaps = []
