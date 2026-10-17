@@ -994,10 +994,14 @@ def resolve_round(
                 # 双条件台阶（省级->主席）钱和政绩一起花，但"我声明走哪条路"
                 # 仍然看你打的是政绩升职还是贿赂升职，这决定了你怕谁：
                 # 走政绩怕攻击（只暂缓、零惩罚），走金钱怕举报（赔钱记警告）。
+                # "被攻击拦得住"要和结算时（_resolve_promotion_card）同一个判据：
+                # 贫农不怕挨打，挨了打照样走政绩。以前这里只看 o.attacked，贫农打通用升职一挨打
+                # 就被当成买官延后，再被举报冻结（还写"行贿的钱没能要回来"）。
+                blocked_by_attack = o.attacked and not smear_resisted(p, o, cfg)
                 would_use_merit = (
                     card.can_use_merit
                     and has_merit_for_promotion(p, cfg)
-                    and not o.attacked
+                    and not blocked_by_attack
                 )
                 # 不走政绩就得掏钱 —— 哪怕这会儿兜里还没钱：
                 # 他可能正等着本轮举报/攻击抄来的赃款到账（见 interfered_yet）。

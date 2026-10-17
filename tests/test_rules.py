@@ -2997,6 +2997,26 @@ class TestOrigins(unittest.TestCase):
         self.assertFalse(out.outcomes[1].merit_promotion_blocked)
         self.assertEqual(out.outcomes[2].promotion, PromotionKind.NONE)  # 对照组被拦
 
+    def test_peasant_any_promotion_uses_merit_even_when_attacked_and_reported(self):
+        """贫农打通用升职、政绩够：攻击拦不住他的政绩升职，就该按政绩升，举报管不着政绩升职。
+        踩过：判"走政绩还是走钱"时只看了"有没有挨打"，没看贫农不怕挨打——被当成买官延后，
+        再被举报冻结，私密提示还写"行贿的钱也没能要回来"（用户实战：第 11 轮被攻击 + 举报拦下）。"""
+        tc, mc = REAL_CFG.merit_cost(2), REAL_CFG.money_cost(2)
+        peasant = player(1, rank=2, merit=tc, money=mc, origin=Origin.PEASANT)
+        others = [player(i, rank=2) for i in (2, 3, 4)]
+        out = resolve(
+            [peasant] + others,
+            {1: [Action(Card.PROMOTE_ANY)], 2: [Action(Card.ATTACK, 1)],
+             3: [Action(Card.ATTACK, 1)], 4: [Action(Card.REPORT, 1)]},
+            cfg=REAL_CFG,
+        )
+        o = out.outcomes[1]
+        self.assertTrue(o.attacked)
+        self.assertEqual(o.promotion, PromotionKind.MERIT)
+        self.assertFalse(o.promotion_frozen_by_report)
+        self.assertEqual(o.bribe_lost, 0)
+        self.assertEqual(peasant.rank, 3)
+
     def test_two_attackers_get_through_the_peasant(self):
         """（开关 ORIGIN_PEASANT_MAX_ATTACKERS=1 时）贫农只挡得住一个人：两个人一起攻击，穿小鞋照样生效。"""
         cfg = dataclasses.replace(REAL_CFG, origin_peasant_max_attackers=1)
