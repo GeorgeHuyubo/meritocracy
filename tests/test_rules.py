@@ -2527,7 +2527,7 @@ class TestCardDistributions(unittest.TestCase):
                 for v, n in REAL_CFG.work_card_distribution for _ in range(n)
             ]
             graft = [
-                rules.graft_merit(v, r, CALM, REAL_CFG)
+                rules.graft_merit(v, r, REAL_CFG)
                 for v, n in REAL_CFG.graft_card_distribution for _ in range(n)
             ]
             self.assertLess(
@@ -3644,6 +3644,242 @@ class TestFeedbackClarity(unittest.TestCase):
         import llm_play
         text = llm_play.rules_text(REAL_CFG)
         self.assertIn("先比金钱、再比官职、最后比政绩", text)
+
+
+class TestKeyProjectOnlyBoostsWork(unittest.TestCase):
+    """重点项目写的是"埋头工作的基础政绩 +4"。以前以权谋私的顺带政绩、戴帽子的罚款也吃了这 +4
+    （bug bash：基层以权谋私 3 变 9，省级戴帽子 10 变 20）。"""
+
+    def test_graft_merit_ignores_key_project(self):
+        calm = resolve([player(1, rank=3)], {1: [Action(Card.GRAFT, value=12)]}, CALM)
+        key = resolve([player(1, rank=3)], {1: [Action(Card.GRAFT, value=12)]}, KEY_PROJECT)
+        self.assertEqual(key.outcomes[1].merit_gained, calm.outcomes[1].merit_gained)
+
+    def test_hat_penalty_ignores_key_project(self):
+        def hat(event):
+            out = resolve([player(1, rank=3, merit=50), player(2)],
+                          {1: [Action(Card.CORRUPT, value=10)], 2: [Action(Card.ATTACK, 1)]}, event)
+            return out.outcomes[1].attack_merit_loss
+        self.assertEqual(hat(KEY_PROJECT), hat(CALM))
+        self.assertEqual(hat(CALM), rules.work_merit(CFG.attack_merit_penalty, 3, None, CFG))
+
+    def test_work_still_gets_the_bonus(self):
+        out = resolve([player(1)], {1: [Action(Card.WORK, value=8)]}, KEY_PROJECT)
+        self.assertEqual(out.outcomes[1].merit_gained, 12)
+
+
+class TestGossipLaunderedMoneyIsAlwaysLegal(unittest.TestCase):
+    """规则："合法收入（工资、加班费、会计洗白的钱）"，没有"查实了就不算"的例外。"""
+
+    def test_caught_accountant_laundered_money_breaks_the_tie(self):
+        acc = PlayerState(id=1, name="会计", origin=Origin.ACCOUNTANT)
+        others = [player(i) for i in (2, 3, 4)]
+        out = resolve([acc] + others, {
+            1: [Action(Card.CORRUPT, value=8), Action(Card.REPORT, 3)],
+            2: [Action(Card.REPORT, 1)],
+            3: [Action(Card.CORRUPT, value=20)],
+            4: [Action(Card.REPORT, 3)],
+        })
+        o = out.outcomes
+        self.assertTrue(o[1].report_effective and o[1].laundered > 0)
+        # 会计和 4 号举报 3 号分到的一样多（非法收入并列），会计洗白的钱是合法收入，比 4 号多
+        self.assertEqual(o[1].money_from_reports, o[4].money_from_reports)
+        self.assertGreater(o[1].money_from_reports, o[2].money_from_reports)
+        self.assertEqual(out.wealth_top_ids, [1])
+
+
+class TestPromotionResolvesInCardOrder(unittest.TestCase):
+    """晋升卡在它排的那个位置当场结算、当场 ÷5（bug bash 2026-10-17）。
+
+    以前"要花钱"的晋升卡碰上举报 / 排在贪污或攻击后面，就延后到全场结算完才兑现，
+    于是用上了排在它后面的资源、后面的生产牌按旧官职算、÷5 又折掉了这一轮被抢 / 抢来的政绩。
+    现在只有一种情况还要等：排在举报后面、手上的钱不够、要等举报分来的赃款。
+    """
+
+    def test_top_step_without_enough_merit_is_not_a_bribe(self):
+        """主席那一步政绩不够：这张卡本来就白打，被举报也不能当成行贿没收。"""
+        top = REAL_CFG.president_rank - 1
+        mc = REAL_CFG.money_cost(top)
+        p = player(1, rank=top, money=mc, merit=REAL_CFG.merit_cost(top) - 1)
+        out = resolve([p, player(2)], {1: [Action(Card.PROMOTE_MONEY), Action(Card.WORK, value=5)],
+                                       2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertFalse(o.report_effective)
+        self.assertEqual((o.bribe_lost, p.money, p.warnings, p.rank), (0, mc, 0, top))
+
+    def test_a_spare_promotion_card_after_a_merit_promotion_is_not_a_bribe(self):
+        """先政绩升职成功、再打一张用不上的通用升职：被举报不能当成买官。"""
+        p = player(1, rank=1, money=40, merit=REAL_CFG.merit_cost(1))
+        out = resolve([p, player(2)], {1: [Action(Card.PROMOTE_MERIT), Action(Card.PROMOTE_ANY)],
+                                       2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual(o.promotion, PromotionKind.MERIT)
+        self.assertFalse(o.report_effective)
+        self.assertEqual((p.rank, p.money, p.warnings, o.bribe_lost), (2, 40, 0, 0))
+
+    def test_a_revoked_bought_rank_leaves_no_promotion_line(self):
+        """买来的官被撤回，公报里不能还留着"晋升为××"。"""
+        p = player(1, rank=0, money=REAL_CFG.money_cost(0))
+        out = resolve([p, player(2)], {1: [Action(Card.PROMOTE_MONEY), Action(Card.CORRUPT, value=15)],
+                                       2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+        self.assertEqual(p.rank, 0)
+        self.assertNotIn("晋升为", "".join(out.public_messages))
+
+    def test_a_revoked_bought_rank_never_happened(self):
+        """撤回的官当作没升过：排在后面的贪污按原来的官职算（反腐风暴扫到的也一样）。"""
+        storm = rules.event_by_id("ANTI_CORRUPTION", REAL_CFG)
+        p = player(1, rank=0, money=REAL_CFG.money_cost(0))
+        out = resolve([p, player(2)], {1: [Action(Card.PROMOTE_MONEY), Action(Card.CORRUPT, value=15)]},
+                      event=storm, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertTrue(o.report_effective)
+        self.assertEqual(o.corrupt_amount, 15)  # 基层 x1，不是县级的 22
+        self.assertFalse(o.promoted_before_production)
+
+    def test_a_card_cannot_use_merit_earned_after_it(self):
+        """政绩不够就排在前面 = 白打；被举报也不会等到后面那张埋头工作挣够了再升。"""
+        p = player(1, rank=0, money=0, merit=REAL_CFG.merit_cost(0) - 3)
+        out = resolve([p, player(2)], {1: [Action(Card.PROMOTE_ANY), Action(Card.WORK, value=8)],
+                                       2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+        self.assertEqual(p.rank, 0)
+
+    def test_a_card_before_report_cannot_wait_for_the_loot_even_when_reported(self):
+        """排在自己举报前面的晋升卡花不到举报分来的钱——自己被人举报了也一样。"""
+        target = player(1, rank=2, money=40)
+        me = player(2, rank=0, money=0)
+        out = resolve([target, me, player(3)], {
+            1: [Action(Card.CORRUPT, value=17)],
+            2: [Action(Card.PROMOTE_ANY), Action(Card.REPORT, 1)],
+            3: [Action(Card.REPORT, 2)],
+        }, cfg=REAL_CFG)
+        self.assertGreaterEqual(out.outcomes[2].money_from_reports, REAL_CFG.money_cost(0))
+        self.assertEqual(me.rank, 0)
+
+    def test_a_card_after_attack_cannot_use_the_stolen_merit(self):
+        """攻击在所有牌结算完才生效，排在攻击后面的晋升卡用不上抢来的政绩。"""
+        me = player(1, rank=0, merit=REAL_CFG.merit_cost(0) - 2)
+        victim = player(2, rank=0)
+        out = resolve([me, victim], {1: [Action(Card.ATTACK, 2), Action(Card.PROMOTE_ANY)],
+                                     2: [Action(Card.WORK, value=12)]}, cfg=REAL_CFG)
+        self.assertGreater(out.outcomes[1].merit_from_attacks, 2)
+        self.assertEqual(me.rank, 0)
+
+    def test_decay_happens_at_the_card_before_the_attack(self):
+        """贪污 -> 贿赂升职：升职当场 ÷5，然后才轮到攻击（戴帽子按新官职、从打完折的政绩里扣）。"""
+        p = player(1, rank=2, money=29, merit=24)
+        out = resolve([p, player(2)], {1: [Action(Card.CORRUPT, value=18), Action(Card.PROMOTE_MONEY)],
+                                       2: [Action(Card.ATTACK, 1)]}, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual(o.promotion, PromotionKind.MONEY)
+        self.assertEqual(o.promotion_merit_decay, 24 - math.ceil(24 / REAL_CFG.merit_overflow_divisor))
+        self.assertEqual(o.attack_merit_loss, math.ceil(24 / REAL_CFG.merit_overflow_divisor))
+        self.assertEqual(p.merit, 0)
+
+    def test_stolen_merit_is_not_decayed_by_an_earlier_promotion(self):
+        """攻击 -> 贿赂升职：升职那一刻还没抢到，抢来的政绩不吃 ÷5。"""
+        me = player(1, rank=0, money=REAL_CFG.money_cost(0), merit=0)
+        victim = player(2, rank=0)
+        out = resolve([me, victim], {1: [Action(Card.ATTACK, 2), Action(Card.PROMOTE_MONEY)],
+                                     2: [Action(Card.WORK, value=12)]}, cfg=REAL_CFG)
+        self.assertEqual(me.rank, 1)
+        self.assertEqual(out.outcomes[1].promotion_merit_decay, 0)
+        self.assertEqual(me.merit, out.outcomes[1].merit_from_attacks)
+        self.assertEqual(me.merit, 6)
+
+    def test_buying_with_dirty_money_then_caught_never_happened(self):
+        """贪污 -> 贿赂升职，被举报：官没升，钱按"先抄赃款、还买得起才没收"走。"""
+        mc = REAL_CFG.money_cost(0)
+        p = player(1, rank=0, money=mc)
+        out = resolve([p, player(2)], {1: [Action(Card.CORRUPT, value=15), Action(Card.PROMOTE_MONEY)],
+                                       2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual((p.rank, o.promotion), (0, PromotionKind.NONE))
+        self.assertTrue(o.promotion_frozen_by_report)
+        self.assertEqual(o.money_confiscated, 15)
+        self.assertEqual(o.bribe_lost, mc)
+        self.assertNotIn("晋升为", "".join(out.public_messages))
+
+    def test_top_step_merit_card_after_report_waits_for_the_loot(self):
+        """主席那一步政绩升职也要花钱：排在举报后面、钱差一点，就等分来的赃款。"""
+        top = REAL_CFG.president_rank - 1
+        me = player(1, rank=top, merit=REAL_CFG.merit_cost(top), money=REAL_CFG.money_cost(top) - 3)
+        target = player(2, rank=2, money=0)
+        out = resolve([me, target], {1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_MERIT)],
+                                     2: [Action(Card.CORRUPT, value=17)]}, cfg=REAL_CFG)
+        self.assertGreaterEqual(out.outcomes[1].money_from_reports, 3)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.BOTH)
+
+    def test_waiting_card_cannot_use_merit_from_cards_after_it(self):
+        """举报 -> 一纸调令 -> 埋头工作：调令那一刻政绩不够，等赃款到账后只能走钱，
+        不能拿排在它后面挣的政绩白升（不然不分赃时不用、分赃时反倒用上了）。"""
+        tc, mc = REAL_CFG.merit_cost(0), REAL_CFG.money_cost(0)
+        red = player(1, rank=0, merit=tc - 1, money=1, origin=Origin.RED)
+        target = player(2, rank=2, money=0)
+        out = resolve([red, target], {
+            1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_FAMILY), Action(Card.WORK, value=6)],
+            2: [Action(Card.CORRUPT, value=20), Action(Card.CORRUPT, value=20)],
+        }, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertGreaterEqual(1 + o.money_from_reports, mc)
+        self.assertEqual((red.rank, o.promotion), (1, PromotionKind.MONEY))
+        self.assertEqual(o.promotion_money_cost, mc)
+
+    def test_attack_still_lands_when_the_bribe_fallback_is_voided(self):
+        """政绩那条路被攻击按住、改走的钱又被举报查实作废：攻击照样算命中，公报说穿小鞋。"""
+        top = REAL_CFG.president_rank - 1
+        p = player(1, rank=top, merit=REAL_CFG.merit_cost(top) + 5, money=REAL_CFG.money_cost(top))
+        out = resolve([p, player(2), player(3)], {
+            1: [Action(Card.CORRUPT, value=16), Action(Card.PROMOTE_ANY)],
+            2: [Action(Card.ATTACK, 1)],
+            3: [Action(Card.REPORT, 1)],
+        }, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual((p.rank, o.promotion), (top, PromotionKind.NONE))
+        self.assertTrue(o.merit_promotion_blocked)
+        self.assertEqual(out.outcomes[2].attacks_landed, 1)
+        self.assertTrue(any("穿小鞋" in m for m in out.public_messages), out.public_messages)
+
+    def test_attack_robs_the_work_card_whatever_the_order(self):
+        """攻击作用在被攻击者的每张牌上：埋头工作那张当场被抢走一半，和他怎么排无关——
+        先干活后升职，被抢的那份也不会先被升职用掉、÷5 折掉。"""
+        top = REAL_CFG.president_rank - 1
+        gained = rules.work_merit(7, top, CALM, REAL_CFG)
+        robbed = (gained // 2) // 2 * 2
+
+        def run(cards):
+            p = player(1, rank=top, merit=REAL_CFG.merit_cost(top) - 5, money=REAL_CFG.money_cost(top))
+            out = resolve([p, player(2, rank=top), player(3, rank=top)], {
+                1: cards, 2: [Action(Card.ATTACK, 1)], 3: [Action(Card.ATTACK, 1)]}, cfg=REAL_CFG)
+            return p, out.outcomes[1]
+
+        p, o = run([Action(Card.WORK, value=7), Action(Card.PROMOTE_ANY)])
+        self.assertEqual(o.attack_merit_loss, robbed)
+        self.assertEqual(p.rank, top + 1)
+        left = REAL_CFG.merit_cost(top) - 5 + gained - robbed - REAL_CFG.merit_cost(top)
+        self.assertEqual(p.merit, math.ceil(left / REAL_CFG.merit_overflow_divisor))
+
+    def test_robbed_merit_cannot_fund_the_promotion(self):
+        """贫农挨一个人攻击、政绩路照走：但这张工作牌被抢走的一半，晋升卡用不上。"""
+        tc = REAL_CFG.merit_cost(0)
+        gained = rules.work_merit(8, 0, CALM, REAL_CFG)
+        p = player(1, merit=tc - gained + 2, origin=Origin.PEASANT)
+        out = resolve([p, player(2)], {1: [Action(Card.WORK, value=8), Action(Card.PROMOTE_MERIT)],
+                                       2: [Action(Card.ATTACK, 1)]}, cfg=REAL_CFG)
+        self.assertEqual(out.outcomes[1].promotion, PromotionKind.NONE)
+        self.assertEqual(out.outcomes[1].attack_merit_loss, gained // 2)
+        self.assertEqual(p.merit, tc + 2 - gained // 2)
+
+    def test_bulletin_tells_promotion_before_demotion(self):
+        """同一轮先凭政绩升上去、又被查实降下来：公报按发生顺序先说升职再说降级。"""
+        p = player(1, rank=1, merit=REAL_CFG.merit_cost(1), warnings=REAL_CFG.warnings_before_demotion - 1)
+        out = resolve([p, player(2)], {1: [Action(Card.PROMOTE_MERIT), Action(Card.CORRUPT, value=10)],
+                                       2: [Action(Card.REPORT, 1)]}, cfg=REAL_CFG)
+        msgs = out.public_messages
+        up = next(i for i, m in enumerate(msgs) if "晋升为" in m)
+        down = next(i for i, m in enumerate(msgs) if "降为" in m)
+        self.assertLess(up, down)
+        self.assertEqual(p.rank, 1)
 
 
 if __name__ == "__main__":

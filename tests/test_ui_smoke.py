@@ -45,7 +45,7 @@ def expected_card_effects(rank: int = 0, value: int = 10) -> dict:
         "WORK": rules.work_merit(value, rank, None, CFG),
         "CORRUPT": rules.corrupt_money(value, rank, None, CFG),
         "GRAFT_money": rules.corrupt_money(value, rank, None, CFG),
-        "GRAFT_merit": rules.graft_merit(value, rank, None, CFG),
+        "GRAFT_merit": rules.graft_merit(value, rank, CFG),
     }
 
 

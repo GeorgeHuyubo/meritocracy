@@ -354,9 +354,9 @@ function renderAction() {
         const f = cfgCache ? fracText(cfgCache.attack_steal_fraction) : "1/2";
         const fine = (priv.card_preview || {}).idle_penalty;
         effect =
-          `① <b>抢功</b>：他埋头工作 → 他这轮挣的政绩 ${f} 归我<br>` +
+          `① <b>抢功</b>：他埋头工作或以权谋私 → 他这轮挣的政绩 ${f} 归我<br>` +
           `② <b>穿小鞋</b>：他政绩升职 → 放黑料挡住他（他政绩不掉）<br>` +
-          `③ <b>戴帽子</b>：他没干正事 → 扣他 ${fine || "一笔"} 政绩` +
+          `③ <b>戴帽子</b>：他这轮没攒政绩、也没政绩升职 → 扣他 ${fine || "一笔"} 政绩` +
           ((priv.card_preview || {}).hat_reward
             ? `，我自己记 ${priv.card_preview.hat_reward} 点功<br>`
             : `（我拿不到）<br>`) +
@@ -885,9 +885,9 @@ function quickRulesHtml(c) {
   <div class="qbox atk">
     <div class="qhead">⚔ 政治攻击 <span class="qsub">明枪 · 公报署名</span></div>
     <div class="qarrow">克 ↓ 政绩路线</div>
-    <div class="qitem"><b>埋头工作</b> → 这轮功劳 ${steal} 被抢走</div>
+    <div class="qitem"><b>埋头工作 / 以权谋私</b> → 这轮挣的政绩 ${steal} 被抢走</div>
     <div class="qitem"><b>政绩升职</b> → 这轮升不上去（政绩不掉）</div>
-    <div class="qitem"><b>没干正事</b>（捞钱/买官/搞人）→ 戴帽子扣政绩${
+    <div class="qitem"><b>没干正事</b>（光捞钱/买官/搞人）→ 戴帽子扣政绩${
       c.attack_hat_reward ? "，你记一点功" : ""
     }</div>
   </div>
@@ -1077,12 +1077,12 @@ ${quickRulesHtml(c)}
       <br>他这一轮要是清白的，这张牌就<b>白打</b>。
       <b>匿名</b> —— 他不知道是谁举报的。</li>
   <li><b>政治攻击（明枪）</b>—— 专治走政绩路线的人，一张牌三个作用：
-      <br>① <b>抢功</b>：他在埋头工作 → 他这轮挣的政绩
+      <br>① <b>抢功</b>：他在埋头工作或以权谋私 → 他这轮挣的政绩
         <b>${frac(c.attack_steal_fraction)} 归你</b>（几个人一起抢就平分这一份，他只掉这么多）
       <br>② <b>穿小鞋</b>：他想靠政绩升职 → 放黑料<b>挡住他</b>，这轮升不上去
         （只是暂缓，他<b>政绩一点不掉</b>）
-      <br>③ <b>戴帽子</b>：他这轮<b>没干正事</b>（既没埋头工作、也没凭政绩升职，
-        而是在捞钱 / 买官 / 搞别人）→ 给他扣一笔政绩，
+      <br>③ <b>戴帽子</b>：他这轮<b>没干正事</b>（既没埋头工作或以权谋私、也没凭政绩升职，
+        而是光在捞钱 / 买官 / 搞别人）→ 给他扣一笔政绩，
         按他的官职算（${c.rank_names.slice(0, c.president_rank).map((n, r) =>
           `${esc(n).replace(/公务员|干部/, "")} ${Math.floor(c.attack_merit_penalty * mult(c.rank_multipliers[r]))}`
         ).join(" / ")}）。

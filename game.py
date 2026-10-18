@@ -951,8 +951,8 @@ class Game:
         corrupt_hi = rules.corrupt_money(chi, rank, None, cfg)
         graft_money_lo = rules.corrupt_money(glo, rank, None, cfg)
         graft_money_hi = rules.corrupt_money(ghi, rank, None, cfg)
-        graft_merit_lo = rules.graft_merit(glo, rank, None, cfg)
-        graft_merit_hi = rules.graft_merit(ghi, rank, None, cfg)
+        graft_merit_lo = rules.graft_merit(glo, rank, cfg)
+        graft_merit_hi = rules.graft_merit(ghi, rank, cfg)
 
         # 我去打别人、对方无所事事时扣他多少（按**我**看不到的对方官职算不了，
         # 这里给的是"打同级的人"的参考值，UI 只用来说明量级）

@@ -159,8 +159,10 @@ class ClaudeSession:
         self.restarts += 1
         try:
             self.proc.kill()
+            self.proc.wait(timeout=10)
         except Exception:  # noqa: BLE001
             pass
+        self.err.close()
         self._start()
 
     def ask(self, text: str) -> str:
@@ -236,11 +238,14 @@ class MockBackend:
     def ask(self, prompt: str) -> str:
         self.calls += 1
         if "赛后反馈" in prompt:
-            return json.dumps({
+            fb = {
                 "strongest": "官二代", "weakest": "小镇做题家·会计", "fun": 6,
                 "unfair": "（mock）", "experience": "（mock）", "suggestion": "（mock）",
                 "lessons": ["（mock 心得）"],
-            }, ensure_ascii=False)
+            }
+            if "测试员" in prompt:
+                fb["bugs"] = [{"round": 1, "what": "（mock 原文）", "rule": "（mock 规则）", "why": "（mock）"}]
+            return json.dumps(fb, ensure_ascii=False)
         return "MOCK"
 
 
@@ -290,8 +295,51 @@ def final_order_text(cfg: Config) -> str:
 def gossip_text(cfg: Config) -> str:
     if cfg.gossip_illegal_first:
         return ("点名本轮非法收入（没被查实的贪污 + 举报分到的赃款）最多的人；"
-                "只有并列第一、非法收入一样多时，才按合法收入（工资、加班费、会计洗白的钱）决定点谁")
-    return "点名本轮到手钱最多的人（工资+没被查实的贪污+举报分到的赃款）"
+                "只有并列第一、非法收入一样多时，才按合法收入（工资、加班费、会计洗白的钱）决定点谁，"
+                "合法收入也一样就一起点名")
+    return "点名本轮到手钱最多的人（工资+没被查实的贪污+举报分到的赃款），并列就一起点名"
+
+
+def _mult(x) -> str:
+    return f"×{float(x):g}"
+
+
+def numbers_text(cfg: Config) -> str:
+    """官职倍率、工资、升职打折、事件：真人界面的规则速查里都有，大模型版以前只写了"官越大倍率越高"。"""
+    ranks = [cfg.rank_name(r) for r in range(cfg.president_rank)]
+    work = [cfg.work_multiplier(r) for r in range(cfg.president_rank)]
+    money = [cfg.money_multiplier(r) for r in range(cfg.president_rank)]
+    if work == money:
+        mult = "官职倍率（埋头工作的政绩、贪污的钱都用它）：" + " / ".join(
+            f"{n} {_mult(m)}" for n, m in zip(ranks, work))
+    else:
+        mult = ("官职倍率：埋头工作 " + " / ".join(f"{n} {_mult(m)}" for n, m in zip(ranks, work))
+                + "；贪污 " + " / ".join(f"{n} {_mult(m)}" for n, m in zip(ranks, money)))
+    salary = " / ".join(f"{n} {cfg.salary(r)}" for r, n in enumerate(ranks))
+    decay_how = "政绩升职、买官、工龄升职都一样" if cfg.promotion_always_decays_merit else "政绩升职、工龄升职"
+    money_decay = ("钱只扣门槛、不打折" if cfg.money_overflow_divisor == 1
+                   else f"钱扣完门槛也 ÷{cfg.money_overflow_divisor}")
+    events = "；".join(f"「{d['name']}」{d['description']}" for d in cfg.event_definitions if int(d["weight"]) > 0)
+    return f"""数值：
+  - 牌面点数先加事件加成、再乘{mult}，向下取整。
+    以权谋私顺带的政绩 = 点数 × {cfg.graft_merit_ratio}（向下取整）再乘官职倍率，不吃事件加成。
+  - 工资每轮一开始就到账（合法收入，举报抄不走）：{salary}。
+  - 升职后（{decay_how}）：先扣门槛，剩下的政绩 ÷{cfg.merit_overflow_divisor}（向上取整）；{money_decay}。
+  - 全局事件：{events}"""
+
+
+def order_text(cfg: Config) -> str:
+    return """出牌顺序（你排的顺序就是结算顺序）：
+  - 晋升卡在它排的位置当场结算、当场打折：能花排在它前面这一轮挣的政绩和钱（包括刚贪的钱）；
+    排在它后面的产出吃新官职的倍率，也不会被升职打折。
+  - 政治攻击和举报要等所有人的牌都走完才生效：排在攻击后面的晋升卡用不上抢来的政绩；
+    只有排在举报后面、钱不够的晋升卡，会等举报分完赃再按"那一刻的钱 + 分来的赃款"结算。
+  - 反腐风暴查办和被举报查实后果一样（没收、记警告、买官作废），只是没有举报人分钱。
+  - 被查实：花钱买的官作废，排在贪污前面也躲不掉（买官那张当没打过，后面的牌按原官职算）；
+    这一轮的赃款当场抄走，花不出去。
+  - 抢来的政绩、戴帽子记的功不算你自己产出的政绩：只打攻击 / 举报、没打埋头工作或以权谋私，挨攻击照样戴帽子。
+    卷王加班是先被抢、剩下的再 ×倍数。
+  - 同一轮多人登顶比的是这一轮结算完（扣完升职的钱）之后的金钱。"""
 
 
 def rules_text(cfg: Config) -> str:
@@ -312,7 +360,7 @@ def rules_text(cfg: Config) -> str:
                             for r in range(cfg.president_rank))
     return f"""【游戏：Meritocracy（官场升职）】6 人，最多 {cfg.max_rounds} 轮。官职：{' < '.join(ranks)}。
 目标：第一个当上国家主席的人获胜（同一轮多人登顶，先比金钱、再比政绩，家底厚的那个当选，其余退回省级）；打满 {cfg.max_rounds} 轮没人登顶就{final_order_text(cfg)}（官职低但钱多的人照样能赢）。
-升职门槛（升一级要打一张对应的晋升卡）：{steps}。升职后多余的政绩会打折，钱只扣门槛。
+升职门槛（升一级要打一张对应的晋升卡）：{steps}。升职后剩下的政绩会打折（见下面的数值）。
 
 每轮：每人发 6 张牌，最多打出 {cfg.picks_per_round} 张，按你排的顺序一张一张结算，然后公布全局事件和结算结果。
 牌：
@@ -320,9 +368,9 @@ def rules_text(cfg: Config) -> str:
   - 中饱私囊：加不少钱，但这是贪污；以权谋私：钱少一点、顺带一点政绩，同样算贪污
   - 匿名举报（选一个人）：他这轮如果贪污或花钱买官，就被查实——本轮赃款没收（举报人分一半，扣 1 块跑腿费），
     记一次降职警告（攒满 {cfg.warnings_before_demotion} 次降一级），买的官作废、钱打水漂；他这轮没有经济问题就白打
-  - 政治攻击（选一个人）：抢走他这轮埋头工作政绩的一半（几个人攻击同一人就平分这一半）；
+  - 政治攻击（选一个人）：抢走他这轮埋头工作和以权谋私挣的政绩的一半（几个人攻击同一人就平分这一半）；
     他要是靠政绩升职，就把这次升职暂缓（贫农例外，见出身）；
-    他这轮一点政绩都没产（没干活）就"戴帽子"：扣他政绩 {hat}（按他的官职），每个攻击者记功 {hat_reward}（按攻击者官职）
+    他这轮一点政绩都没产（既没埋头工作也没以权谋私）、也没凭政绩升职，就"戴帽子"：扣他政绩 {hat}（按他的官职），每个攻击者记功 {hat_reward}（按攻击者官职）
   - 晋升卡（够门槛才能升一级，一轮最多升一级）：
       政绩升职 = 只花政绩（政绩不够就白打，不会掏钱；被攻击会暂缓）
       贿赂升职 = 只花钱（钱不够就白打；被举报查实就作废、钱打水漂）
@@ -330,9 +378,13 @@ def rules_text(cfg: Config) -> str:
     主席那一步钱和政绩都要够；打政绩升职就怕攻击，打贿赂升职就怕举报
 工龄：连续 {cfg.tenure_required} 轮官职没变（没升没降），自动升一级，不用晋升卡；记一次降职警告会把工龄清零；
 工龄{'也能' if cfg.tenure_can_reach_president else '升不到'}国家主席。
-钱是暗的（别人看不到你有多少钱），政绩和官职是公开的。每轮公布"坊间传闻"：{gossip_text(cfg)}，不报金额。
-全局事件（反腐风暴会查办贪得多的人、经济好坏会让金钱收益翻倍或减半、重点项目让埋头工作加政绩……）在出牌**之后**才公布。
+钱是暗的（别人看不到你有多少钱），政绩和官职是公开的。每轮公布"坊间传闻"：{gossip_text(cfg)}，不报金额（战报里以「坊间传闻：」开头）。
+全局事件在出牌**之后**才公布。
 克制关系：攻击克制走政绩路线的人，举报克制走金钱路线（贪污、买官）的人。
+
+{numbers_text(cfg)}
+
+{order_text(cfg)}
 
 【胜负的关键】只有一个人能赢：别人当上主席，你和其余所有人都算输（不管你当时离主席多近）。
 所以把快赢的人拦下来，和自己升官一样重要——拦住了，游戏才继续，你才有机会。
@@ -410,7 +462,7 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
         redraw_line = (f"\n换牌：可以花 {cost} 金钱把这 6 张全部换掉重抽（同一轮再换要 {nxt}）"
                        + ("" if priv.get("redraw_affordable") else "——你现在钱不够")
                        + "。想换就只回 {\"redraw\": true}，我会把新手牌发给你再决定。")
-    hist = "\n".join(history[-4:]) or "（第一轮，还没有历史）"
+    hist = "\n".join(history[-4:]) or ("（第一轮，还没有历史）" if pub["round"] <= 1 else "（没有记录）")
     mem = "\n".join(memory[-3:]) or "（无）"
     return f"""{rules_text(cfg)}
 
@@ -426,7 +478,7 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
 {threat}
 
 最近几轮发生了什么：
-{hist}
+{hist}{private_text(game, pid)}
 
 你前几轮的想法（自己的笔记）：
 {mem}
@@ -439,6 +491,28 @@ def player_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
 最多出 {cfg.picks_per_round} 张，按结算顺序排列；举报和攻击要写目标的 id。
 **只输出一个 JSON**，不要别的文字：
 {{"threat": 你认为离赢最近的对手id, "picks": [{{"index": 手牌序号, "target": 目标id或null}}, ...], "family": false, "reason": "一两句话：谁最可能先赢、你这轮能不能赢、为什么这样出"}}"""
+
+
+def private_text(game: Game, pid: int) -> str:
+    """上一轮自己的流水账 + 私密提示，和本轮已经到账的钱。真人界面上一直摆着，大模型以前看不到。"""
+    priv = game.private_state(pid)
+    last = game.last_outcome
+    lines: list[str] = []
+    for entry in priv.get("ledger", []):
+        if last is not None and entry.get("round") == last.round_number:
+            for row in entry["rows"]:
+                bits = [f"金钱 {row['money']:+d}" if row["money"] else "", f"政绩 {row['merit']:+d}" if row["merit"] else ""]
+                lines.append(f"  - {row['label']}：{'，'.join(b for b in bits if b)}")
+    notes = (priv.get("private_result") or {}).get("notes") or []
+    lines += [f"  · {n}" for n in notes]
+    now = [row for entry in priv.get("ledger", []) if last is None or entry.get("round") != last.round_number
+           for row in entry["rows"] if entry.get("round") == game.round_number]
+    out = ""
+    if lines:
+        out += f"\n\n你上一轮（第 {last.round_number} 轮）的私密结算（只有你看得到）：\n" + "\n".join(lines)
+    if now:
+        out += "\n这一轮已经到账：" + "；".join(f"{r['label']} {r['money']:+d}" for r in now if r["money"])
+    return out
 
 
 def session_system_prompt(cfg: Config, name: str, origin_name: str, notebook: str = "") -> str:
@@ -462,15 +536,22 @@ def session_system_prompt(cfg: Config, name: str, origin_name: str, notebook: st
 
 
 def session_round_prompt(cfg: Config, game: Game, pid: int, agent: ai.SmartAgent,
-                         last_round: str) -> str:
-    """会话模式每轮发的内容：上一轮发生了什么 + 现在的局面 + 手牌（规则和更早的经过它记得）。"""
+                         last_round: str, after_redraw: bool = False) -> str:
+    """会话模式每轮发的内容：上一轮发生了什么 + 现在的局面 + 手牌（规则和更早的经过它记得）。
+
+    after_redraw：同一轮换完牌重发，经过和私密结算刚才那条消息里已经给过，只换手牌。"""
     full = player_prompt(cfg, game, pid, agent, [last_round] if last_round else [], [])
     body = full[full.index("现在是第"):]
     body = body.replace("你前几轮的想法（自己的笔记）：\n（无）\n\n", "")
+    if after_redraw:
+        a, b = body.index("最近几轮发生了什么："), body.index("你这轮的手牌：")
+        body = body[:a] + "（上一轮的经过和你的私密结算见本轮前一条消息，只有手牌换了。）\n\n" + body[b:]
+        return "【换牌后的新手牌】" + body
     return "【新一轮】" + body
 
 
-def feedback_prompt(cfg: Config, game: Game, pid: int, history: list[str], memory: list[str]) -> str:
+def feedback_prompt(cfg: Config, game: Game, pid: int, history: list[str], memory: list[str],
+                    bug_hunt: bool = False) -> str:
     pub = game.public_state()
     names = {p["id"]: p["name"] for p in pub["players"]}
     me = game.players[pid]
@@ -479,7 +560,7 @@ def feedback_prompt(cfg: Config, game: Game, pid: int, history: list[str], memor
         + ("  ★ 冠军" if p["id"] in game.winners else "")
         for p in pub["players"]
     )
-    return f"""{rules_text(cfg)}
+    text = f"""{rules_text(cfg)}
 
 ====================
 你刚以 {names[pid]}（出身「{(cfg.origin(me.origin.value if me.origin else None) or {}).get('name', '?')}」）的身份打完一局。
@@ -499,6 +580,7 @@ def feedback_prompt(cfg: Config, game: Game, pid: int, history: list[str], memor
   "unfair": "你觉得哪条规则不公平或有问题（没有就写无）",
   "fun": 1到10的整数（这局好不好玩）, "experience": "这局的体验：哪里爽、哪里憋屈",
   "suggestion": "你最想改的一条规则"}}"""
+    return with_bug_hunt(text, formatted=True) if bug_hunt else text
 
 
 FEEDBACK_IN_SESSION = """【对局结束】{reason}
@@ -518,6 +600,29 @@ LESSONS_IN_SESSION = """【对局结束】{reason}
 这局打完了。请总结 1~3 条**下一局能用上的心得**（具体、可执行：什么局面该怎么打、哪个身份该怎么用 /
 怎么对付、哪种判断这局被证明是错的）。**只输出一个 JSON**：
 {{"lessons": ["……", "……"]}}"""
+
+# --bug-hunt：赛后反馈里再请它当一回测试员，列出"结算 / 提示和规则说明对不上、看不懂"的地方
+BUG_HUNT_ASK = """
+另外，请你这局当一回**测试员**：回想每一轮的战报、公开通报、你自己的私密结算和提示，找出
+① **和规则说明对不上**的地方（钱 / 政绩的数字、谁升谁降、谁被查实、没收和分赃、坊间传闻点了谁、
+  晋升卡提示说"可用"打出去却没升……）；
+② **看不懂、会误导人**的说明、公报或提示。
+每条都要能核对：写明第几轮、引用原文（战报 / 结算 / 提示里那句话）、规则说明里对应的原文、为什么觉得不对。
+没发现就给空列表，别硬凑；自己打错了牌不算。"""
+BUG_HUNT_FIELD = ('"bugs": [{{"round": 第几轮（整数）, "what": "战报 / 结算 / 提示里的原文", '
+                  '"rule": "规则说明里对应的原文（没写就写：规则没写）", "why": "为什么觉得对不上或看不懂"}}]')
+
+
+def with_bug_hunt(tpl: str, formatted: bool = False) -> str:
+    """在反馈模板里加上测试员那段要求和 bugs 字段。
+    formatted=False：还要 .format 的模板（花括号是转义过的 {{ }}）；True：已经填好的正文。"""
+    head, tail = tpl.rsplit("请以玩家的身份", 1)
+    body = "请以玩家的身份" + tail
+    close = "}" if formatted else "}}"
+    field = BUG_HUNT_FIELD.replace("{{", "{").replace("}}", "}") if formatted else BUG_HUNT_FIELD
+    body = body[: body.rindex(close)] + ",\n  " + field + close
+    return head + BUG_HUNT_ASK.strip() + "\n\n" + body
+
 
 FEEDBACK_AND_LESSONS_IN_SESSION = FEEDBACK_IN_SESSION.replace(
     '"suggestion": "你最想改的一条规则"}}',
@@ -592,10 +697,10 @@ NOTEBOOK: "Notebook | None" = None
 
 def round_summary(cfg: Config, game: Game, outcome) -> str:
     names = {p.id: p.name for p in game.players.values()}
-    msgs = list(outcome.public_messages) + list(outcome.wealth_broadcast)
+    msgs = list(outcome.public_messages) + [f"坊间传闻：{m}" for m in outcome.wealth_broadcast]
     ranks = "、".join(f"{names[p.id]} {cfg.rank_name(p.rank)}" for p in game.ordered_players())
     return (f"第 {outcome.round_number} 轮（事件：{outcome.event.name}）："
-            + ("；".join(msgs) if msgs else "风平浪静") + f"。结束后：{ranks}")
+            + ("；".join(m.rstrip("。") for m in msgs) if msgs else "风平浪静") + f"。结束后：{ranks}")
 
 
 MAX_REDRAWS = 3
@@ -623,9 +728,8 @@ def decide(cfg: Config, game: Game, pid: int, backend, pool: ai.AgentPool,
 
     def make_prompt(after_redraw: bool) -> str:
         if session is not None:
-            p = session_round_prompt(cfg, game, pid, agent, "" if after_redraw else
-                                     (history[-1] if history else ""))
-            return p.replace("【新一轮】", "【换牌后的新手牌】") if after_redraw else p
+            return session_round_prompt(cfg, game, pid, agent, history[-1] if history else "",
+                                        after_redraw=after_redraw)
         return player_prompt(cfg, game, pid, agent, history, memory)
 
     ask = (session or backend).ask
@@ -682,6 +786,17 @@ def play_one(args: tuple) -> dict[str, Any]:
 
     混坐局的发牌、事件按 (种子, 轮次) 重新播种，陪练先出、大模型最后出，所以和对照局逐局可比。
     """
+    sessions: dict[int, ClaudeSession] = {}
+    try:
+        return _play_one(args, sessions)
+    finally:
+        # 整局出错也要把这局的 claude 进程全关掉：读输出的线程攥着进程对象，不关就一直活到整批跑完，
+        # 每个占 1 GB 左右，攒多了内存耗尽、再起进程就 EAGAIN，后面的局全跟着出错
+        for s in sessions.values():
+            s.close()
+
+
+def _play_one(args: tuple, sessions: "dict[int, ClaudeSession]") -> dict[str, Any]:
     g, seed, model, backend_name, out_dir = args[:5]
     extra = list(args[5]) if len(args) > 5 else []
     variant = args[6] if len(args) > 6 else "base"
@@ -692,11 +807,11 @@ def play_one(args: tuple) -> dict[str, Any]:
     if mixed and llm_seats != 1:
         raise ValueError("混坐目前只支持 1 个大模型座位（--llm-seats 1）")
     crowd = opts.get("crowd", "learned")
+    bug_hunt = bool(opts.get("bug_hunt"))
     cfg = variant_cfg(variant)
     rng = random.Random(seed)
     mock = backend_name == "mock"
     backend = MockBackend() if mock else ClaudeCLI(model)
-    sessions: dict[int, ClaudeSession] = {}
     names = ["老张", "老李", "老王", "老赵", "老刘", "老陈"]
     focal: dict[str, Any] | None = None
     if mixed:
@@ -790,11 +905,14 @@ def play_one(args: tuple) -> dict[str, Any]:
             # 笔记本模式每局都要心得；收反馈的局心得和反馈一起交
             tpl = (FEEDBACK_AND_LESSONS_IN_SESSION if learning else FEEDBACK_IN_SESSION) \
                 if want_feedback else LESSONS_IN_SESSION
+            if bug_hunt and want_feedback:
+                tpl = with_bug_hunt(tpl)
             fb_futs = {pid: ex.submit(sessions[pid].ask, tpl.format(
                            reason=game.game_over_reason, last=history[-1] if history else ""))
                        for pid in sorted(sessions)}
         elif want_feedback:
-            fb_futs = {pid: ex.submit(backend.ask, feedback_prompt(cfg, game, pid, history, memory[pid]))
+            fb_futs = {pid: ex.submit(backend.ask, feedback_prompt(cfg, game, pid, history, memory[pid],
+                                                                   bug_hunt=bug_hunt))
                        for pid in sorted(llm_pids)}
         feedback = {}
         for pid, f in fb_futs.items():
@@ -875,6 +993,33 @@ def write_control(out_dir: Path, cfg: Config, g: int, base_seed: int, crowd: str
 # ---------------------------------------------------------------------------
 # 报告
 # ---------------------------------------------------------------------------
+
+
+def bug_section(games: list[dict[str, Any]], out_dir: Path, origin_name: dict[str, str]) -> list[str]:
+    """--bug-hunt 收到的"疑似 bug"：全部列出来（附局号、轮次），另存一份 bugs.jsonl 方便逐条去核对遥测。"""
+    rows = []
+    asked = 0
+    for gm in games:
+        for p in gm["players"]:
+            fb = p.get("feedback") or {}
+            if "bugs" not in fb:
+                continue
+            asked += 1
+            for b in fb.get("bugs") or []:
+                if not isinstance(b, dict):
+                    b = {"what": str(b)}
+                rows.append({"game": gm["game"], "pid": p["pid"], "name": p["name"],
+                             "origin": origin_name.get(p["origin"], p["origin"]), **b})
+    if not asked:
+        return []
+    with open(out_dir / "bugs.jsonl", "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    lines = ["", f"## 疑似 bug（大模型挑刺：{asked} 份反馈里报了 {len(rows)} 条，详见 bugs.jsonl）", ""]
+    for r in sorted(rows, key=lambda r: (r["game"], str(r.get("round", "")))):
+        lines.append(f"- 第 {r['game']} 局 第 {r.get('round', '?')} 轮 · {r['name']}（{r['origin']}）："
+                     f"{r.get('what', '')} ｜ 规则：{r.get('rule', '')} ｜ 为什么：{r.get('why', '')}")
+    return lines
 
 
 def _origin_in(text: str, origin_name: dict[str, str]) -> str:
@@ -1050,6 +1195,7 @@ def report(out_dir: Path, summarize: bool, model: str, backend_name: str) -> str
     lines += ["", "## 投票", "",
               "最强：" + "、".join(f"{k} {v}" for k, v in votes_strong.most_common()),
               "", "最弱：" + "、".join(f"{k} {v}" for k, v in votes_weak.most_common())]
+    lines += bug_section(games, out_dir, origin_name)
     if summarize and texts and backend_name != "mock":
         ask = ClaudeCLI(model, timeout=900).ask
         task = ("请你作为游戏设计顾问，用中文归纳：1) 大家公认哪个身份强、哪个弱，理由是什么；"
@@ -1191,6 +1337,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="混坐时陪练用的 AI")
     ap.add_argument("--control", type=int, default=1,
                     help="混坐时每局附带几份 Python 对照局（同种子，大模型的座位换成学习型 AI；几乎不花时间）")
+    ap.add_argument("--bug-hunt", action="store_true",
+                    help="赛后反馈里请大模型当测试员：列出结算 / 提示和规则说明对不上、看不懂的地方（报告里单列「疑似 bug」）")
     ap.add_argument("--min-free-gb", type=float, default=3.0,
                     help="开新一局前系统可用内存低于这么多 GB 就先等（避免几十个 claude 进程把机器拖死）")
     args = ap.parse_args(argv)
@@ -1220,6 +1368,7 @@ def main(argv: list[str] | None = None) -> int:
     todo = [g for g in range(args.games) if g not in done_games]
     opts = ({"llm_seats": args.llm_seats, "crowd": args.crowd, "control": args.control,
              "base_seed": args.seed} if args.llm_seats < N else {})
+    opts["bug_hunt"] = args.bug_hunt
     jobs = [(g, args.seed * 1000 + g, args.model, args.backend, out_dir, extra, args.variant,
              g % max(1, args.feedback_every) == 0, args.min_free_gb, opts)
             for g in todo]

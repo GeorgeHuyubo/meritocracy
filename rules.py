@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from collections import defaultdict
 from fractions import Fraction
@@ -149,10 +150,11 @@ def roll_graft_base(rng, cfg: Config = DEFAULT_CONFIG) -> int:
     return int(weighted_choice(rng, cfg.graft_card_distribution))
 
 
-def graft_merit(base: int, rank: int, event: GameEvent | None = None,
-                cfg: Config = DEFAULT_CONFIG) -> int:
-    """以权谋私顺带的政绩：按牌面的一个比例折算，再走 WORK 的官职倍率。"""
-    return work_merit(math.floor(Fraction(base) * cfg.graft_merit_ratio), rank, event, cfg)
+def graft_merit(base: int, rank: int, cfg: Config = DEFAULT_CONFIG) -> int:
+    """以权谋私顺带的政绩：按牌面的一个比例折算，再走 WORK 的官职倍率。
+
+    不吃事件加成：重点项目写的是"埋头工作的基础政绩 +4"，以权谋私不是埋头工作。"""
+    return work_merit(math.floor(Fraction(base) * cfg.graft_merit_ratio), rank, None, cfg)
 
 
 def pick_event(rng, cfg: Config = DEFAULT_CONFIG) -> GameEvent:
@@ -269,6 +271,35 @@ def _apply_promotion(
     outcome.promotion_card_played = True
 
 
+def _block_merit_route(
+    player: PlayerState, outcome, cfg: Config, names: dict[int, str], promo_msgs: list[str]
+) -> None:
+    """政治攻击按住了这张晋升卡的政绩那条路。"""
+    # 暂缓升职：这一轮走不了政绩这条路，但政绩一点不掉。
+    # （清零那套太重——一刀能削 43 点，而且攻击者一分不拿，纯利他。
+    #   现在攻击的收益全部来自抢功，破坏这块降到最小。）
+    outcome.merit_promotion_blocked = True
+    if cfg.attack_wipes_merit_on_block and player.merit:
+        outcome.merit_wiped_by_attack = player.merit
+        outcome.attack_merit_loss += player.merit
+        promo_msgs.append(
+            f"{names[player.id]} 眼看就要凭政绩上位，被人一状告倒，"
+            f"{player.merit} 点政绩付诸东流。"
+        )
+        player.merit = 0
+    elif (cfg.attack_block_merit_loss > 0 or cfg.attack_block_merit_penalty > 0) and player.merit:
+        # 不清零，但也不只是暂缓：掉一部分政绩（比例 + 按官职折算的固定值，攻击者拿不到）
+        lost = min(
+            player.merit,
+            math.floor(Fraction(player.merit) * cfg.attack_block_merit_loss)
+            + work_merit(cfg.attack_block_merit_penalty, player.rank, None, cfg),
+        )
+        if lost:
+            outcome.merit_wiped_by_attack = lost
+            outcome.attack_merit_loss += lost
+            player.merit -= lost
+
+
 def _resolve_promotion_card(
     player: PlayerState,
     card: Card,
@@ -278,8 +309,12 @@ def _resolve_promotion_card(
     promo_msgs: list[str],
     already: PromotionKind,
     auto: bool = False,
+    merit_at: int | None = None,
 ) -> None:
     """玩家打出一张晋升卡，当场结算。
+
+    `merit_at`：等赃款的晋升卡（第 5a 步）在它那个位置上的政绩。政绩那条路只看那一刻——
+    排在它后面挣的政绩用不上，不然不分赃时不用、分赃时反倒用上了。
 
     克制矩阵：
         政绩升职  —— 政治攻击可以暂缓（政绩一点不掉），举报碰不到
@@ -296,7 +331,8 @@ def _resolve_promotion_card(
     if money_cost_for(player, cfg) is None:  # 已经到顶
         return
 
-    merit_ok = card.can_use_merit and has_merit_for_promotion(player, cfg)
+    merit_ok = card.can_use_merit and has_merit_for_promotion(player, cfg) and (
+        merit_at is None or merit_at >= merit_cost_for(player, cfg))
     money_ok = card.can_use_money and has_money_for_promotion(player, cfg)
 
     if card is Card.PROMOTE_FAMILY:
@@ -305,8 +341,8 @@ def _resolve_promotion_card(
             outcome.private_notes.append("一纸调令不能用来升国家主席，这张卡白用了。")
             return
         # 玩家可以把它排在任何位置（排在干活后面能用上这一轮的政绩）。
-        # 要花这一轮刚贪的钱的话，会延后到举报结算完再走到这里（见第 2 步），
-        # 被抄走了钱自然就不够——所以这里照常按兜里的钱判断就行。
+        # 花这一轮刚贪的钱也行；这一轮被查实的话，第 2 步会把赃款当成已经抄走、重算一遍
+        # （剩下的钱不够就走不到这里）——所以这里照常按兜里的钱判断就行。
         if not (merit_ok or money_ok):
             outcome.private_notes.append("一纸调令用了，可惜政绩和金钱都不够门槛——白用了。")
             return
@@ -326,29 +362,7 @@ def _resolve_promotion_card(
     blocked_by_attack = outcome.attacked and not smear_resisted(player, outcome, cfg)
 
     if blocked_by_attack and merit_ok:
-        # 暂缓升职：这一轮走不了政绩这条路，但政绩一点不掉。
-        # （清零那套太重——一刀能削 43 点，而且攻击者一分不拿，纯利他。
-        #   现在攻击的收益全部来自抢功，破坏这块降到最小。）
-        outcome.merit_promotion_blocked = True
-        if cfg.attack_wipes_merit_on_block and player.merit:
-            outcome.merit_wiped_by_attack = player.merit
-            outcome.attack_merit_loss += player.merit
-            promo_msgs.append(
-                f"{names[player.id]} 眼看就要凭政绩上位，被人一状告倒，"
-                f"{player.merit} 点政绩付诸东流。"
-            )
-            player.merit = 0
-        elif (cfg.attack_block_merit_loss > 0 or cfg.attack_block_merit_penalty > 0) and player.merit:
-            # 不清零，但也不只是暂缓：掉一部分政绩（比例 + 按官职折算的固定值，攻击者拿不到）
-            lost = min(
-                player.merit,
-                math.floor(Fraction(player.merit) * cfg.attack_block_merit_loss)
-                + work_merit(cfg.attack_block_merit_penalty, player.rank, None, cfg),
-            )
-            if lost:
-                outcome.merit_wiped_by_attack = lost
-                outcome.attack_merit_loss += lost
-                player.merit -= lost
+        _block_merit_route(player, outcome, cfg, names, promo_msgs)
         merit_ok = False
         money_ok = card.can_use_money and has_money_for_promotion(player, cfg)
 
@@ -411,6 +425,46 @@ def _promotion_message(name: str, kind: PromotionKind, rank_name: str) -> str:
         PromotionKind.MONEY: f"{name} 四处打点，晋升为{rank_name}。",
         PromotionKind.BOTH: f"{name} 政绩金钱两手都硬，晋升为{rank_name}。",
     }.get(kind, f"{name} 晋升为{rank_name}。")
+
+def _promotion_plan(
+    player: PlayerState,
+    card: Card,
+    outcome,
+    cfg: Config,
+    money: int | None = None,
+    merit: int | None = None,
+) -> tuple[PromotionKind, bool]:
+    """这张晋升卡现在打出去会怎么升（不改任何状态），以及算不算行贿。
+
+    判据和 _resolve_promotion_card 一一对应；`money` / `merit` 用来问"手上要是有这么多会怎样"。
+    行贿 = 举报查实就作废的那种：贿赂 / 通用升职走钱那条路，主席那一步没走政绩那条路也算。
+    一纸调令用钱升不算（官不撤，只记警告）。
+    """
+    money = player.money if money is None else money
+    merit = player.merit if merit is None else merit
+    tc, mc = merit_cost_for(player, cfg), money_cost_for(player, cfg)
+    if tc is None or mc is None:
+        return PromotionKind.NONE, False
+    merit_ok = card.can_use_merit and merit >= tc
+    money_ok = card.can_use_money and money >= mc
+    if card is Card.PROMOTE_FAMILY:
+        if cfg.needs_both(player.rank) or player.rank + 1 >= cfg.president_rank:
+            return PromotionKind.NONE, False
+        if merit_ok:
+            return PromotionKind.MERIT, False
+        return (PromotionKind.MONEY if money_ok else PromotionKind.NONE), False
+    blocked = outcome.attacked and not smear_resisted(player, outcome, cfg)
+    if cfg.needs_both(player.rank):
+        merit_route = card.can_use_merit and not blocked
+        if merit < tc or money < mc or not (merit_route or card.can_use_money):
+            return PromotionKind.NONE, False
+        return PromotionKind.BOTH, not merit_route
+    if merit_ok and not blocked:
+        return PromotionKind.MERIT, False
+    if money_ok:
+        return PromotionKind.MONEY, True
+    return PromotionKind.NONE, False
+
 
 # --------------------------------------------------------------------------
 # 晋升 / 降级
@@ -911,137 +965,174 @@ def resolve_round(
     # 出牌顺序是玩家的决策，这里**严格照着来**：
     #   先干活后升职 -> 这一轮的产出算进晋升前的账，但超额部分会被 /5 砍掉
     #   先升职后干活 -> 产出吃到新官职的倍率，而且不会被砍
-    #   被攻击的人把升职卡放前面 -> 政绩在干活之前就被清零，这轮的活还能留住
-    # 攻击和举报只在这一步"过一下"，它们的效果要等所有人产出都算完（见第 3、4 步）。
-    # 有两种情况，晋升卡要等到全场结算完再兑现：
-    #   1. 排在举报/攻击后面 —— 那两张牌的进账（赃款、封口费）还没到账，
-    #      玩家把晋升卡放在后面，就是想花这笔钱。
-    #   2. 排在贪污后面 —— 这一轮刚捞的钱当轮花不出去，得先熬过举报才算落袋。
-    #      少了这一条，"贪一笔立刻洗成官职"就能躲开没收：举报人查实了却分不到钱，
-    #      而且升一级又被降一级，官职净变化为零，等于举报白打。
-    # (玩家, 晋升卡, 是不是行贿) —— 行贿的查实了就冻结；不是行贿的只是等钱到位再算
-    deferred_promotions: list[tuple[PlayerState, Card, bool]] = []
+    # 晋升卡在它排的那个位置**当场**结算、当场 /5，花的是那一刻手上的政绩和钱
+    # （包括这一轮排在它前面刚贪来的钱）。攻击和举报只在这一步"过一下"，
+    # 它们的效果要等所有人的牌都走完（见第 3、4 步），所以排在攻击后面的晋升卡用不上抢来的政绩。
+    #
+    # 唯一要等的：排在**举报后面**、手上的钱不够、差的正好指望举报分来的赃款——
+    # 记下那一刻的政绩和钱，等第 5a 步分完赃再结算（规则速查：晋升卡排在举报后面，才能花到举报分来的赃款）。
+    #
+    # 被举报 / 反腐风暴查实的人，花钱买的官当作**从来没升过**（"官会被撤回来"）：
+    # 先按都没被查算一遍，看出谁会被查实，再把这些人的牌重新走一遍——
+    # 买官那张作废，后面的牌照旧官职算；这一轮的赃款当场抄走，一纸调令和主席那一步也花不到。
+    # 反腐风暴点谁按第一遍的贪污额定（重算之后不再改名单）。
+
+    # 牌面没给数的（只有测试里会这样）先按出牌顺序掷好，重算的时候不再掷骰
+    bases: dict[int, list[int]] = {}
+    for p in ordered:
+        rolls = []
+        for act in played(p.id):
+            if act.card is Card.WORK:
+                rolls.append(act.value if act.value > 0 else roll_work_base(rng, cfg))
+            elif act.card is Card.CORRUPT:
+                rolls.append(act.value if act.value > 0 else roll_corrupt_base(rng, cfg))
+            elif act.card is Card.GRAFT:
+                rolls.append(act.value if act.value > 0 else roll_graft_base(rng, cfg))
+            else:
+                rolls.append(0)
+        bases[p.id] = rolls
+
     # 卷王「加班」：这一轮两张埋头工作的政绩（攻击结算完之后再 ×倍数，见第 3b 步）
     overtime_base: dict[int, int] = {}
-    for p in ordered:
+    # 第 2 步当场兑现的晋升公报，按人记（重算时整份换掉），播在攻击和举报前面
+    early_promo_msgs: dict[int, list[str]] = {}
+    # 排在举报后面、等赃款的晋升卡：(卡, 那一刻的钱, 那一刻的政绩, 那一刻查实会被抄走的赃款)
+    waiting: dict[int, list[tuple[Card, int, int, int]]] = {}
+    # 第一遍里花了这一轮赃款升职的人（查实的话钱就不够了，要重算）
+    spent_loot: set[int] = set()
+    # 被抢功的人：攻击作用在他的每张工作牌上，被抢的那份在那张牌上就扣下了（第 3 步分给攻击者），
+    # 和他怎么排无关——排在后面的晋升卡用不上，也不会先被升职用掉、÷5 折掉
+    robbed: dict[int, int] = {}
+
+    def play_cards(p: PlayerState, caught: bool) -> None:
         o = outcome.outcomes[p.id]
-        # 举报只管**要花钱**的那条路（贪污所得、拿钱买官）。
-        # 走政绩升职的人举报碰不到他 —— 那是政治攻击的活。
-        targeted = bool(report_counts.get(p.id))
+        msgs = early_promo_msgs[p.id] = []
+        wait = waiting[p.id] = []
+        overtime_base.pop(p.id, None)
+        spent_loot.discard(p.id)
+        robbed[p.id] = 0
+        robbers = len(attackers_of.get(p.id, [])) if cfg.attack_mode == "steal_work" else 0
+
+        def keep(gained: int) -> int:
+            """这张牌挣的政绩里自己留下多少：累计被抢 = 本轮挣的 × 抢的比例，按人数平分取整。"""
+            if not robbers:
+                return gained
+            total = math.floor(Fraction(o.merit_gained) * cfg.attack_steal_fraction) // robbers * robbers
+            cut, robbed[p.id] = total - robbed[p.id], total
+            return gained - cut
+
         produced_yet = False
-        interfered_yet = False
-        corrupted_yet = False
+        reported_yet = False
+        loot = 0  # 到这张牌为止贪来、查实时会被抄走的钱（会计洗白的那份抄不走）
         work_merits: list[int] = []  # 本轮每张埋头工作的政绩（卷王「加班」要用）
-        for act in played(p.id):
+        for act, base in zip(played(p.id), bases[p.id]):
             card = act.card
             if card.is_production:
                 produced_yet = True
-            if card.yields_corruption:
-                corrupted_yet = True
             if card is Card.WORK:
-                base = act.value if act.value > 0 else roll_work_base(rng, cfg)
                 gained = work_merit(base, p.rank, event, cfg)
                 o.base_values.append(base)
                 o.merit_gained += gained
-                p.merit += gained
+                p.merit += keep(gained)
                 work_merits.append(gained)
                 if len(work_merits) == 2 and origin_is(p, "GRINDER", cfg):
                     overtime_base[p.id] = sum(work_merits)
             elif card is Card.CORRUPT:
-                base = act.value if act.value > 0 else roll_corrupt_base(rng, cfg)
                 gained = corrupt_money(base, p.rank, event, cfg)
+                washed = _laundered(gained, p, cfg)
                 o.base_values.append(base)
                 o.money_gained += gained
                 o.corrupt_amount += gained
-                o.laundered += _laundered(gained, p, cfg)
+                o.laundered += washed
                 p.money += gained
+                loot += gained - washed
             elif card is Card.GRAFT:
-                base = act.value if act.value > 0 else roll_graft_base(rng, cfg)
                 cash = corrupt_money(base, p.rank, event, cfg)
-                bonus = graft_merit(base, p.rank, event, cfg)
+                bonus = graft_merit(base, p.rank, cfg)
+                washed = _laundered(cash, p, cfg)
                 o.base_values.append(base)
                 o.money_gained += cash
                 o.corrupt_amount += cash  # 这笔钱照样算贪污
-                o.laundered += _laundered(cash, p, cfg)
+                o.laundered += washed
                 o.merit_gained += bonus
                 p.money += cash
-                p.merit += bonus
-            elif card in (Card.REPORT, Card.ATTACK):
-                interfered_yet = True
-            elif card is Card.PROMOTE_FAMILY:
-                # 一纸调令不怕攻击、查实了也不撤，按玩家排的顺序结算。
-                # 唯一要等的情况：政绩不够、得花这一轮刚贪（或刚分来）的钱——
-                # 和普通买官一样等举报结算完，没被抄走才花得出去（不然就是先贪再洗进官位）。
-                if has_merit_for_promotion(p, cfg):
-                    o.tried_merit_promotion = True
-                elif corrupted_yet or interfered_yet:
-                    deferred_promotions.append((p, card, False))
-                    continue
-                _resolve_promotion_card(
-                    p, card, o, cfg, names, promo_msgs, already=o.promotion
-                )
-                if o.promotion is not PromotionKind.NONE and not produced_yet:
-                    o.promoted_before_production = True
+                p.merit += keep(bonus)
+                loot += cash - washed
+            elif card is Card.REPORT:
+                reported_yet = True
             elif card.is_promotion:
-                # 这一张实际会走哪条路？政绩优先，但被攻击就得改走金钱。
-                #   * 双条件台阶（省级 -> 主席）钱和政绩都要花 -> 一定要掏钱
-                #   * 其他台阶政绩够又没被攻击 -> 走政绩，一分钱不用出
-                # 先记下"他本来就打算凭政绩升职"——和有没有被拦、有没有被延后
-                # 都无关。攻击那一步要靠它判断他这轮是不是在干正事。
+                # 先记下"他本来就打算凭政绩升职"——和有没有被拦、这张卡最后用没用上都无关。
+                # 攻击那一步要靠它判断他这轮是不是在干正事（戴帽子豁免）。
                 if card.can_use_merit and has_merit_for_promotion(p, cfg):
                     o.tried_merit_promotion = True
-                # 走的是政绩那条路还是金钱那条路，**由卡决定**——
-                # 双条件台阶（省级->主席）钱和政绩一起花，但"我声明走哪条路"
-                # 仍然看你打的是政绩升职还是贿赂升职，这决定了你怕谁：
-                # 走政绩怕攻击（只暂缓、零惩罚），走金钱怕举报（赔钱记警告）。
-                # "被攻击拦得住"要和结算时（_resolve_promotion_card）同一个判据：
-                # 贫农不怕挨打，挨了打照样走政绩。以前这里只看 o.attacked，贫农打通用升职一挨打
-                # 就被当成买官延后，再被举报冻结（还写"行贿的钱没能要回来"）。
-                blocked_by_attack = o.attacked and not smear_resisted(p, o, cfg)
-                would_use_merit = (
-                    card.can_use_merit
-                    and has_merit_for_promotion(p, cfg)
-                    and not blocked_by_attack
-                )
-                # 不走政绩就得掏钱 —— 哪怕这会儿兜里还没钱：
-                # 他可能正等着本轮举报/攻击抄来的赃款到账（见 interfered_yet）。
-                may_need_money = card.can_use_money and not would_use_merit
-                # 只有要掏钱的晋升才可能被举报掐掉，所以也只有它需要等：
-                #   targeted       —— 有人举报我，这笔钱可能被查
-                #   interfered_yet —— 我想花的是本轮举报/攻击抄来的钱，还没到账
-                #   corrupted_yet  —— 这一轮刚贪的钱，当轮花不出去
-                # 走政绩的晋升当场结算，玩家自选的出牌顺序完整保留。
-                #
-                # 没被上面三条拦住、但走的仍是金钱路线的，当场升 —— 这是
-                # 「先买官、再用新官职的倍率去贪」那个组合技必须的。但那样一来
-                # 它就绕过了本轮的查实（出牌时谁也不知道反腐风暴会不会落到自己
-                # 头上），所以记个标记，查实了之后在第 5 步把官撤回来。
-                o.bought_rank_this_round = may_need_money
-                # 主席那一级钱和政绩都要花：哪怕打的是政绩升职（不算行贿、举报冻不住），
-                # 这一轮刚贪的钱也一样花不出去，要等举报结算完、确认没被抄走才算。
-                # 不等的话就是洗钱：对局 D7TE 第 10 轮，老李开局只有 14 块，
-                # 以权谋私拿了 27 当场凑够 37 升了主席，反腐风暴来抄时兜里只剩 4。
-                spends_dirty_on_last_step = (
-                    not may_need_money and cfg.needs_both(p.rank)
-                    and (corrupted_yet or interfered_yet)
-                )
-                if may_need_money and (targeted or interfered_yet or corrupted_yet):
-                    if has_money_for_promotion(p, cfg):
-                        # 礼已经备好了：查实的话钱照样没了，官却升不成
-                        o.pending_bribe = max(
-                            o.pending_bribe, money_cost_for(p, cfg) or 0
+                if o.promotion is not PromotionKind.NONE:
+                    # 一轮最多升一级：只留一句"已经升过了"
+                    _resolve_promotion_card(p, card, o, cfg, names, msgs, already=o.promotion)
+                    continue
+                kind, bribe = _promotion_plan(p, card, o, cfg)
+                if kind is PromotionKind.NONE:
+                    # 主席那一步打政绩升职也要花钱，所以不看卡能不能用钱，只看"钱够了能不能升"
+                    if (reported_yet
+                            and _promotion_plan(p, card, o, cfg, money=10**9)[0] is not PromotionKind.NONE):
+                        o.promotion_card_played = True
+                        wait.append((card, p.money, p.merit, loot))
+                        continue
+                    # 白打：让它自己说明为什么（被攻击按住、资源不够……）
+                    _resolve_promotion_card(p, card, o, cfg, names, msgs, already=o.promotion)
+                    continue
+                cost = money_cost_for(p, cfg) or 0
+                spends = kind in (PromotionKind.MONEY, PromotionKind.BOTH)
+                if caught and bribe:
+                    # 查实了：这一级当作没买过。礼备好了的话，钱在第 5 步按"抄完赃款还买得起才没收"走
+                    o.promotion_card_played = True
+                    if (card.can_use_merit and has_merit_for_promotion(p, cfg)
+                            and o.attacked and not smear_resisted(p, o, cfg)):
+                        # 政绩那条路被攻击按住、金钱那条路被举报堵死（规则书第 16 节）：
+                        # 攻击照样算命中，按住政绩那条路的后果也照样有
+                        _block_merit_route(p, o, cfg, names, msgs)
+                        o.promotion_blocked_by_attack_report = True
+                    o.promotion_frozen_by_report = True
+                    o.pending_bribe = max(o.pending_bribe, cost)
+                    continue
+                if spends and p.money - loot < cost:
+                    if caught:
+                        o.promotion_card_played = True
+                        o.private_notes.append(
+                            "这一轮的赃款被抄走了，剩下的钱不够这一级——这张晋升卡白用了。"
                         )
-                    deferred_promotions.append((p, card, True))
-                    continue
-                if spends_dirty_on_last_step:
-                    deferred_promotions.append((p, card, False))
-                    continue
-                _resolve_promotion_card(
-                    p, card, o, cfg, names, promo_msgs, already=o.promotion
-                )
-                if o.promotion is not PromotionKind.NONE and not produced_yet:
-                    o.promoted_before_production = True
+                        continue
+                    spent_loot.add(p.id)
+                _resolve_promotion_card(p, card, o, cfg, names, msgs, already=o.promotion)
+                if o.promotion is not PromotionKind.NONE:
+                    o.bought_rank_this_round = bribe
+                    if not produced_yet:
+                        o.promoted_before_production = True
 
+    snapshots = {
+        p.id: ((p.money, p.merit, p.rank, p.tenure), copy.deepcopy(outcome.outcomes[p.id]))
+        for p in ordered
+    }
+    for p in ordered:
+        play_cards(p, caught=False)
+
+    # 谁会被查实：真人举报、反腐风暴（按这一遍的贪污额点名）、全员查办
+    storm_ids: set[int] = set()
+    if event.flag("storm_report"):
+        storm_ids = set(storm_targets(
+            {p.id: outcome.outcomes[p.id].corrupt_amount for p in ordered}, cfg
+        ))
+    for p in ordered:
+        o = outcome.outcomes[p.id]
+        if not (o.bought_rank_this_round or p.id in spent_loot):
+            continue
+        if not (report_counts.get(p.id) or p.id in storm_ids or event.flag("mass_report")):
+            continue
+        bought = o.promotion_money_cost if o.bought_rank_this_round else 0
+        if classify_report(o.corrupt_amount, cfg, bribe=bought + o.family_bribe) is DemotionKind.NONE:
+            continue
+        (p.money, p.merit, p.rank, p.tenure), snap = snapshots[p.id]
+        outcome.outcomes[p.id] = copy.deepcopy(snap)
+        play_cards(p, caught=True)
 
     # ---- 3. 政治攻击（结算效果；目标在第 1 步就已经记下了）-----------------
 
@@ -1257,11 +1348,11 @@ def resolve_round(
                 # 不能转头再用这笔罚款把清零那套偷偷加回来。
                 # 反过来，拿钱买官的不算干正事，照罚 —— 那是花钱不是干活。
                 # 用 tried_merit_promotion 而不是 merit_promotion_blocked：
-                # 后者在晋升卡被延后时（他同时还被举报）要等到第 5a 步才置位，
-                # 这会儿还是 False，判据就漏了。
+                # 后者在晋升卡等举报分赃时要到第 5a 步才置位，这会儿还是 False，判据就漏了。
+                # 罚款是按官职的固定表，不吃重点项目的 +4（那只加埋头工作）
                 did_honest_work = o_target.tried_merit_promotion
                 penalty = 0 if did_honest_work else min(
-                    work_merit(cfg.attack_merit_penalty, target.rank, event, cfg),
+                    work_merit(cfg.attack_merit_penalty, target.rank, None, cfg),
                     target.merit,
                 )
                 if penalty > 0:
@@ -1311,21 +1402,18 @@ def resolve_round(
                             f"被人参了一本不务正业，{public}"
                         )
                 continue
-            raw_pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
-            pool = min(raw_pool, target.merit)
-            share = pool // len(attacker_ids)
-            taken = share * len(attacker_ids)
+            # 被抢的那份第 2 步在他的工作牌上就扣下了，这里只是分给攻击者
+            pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
+            taken = robbed.get(target_id, 0)
+            share = taken // len(attacker_ids)
             # 抢到 0 点要说清楚为什么（大模型反馈："抢功抢了 0 点却不知道原因"）
-            if pool <= 0 and raw_pool > 0:
-                why_zero = "他这轮攒的政绩已经拿去升职了，没剩下能抢的"
-            elif pool <= 0:
+            if pool <= 0:
                 why_zero = (f"他这轮只攒了 {o_target.merit_gained} 点，"
                             f"按 {cfg.attack_steal_fraction} 抢，不到 1 点")
             elif share <= 0:
                 why_zero = f"{len(attacker_ids)} 个人一起抢 {pool} 点，平分下来每人不到 1 点"
             else:
                 why_zero = ""
-            target.merit = max(0, target.merit - taken)
             o_target.attack_merit_loss += taken
             o_target.merit_stolen_by_attackers += taken
             for aid in attacker_ids:
@@ -1424,9 +1512,7 @@ def resolve_round(
             report_counts[p.id] += 1
             outcome.outcomes[p.id].report_from_event = event.name
     if event.flag("storm_report"):
-        for pid in storm_targets(
-            {p.id: outcome.outcomes[p.id].corrupt_amount for p in ordered}, cfg
-        ):
+        for pid in sorted(storm_ids):  # 第 2 步就按第一遍的贪污额点好了名
             report_counts[pid] += 1
             outcome.outcomes[pid].report_from_event = event.name
 
@@ -1467,7 +1553,7 @@ def resolve_round(
     # 现在升职必须打晋升卡，"被挡下"由那张卡自己结算时判定（_resolve_promotion_card，
     # 认得贫农只挡一个人、一纸调令拦不住）。以前这段在出牌制下照跑：只要挨了攻击、
     # 资源又够门槛，就算一张晋升卡都没打也记成"晋升被阻止"——
-    # 结算页对没想升的人显示"本轮晋升被阻止"；而且它跑在延后结算的晋升卡之前，
+    # 结算页对没想升的人显示"本轮晋升被阻止"；而且它跑在等赃款的晋升卡之前，
     # 会把只挨了一个人攻击的贫农错误地按住。
     for p in ordered:
         if cfg.promotion_requires_card:
@@ -1479,37 +1565,6 @@ def resolve_round(
             o.merit_promotion_blocked = True
         if o.attacked and o.report_effective and elig_money_pre and elig_merit_pre:
             o.promotion_blocked_by_attack_report = True
-
-    # ---- 4b. 撤回"当场买来的官" ---------------------------------------------
-    # 走金钱路线的晋升本该被查实掐掉。绝大多数情况在第 2 步就延后了，但有一种
-    # 漏网：晋升卡排在**贪污前面**时，打牌那一刻还没贪、也没人举报过他，
-    # 于是官当场就升了，等反腐风暴按全场贪污额点名时已经来不及。
-    # 实测过：贿赂升职 -> 贪污，被风暴查实照样升成县级干部，
-    # 而规则速查里写着"把晋升卡排到贪污前面也躲不掉"。
-    #
-    # 不能改成"这种情况也延后"——那会毁掉「先买官、再按新官职倍率去贪」
-    # 这个有意设计的组合技（test_promotion_first_also_boosts_corruption 守着）。
-    # 所以官照升，查实了再撤回，撤完的状态和"一开始就被冻结"完全一致：
-    # 钱退回来再按"行贿打水漂"走一遍正常流程，于是举报人该分的那份也不会少。
-    for p in ordered:
-        o = outcome.outcomes[p.id]
-        if not (o.report_effective and o.bought_rank_this_round):
-            continue
-        if o.promotion is PromotionKind.NONE:
-            continue
-        p.rank -= 1
-        p.merit += o.promotion_merit_decay  # 升职那一刀的 /5 衰减还原
-        p.money += o.promotion_money_cost   # 先退回来……
-        o.pending_bribe = max(o.pending_bribe, o.promotion_money_cost)  # ……再打水漂
-        o.promotion_frozen_by_report = True
-        o.promotion = PromotionKind.NONE
-        o.promotion_money_cost = 0
-        o.promotion_merit_cost = 0
-        o.promotion_merit_decay = 0
-        o.promoted_before_production = False
-        o.private_notes.append(
-            "官是买到手了，可惜当轮就被查了——位子退回去，钱也要不回来。"
-        )
 
     # ---- 5. 没收 + 降职警告 --------------------------------------------------
     # 查实的后果不再是"一次被抓就打回基层"那种断崖，而是一张分期账单：
@@ -1681,26 +1736,37 @@ def resolve_round(
             else:
                 o_actor.private_notes.append("你的举报查实了，但没有分到赃款。")
 
-    # ---- 5a. 补结算：排在举报/攻击后面的晋升卡 ------------------------------
-    for p, card, bribery in deferred_promotions:
+    # ---- 5a. 作废的买官说明一句；补结算排在举报后面、等赃款的晋升卡 ---------------
+    frozen_note = (
+        lambda o: "举报查实，这一轮的晋升作废了"
+        + ("——行贿的钱也没能要回来。" if o.bribe_lost
+           else "——赃款被抄后，买官的钱也不够了（剩下的钱不没收）。" if o.bribe_unaffordable else "。")
+    )
+    for p in ordered:
         o = outcome.outcomes[p.id]
-        if o.report_effective and bribery:
-            # 查实了就升不了：光记警告没降级也一样，钱还白花了
-            o.promotion_card_played = True
-            o.promotion_frozen_by_report = True
-            o.private_notes.append(
-                "举报查实，这一轮的晋升作废了"
-                + ("——行贿的钱也没能要回来。" if o.bribe_lost
-                   else "——赃款被抄后，买官的钱也不够了（剩下的钱不没收）。" if o.bribe_unaffordable else "。")
+        if o.promotion_frozen_by_report:
+            o.private_notes.append(frozen_note(o))
+        for card, money_at, merit_at, loot_at in waiting.get(p.id, []):
+            if o.promotion is not PromotionKind.NONE:
+                o.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
+                continue
+            # 那一刻手上的钱 + 举报分来的赃款；自己也被查实的话，那一刻手上的赃款已经被抄走
+            money = money_at + o.money_from_reports - (loot_at if o.report_effective else 0)
+            kind, bribe = _promotion_plan(p, card, o, cfg, money=money, merit=merit_at)
+            if kind is PromotionKind.NONE:
+                o.private_notes.append("举报分来的赃款加上也不够门槛，这张晋升卡没用上。")
+                continue
+            if o.report_effective and bribe:
+                # 查实了就升不了：光记警告没降级也一样
+                o.promotion_frozen_by_report = True
+                o.private_notes.append(frozen_note(o))
+                continue
+            if o.demotion is not DemotionKind.NONE and cfg.demoted_cannot_promote_same_round:
+                o.private_notes.append("刚被打下来，这一轮的晋升卡没法用了。")
+                continue
+            _resolve_promotion_card(
+                p, card, o, cfg, names, promo_msgs, already=o.promotion, merit_at=merit_at
             )
-            continue
-        if o.demotion is not DemotionKind.NONE and cfg.demoted_cannot_promote_same_round:
-            o.promotion_card_played = True
-            o.private_notes.append("刚被打下来，这一轮的晋升卡没法用了。")
-            continue
-        _resolve_promotion_card(
-            p, card, o, cfg, names, promo_msgs, already=o.promotion
-        )
 
     # ---- 5b. 自动晋升（仅 promotion_requires_card=False 的规则书原版）---------
     # 没有晋升卡就没有"玩家选的位置"，所以沿用老规矩：所有事情尘埃落定后再结算。
@@ -1824,7 +1890,8 @@ def resolve_round(
     #   * 但没有这些"外快"（大家都只有工资可比）就不传 —— 光拿工资不算新闻
     salaries = salaries or {}
     # GOSSIP_ILLEGAL_FIRST：先比非法收入（没查实的赃款 + 举报分到的钱），并列第一才看合法收入
-    #   （工资、加班费、会计洗白的钱——洗白的那份算合法，不算赃款）
+    #   （工资、加班费、会计洗白的钱——洗白的那份算合法，不算赃款）。
+    #   会计被查实时洗白的那份抄不走，照样是他到手的合法收入（规则原文没有例外）
     illegal_first = cfg.gossip_illegal_first
     gossip_graft = {
         pid: (0 if o.report_effective else o.corrupt_amount - (o.laundered if illegal_first else 0))
@@ -1833,7 +1900,7 @@ def resolve_round(
     }
     legal = {
         pid: salaries.get(pid, cfg.salary(o.rank_before)) + o.overtime_pay
-        + (o.laundered if illegal_first and not o.report_effective else 0)
+        + (o.laundered if illegal_first else 0)
         for pid, o in outcome.outcomes.items()
     }
     if any(v > 0 for v in gossip_graft.values()):
@@ -1849,6 +1916,8 @@ def resolve_round(
     outcome.wealth_broadcast = msgs
     outcome.wealth_top_ids = [pid for pid in sorted(names) if names[pid] in top_names]
 
-    outcome.public_messages = attack_msgs + report_msgs + promo_msgs
+    # 按发生的先后播：出牌时当场升的官 -> 攻击 -> 举报查办 -> 等赃款的晋升、穿小鞋、工龄晋升
+    early = [m for p in ordered for m in early_promo_msgs.get(p.id, [])]
+    outcome.public_messages = early + attack_msgs + report_msgs + promo_msgs
     outcome.presidents = [p.id for p in ordered if p.rank >= cfg.president_rank]
     return outcome

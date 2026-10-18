@@ -1501,7 +1501,7 @@ class SmartAgent:
             elif c is Card.GRAFT:
                 if v > 0:
                     gain_money += rules.corrupt_money(v, rank, event, cfg)
-                    gain_merit += rules.graft_merit(v, rank, event, cfg)
+                    gain_merit += rules.graft_merit(v, rank, cfg)
                 else:
                     gain_money += self._expected_graft_money(rank)
                     gain_merit += self._expected_graft_merit(rank)
@@ -1542,7 +1542,7 @@ class SmartAgent:
                 elif c is Card.GRAFT:
                     if v > 0:
                         gain_money += rules.corrupt_money(v, new_rank, event, cfg)
-                        gain_merit += rules.graft_merit(v, new_rank, event, cfg)
+                        gain_merit += rules.graft_merit(v, new_rank, cfg)
             if grinder_combo:
                 gain_merit += self._overtime_merit(work_vals, new_rank, event)
                 gain_money += cfg.origin_grinder_overtime_multiplier * cfg.salary(new_rank)

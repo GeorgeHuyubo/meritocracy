@@ -25,6 +25,25 @@ class TestLlmPlayPipeline(unittest.TestCase):
         self.assertIn("各身份战绩", text)
         self.assertTrue((out / "report_quick.md").exists())  # mock / 不归纳：写快速报告，不碰 report.md
 
+    def test_bug_hunt_feedback_and_report(self):
+        out = Path(tempfile.mkdtemp())
+        res = llm_play.play_one((0, 7, "sonnet", "mock", out, [], "base", True, 0.0, {"bug_hunt": True}))
+        self.assertTrue(all(p["feedback"].get("bugs") for p in res["players"]))
+        text = llm_play.report(out, summarize=False, model="sonnet", backend_name="mock")
+        self.assertIn("疑似 bug", text)
+        self.assertEqual(len((out / "bugs.jsonl").read_text(encoding="utf-8").splitlines()), 6)
+
+    def test_bug_hunt_prompt_is_valid_template(self):
+        tpl = llm_play.with_bug_hunt(llm_play.FEEDBACK_IN_SESSION)
+        text = tpl.format(reason="结局", last="最后一轮")
+        self.assertIn("测试员", text)
+        self.assertIn('"bugs": [{"round"', text)
+        self.assertNotIn("{{", text)
+        plain = llm_play.report  # 没开 --bug-hunt 的老目录：报告里不出这一节
+        out = Path(tempfile.mkdtemp())
+        llm_play.play_one((0, 7, "sonnet", "mock", out))
+        self.assertNotIn("疑似 bug", plain(out, summarize=False, model="sonnet", backend_name="mock"))
+
     def test_session_backend_speaks_stream_json(self):
         """常驻会话模式：用一个假的 claude（读 stream-json、回 result 事件）把通信走一遍。"""
         import os
@@ -139,6 +158,54 @@ class TestLlmPlayPipeline(unittest.TestCase):
         self.assertGreaterEqual(res["stats"].get("session_restarts", 0), 1)
         self.assertEqual(res["stats"].get("llm_fallback", 0), 0)
 
+    def test_errored_game_closes_its_sessions(self):
+        """整局出错（比如重开进程时 fork 失败 EAGAIN）：这局其余的 claude 进程也要关掉，不能留着占内存。"""
+        import os
+        import time
+        from unittest import mock
+
+        pids = Path(tempfile.mkdtemp()) / "pids"
+        d = self._fake_claude(
+            f"p = {str(pids)!r}\n"
+            "first = not os.path.exists(p)\n"
+            "open(p, 'a').write(f'{os.getpid()}\\n')\n"
+            "for line in sys.stdin:\n"
+            "    if first:\n"
+            "        sys.exit(1)  # 第一个进程一问就死，逼它重开\n"
+            "    print(json.dumps({'type': 'result', 'result': '{\"picks\": [], \"reason\": \"x\"}'}), flush=True)\n")
+        real_popen = llm_play.subprocess.Popen
+        launches = []
+
+        def popen(*a, **kw):
+            launches.append(1)
+            if len(launches) > llm_play.N:
+                raise OSError(35, "Resource temporarily unavailable")
+            return real_popen(*a, **kw)
+
+        with mock.patch.object(llm_play.subprocess, "Popen", popen):
+            with self.assertRaises(OSError):
+                self._with_path(d, lambda: llm_play.play_one(
+                    (0, 3, "sonnet", "session", Path(tempfile.mkdtemp()), [], "base", False)))
+
+        def alive(pid: int) -> bool:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:  # 已退出的僵尸：收掉，算死了
+                    return False
+            except ChildProcessError:
+                pass
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        started = [int(x) for x in pids.read_text().split()]
+        self.assertEqual(len(started), llm_play.N)
+        deadline = time.time() + 5
+        while time.time() < deadline and any(alive(p) for p in started):
+            time.sleep(0.05)
+        self.assertEqual([p for p in started if alive(p)], [])
+
     def test_rate_limit_is_retried_not_counted_as_fallback(self):
         """网关限流：退避后重试成功，不算退回程序 AI。"""
         state = Path(tempfile.mkdtemp()) / "count"
@@ -174,6 +241,64 @@ class TestLlmPlayPipeline(unittest.TestCase):
     def test_extract_json_tolerates_chatter(self):
         got = llm_play.extract_json('好的，我的决定是：\n{"picks": [{"index": 2, "target": 4}], "reason": "拦他"}\n以上')
         self.assertEqual(got["picks"][0]["target"], 4)
+
+
+
+class TestPromptsTellTheModelWhatThePlayerSees(unittest.TestCase):
+    """大模型挑刺（2026-10-17）里成片的"看不懂"，根子在提示词少给了真人界面上有的东西。"""
+
+    @staticmethod
+    def _after_one_round():
+        import random
+        import ai
+        from game import Game
+        from config import DEFAULT_CONFIG
+        from models import Origin
+
+        cfg = DEFAULT_CONFIG
+        rng = random.Random(5)
+        game = Game(game_id="t", cfg=cfg, rng=rng)
+        for name in ["老张", "老李", "老王", "老赵", "老刘", "老陈"]:
+            game.add_player(name, is_ai=True)
+        for pid, oid in zip(sorted(game.players), cfg.origin_ids()):
+            game.players[pid].origin = Origin(oid)
+        pool = ai.make_pool(cfg, rng)
+        game.start_game()
+        for pid in sorted(game.players):
+            game.select_actions(pid, ai.turn(game, pid, pool))
+        game.force_lock_all()
+        game.reveal_event()
+        outcome = game.resolve()
+        return cfg, game, pool, outcome
+
+    def test_redraw_prompt_does_not_claim_there_is_no_history(self):
+        cfg, game, pool, outcome = self._after_one_round()
+        text = llm_play.session_round_prompt(cfg, game, 1, pool.get(1), "", after_redraw=True)
+        self.assertNotIn("第一轮，还没有历史", text)
+
+    def test_prompt_shows_my_private_settlement(self):
+        cfg, game, pool, outcome = self._after_one_round()
+        text = llm_play.player_prompt(cfg, game, 1, pool.get(1), ["上一轮"], [])
+        self.assertIn("的私密结算（只有你看得到）", text)
+        self.assertIn("合法工资", text)
+        for note in outcome.outcomes[1].private_notes:
+            self.assertIn(note, text)
+
+    def test_gossip_is_labelled_in_the_round_summary(self):
+        cfg, game, pool, outcome = self._after_one_round()
+        outcome.wealth_broadcast = ["老张 最近开上豪车了。"]
+        self.assertIn("坊间传闻：老张 最近开上豪车了。", llm_play.round_summary(cfg, game, outcome))
+
+    def test_rules_text_spells_out_the_numbers(self):
+        from config import DEFAULT_CONFIG as cfg
+        text = llm_play.rules_text(cfg)
+        self.assertIn("×1.5", text)  # 官职倍率
+        self.assertIn("工资", text)
+        self.assertIn(f"÷{cfg.merit_overflow_divisor}", text)
+        self.assertIn("工龄升职", text)  # 怎么升都要打折
+        self.assertIn("出牌顺序", text)
+        self.assertIn("一起点名", text)  # 传闻并列
+        self.assertIn("经济一片大好", text)  # 事件逐条列出
 
 
 if __name__ == "__main__":
