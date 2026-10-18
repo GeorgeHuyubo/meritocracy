@@ -968,6 +968,9 @@ def resolve_round(
     # 晋升卡在它排的那个位置**当场**结算、当场 /5，花的是那一刻手上的政绩和钱
     # （包括这一轮排在它前面刚贪来的钱）。攻击和举报只在这一步"过一下"，
     # 它们的效果要等所有人的牌都走完（见第 3、4 步），所以排在攻击后面的晋升卡用不上抢来的政绩。
+    # 但攻击和举报作用在**被攻击 / 被举报的人的每一张牌上**，和他怎么排无关：
+    # 被抢功的人每张工作牌挣的政绩当场就扣下被抢的那份（他的晋升卡用不上）；
+    # 被查实的人每张买官卡作废（重算，见下），等赃款的那张也一样（见第 4、5 步）。
     #
     # 唯一要等的：排在**举报后面**、手上的钱不够、差的正好指望举报分来的赃款——
     # 记下那一刻的政绩和钱，等第 5a 步分完赃再结算（规则速查：晋升卡排在举报后面，才能花到举报分来的赃款）。
@@ -1500,241 +1503,313 @@ def resolve_round(
             o.overtime_pay = pay
             by_id[pid].money += pay
 
-    # ---- 4. 匿名举报：判定是否查实 ----------------------------------------
-    # 事件产生的举报没有举报人，查实的赃款直接充公。
-    # 这里要把"真人举报"和"事件查办"分开记：后果一样，但公报得说清楚是哪一种，
-    # 否则被反腐风暴扫到的人会以为桌上有人在专门盯着自己。
-    for p in ordered:
-        outcome.outcomes[p.id].report_count_players = len(report_actors.get(p.id, []))
-
-    if event.flag("mass_report"):
+    # 第 4、5 步（举报判定、没收、降职警告、分赃）包成一个函数：等赃款的晋升卡也逃不掉举报，
+    # 要反复算到稳定（见下面）。
+    #   late_bribe   等赃款、走钱那条路的晋升卡（被查实就作废）：玩家 -> 这一级的钱
+    #   late_family  等赃款、用钱升的一纸调令（官不撤，但同样算行贿）：玩家 -> 这一级的钱
+    #   proceeds_prev  上一遍每人分到的赃款，用来看等赃款的那份礼备不备得齐
+    def judge_reports(late_bribe: dict[int, int], late_family: dict[int, int],
+                      proceeds_prev: dict[int, int]) -> None:
+        # ---- 4. 匿名举报：判定是否查实 ----------------------------------------
+        # 事件产生的举报没有举报人，查实的赃款直接充公。
+        # 这里要把"真人举报"和"事件查办"分开记：后果一样，但公报得说清楚是哪一种，
+        # 否则被反腐风暴扫到的人会以为桌上有人在专门盯着自己。
         for p in ordered:
-            report_counts[p.id] += 1
-            outcome.outcomes[p.id].report_from_event = event.name
-    if event.flag("storm_report"):
-        for pid in sorted(storm_ids):  # 第 2 步就按第一遍的贪污额点好了名
-            report_counts[pid] += 1
-            outcome.outcomes[pid].report_from_event = event.name
+            outcome.outcomes[p.id].report_count_players = len(report_actors.get(p.id, []))
 
-    for p in ordered:
-        o = outcome.outcomes[p.id]
-        count = report_counts.get(p.id, 0)
-        if count <= 0:
-            continue
-        o.reported = True
-        o.report_count = count
-        kind = classify_report(o.corrupt_amount, cfg, bribe=o.pending_bribe + o.family_bribe)
-        if kind is DemotionKind.NONE:
-            # 目标本轮没有贪污 -> 举报无效
-            if o.report_count_players:
-                o.private_notes.append("有人举报了你，但查无实据。")
+        if event.flag("mass_report"):
+            for p in ordered:
+                report_counts[p.id] += 1
+                outcome.outcomes[p.id].report_from_event = event.name
+        if event.flag("storm_report"):
+            for pid in sorted(storm_ids):  # 第 2 步就按第一遍的贪污额点好了名
+                report_counts[pid] += 1
+                outcome.outcomes[pid].report_from_event = event.name
+
+        for p in ordered:
+            o = outcome.outcomes[p.id]
+            count = report_counts.get(p.id, 0)
+            if count <= 0:
+                continue
+            o.reported = True
+            o.report_count = count
+            kind = classify_report(o.corrupt_amount, cfg, bribe=o.pending_bribe + o.family_bribe
+                                  + late_bribe.get(p.id, 0) + late_family.get(p.id, 0))
+            if kind is DemotionKind.NONE:
+                # 目标本轮没有贪污 -> 举报无效
+                if o.report_count_players:
+                    o.private_notes.append("有人举报了你，但查无实据。")
+                else:
+                    o.private_notes.append(f"{o.report_from_event}扫到了你，但查无实据。")
+                continue
+            o.report_effective = True
+            o.demotion = kind
+            # 被查办的人自己也要知道是"有人盯上我"还是"运气不好撞上风暴"——
+            # 搞错了会去报复一个根本不存在的敌人
+            if o.report_count_players and o.report_from_event:
+                o.private_notes.append(
+                    f"有人举报了你，偏偏又赶上{o.report_from_event}，两头都没躲过。"
+                )
+            elif o.report_count_players:
+                o.private_notes.append("有人举报了你，查实了。")
             else:
-                o.private_notes.append(f"{o.report_from_event}扫到了你，但查无实据。")
-            continue
-        o.report_effective = True
-        o.demotion = kind
-        # 被查办的人自己也要知道是"有人盯上我"还是"运气不好撞上风暴"——
-        # 搞错了会去报复一个根本不存在的敌人
-        if o.report_count_players and o.report_from_event:
-            o.private_notes.append(
-                f"有人举报了你，偏偏又赶上{o.report_from_event}，两头都没躲过。"
-            )
-        elif o.report_count_players:
-            o.private_notes.append("有人举报了你，查实了。")
-        else:
-            o.private_notes.append(
-                f"没人举报你，是{o.report_from_event}把你扫进去了——贪得太扎眼。"
-            )
+                o.private_notes.append(
+                    f"没人举报你，是{o.report_from_event}把你扫进去了——贪得太扎眼。"
+                )
 
-    # 记录"没收与降级之前"的晋升资格。规则书第 12 节（攻击阻断政绩晋升）和
-    # 第 16 节（攻击 + 举报）都是按这个时点判定的。
-    #
-    # **只在"够了自动升"的规则书原版里用**（PROMOTION_REQUIRES_CARD=False）。
-    # 现在升职必须打晋升卡，"被挡下"由那张卡自己结算时判定（_resolve_promotion_card，
-    # 认得贫农只挡一个人、一纸调令拦不住）。以前这段在出牌制下照跑：只要挨了攻击、
-    # 资源又够门槛，就算一张晋升卡都没打也记成"晋升被阻止"——
-    # 结算页对没想升的人显示"本轮晋升被阻止"；而且它跑在等赃款的晋升卡之前，
-    # 会把只挨了一个人攻击的贫农错误地按住。
-    for p in ordered:
-        if cfg.promotion_requires_card:
+        # 记录"没收与降级之前"的晋升资格。规则书第 12 节（攻击阻断政绩晋升）和
+        # 第 16 节（攻击 + 举报）都是按这个时点判定的。
+        #
+        # **只在"够了自动升"的规则书原版里用**（PROMOTION_REQUIRES_CARD=False）。
+        # 现在升职必须打晋升卡，"被挡下"由那张卡自己结算时判定（_resolve_promotion_card，
+        # 认得贫农只挡一个人、一纸调令拦不住）。以前这段在出牌制下照跑：只要挨了攻击、
+        # 资源又够门槛，就算一张晋升卡都没打也记成"晋升被阻止"——
+        # 结算页对没想升的人显示"本轮晋升被阻止"；而且它跑在等赃款的晋升卡之前，
+        # 会把只挨了一个人攻击的贫农错误地按住。
+        for p in ordered:
+            if cfg.promotion_requires_card:
+                break
+            o = outcome.outcomes[p.id]
+            elig_money_pre = can_promote_by_money(p, cfg)
+            elig_merit_pre = can_promote_by_merit(p, cfg)
+            if o.attacked and elig_merit_pre:
+                o.merit_promotion_blocked = True
+            if o.attacked and o.report_effective and elig_money_pre and elig_merit_pre:
+                o.promotion_blocked_by_attack_report = True
+
+        # ---- 5. 没收 + 降职警告 --------------------------------------------------
+        # 查实的后果不再是"一次被抓就打回基层"那种断崖，而是一张分期账单：
+        #   * 本轮贪污所得全部没收
+        #   * 拿钱买的官作废，而且**钱照样没了**——礼送出去了，事没办成
+        #   * 记一次降职警告，工龄清零
+        #   * 警告攒够 WARNINGS_BEFORE_DEMOTION 次才降一级，然后警告清空
+        # 先把所有没收金额算完再统一扣，这样"甲举报乙、乙同时举报甲"能同时结算，
+        # 不会因为先后顺序让某一方多拿或少拿。
+        confiscated: dict[int, int] = {}
+        for p in ordered:
+            o = outcome.outcomes[p.id]
+            if not o.report_effective or not cfg.report_reward_enabled:
+                continue
+            # 本轮贪的按 report_seize_ratio 吐出来（默认全部；存款不动——那是以前"重大贪腐抄家"的活）
+            seize = math.ceil(Fraction(o.corrupt_amount) * cfg.report_seize_ratio)
+            if o.laundered:
+                # 会计「做账」：洗白的那部分抄不走。
+                seize = min(seize, o.corrupt_amount - o.laundered)
+            # 但**分赃池不减** —— 少抄只能吃掉"充公"那一份，举报人该拿的一分不少：
+            #     普通人： 贪 40 -> 没收 40 -> 举报人 20 + 充公 20
+            #     会计：   贪 40 -> 没收 20 -> 举报人 20 + 充公  0
+            # 不这么写的话，抓会计的回本比抓别人少，就没人愿意抓他了。
+            reporter_cut = math.floor(Fraction(o.corrupt_amount) * cfg.report_reward_ratio)
+            seize = max(reporter_cut, seize)
+            confiscated[p.id] = min(seize, p.money)
+
+        for p in ordered:
+            o = outcome.outcomes[p.id]
+            if not o.report_effective:
+                continue
+            before = p.rank
+
+            taken = confiscated.get(p.id, 0)
+            if taken:
+                p.money = max(0, p.money - taken)
+                o.money_confiscated = taken
+
+            # 行贿的钱打水漂：官没升成，钱也要不回来。
+            # 这笔钱同样是查获的赃款，要并进分赃池——
+            # 不然"抓到一个光买官没贪钱的"，举报人查实了却一分钱拿不到。
+            # 但先抄赃款、再看剩下的钱还买不买得起这一级：买不起的话买官本来就会失败，
+            # 剩下的钱不当行贿没收（以前是"有多少扣多少"，贪 18 被抄光、只剩 1 块也照扣，战报写成"行贿的 1 打了水漂"）。
+            afford = o.pending_bribe > 0 and p.money >= o.pending_bribe
+            bribe = min(
+                math.floor(Fraction(o.pending_bribe) * cfg.bribe_forfeit_ratio), p.money
+            ) if afford else 0
+            o.bribe_unaffordable = o.pending_bribe > 0 and not afford
+            if bribe:
+                p.money -= bribe
+                o.bribe_lost = bribe
+                confiscated[p.id] = confiscated.get(p.id, 0) + bribe
+            late = 0 if o.pending_bribe else late_bribe.get(p.id, 0)
+            if late:
+                # 排在自己举报后面、等赃款的买官：礼要靠分来的赃款才备得齐，
+                # 所以按"抄完赃款剩下的钱 + 分来的赃款"看买不买得起
+                if p.money + proceeds_prev.get(p.id, 0) >= late:
+                    bribe = math.floor(Fraction(late) * cfg.bribe_forfeit_ratio)
+                    p.money -= bribe  # 可能暂时是负的：分赃在下面才到账
+                    o.bribe_lost = bribe
+                    confiscated[p.id] = confiscated.get(p.id, 0) + bribe
+                else:
+                    o.bribe_unaffordable = True
+            # 一纸调令用钱升的那笔：钱已经花掉了、官也不撤，但同样算查获的行贿，进分赃池
+            family_cost = o.family_bribe + late_family.get(p.id, 0)
+            family = (
+                math.floor(Fraction(family_cost) * cfg.bribe_forfeit_ratio)
+                if cfg.report_catches_bribery else 0
+            )
+            if family:
+                confiscated[p.id] = confiscated.get(p.id, 0) + family
+
+            issued = warnings_for(o.demotion, cfg)
+            o.warnings_issued = issued
+            p.warnings += issued
+            p.tenure = 0  # 任何一次警告都把工龄清零
+
+            # 红二代「硬保」：警告照记、工龄照清、赃款照抄，**但官职动不了**。
+            # 上头有人，查归查，位子保得住。
+            shielded = origin_is(p, "RED", cfg)
+            demoted = False
+            saved = False
+            while p.warnings >= cfg.warnings_before_demotion:
+                p.warnings -= cfg.warnings_before_demotion
+                fee = red_shield_fee(cfg, p.rank) if shielded else 0
+                if shielded and not (cfg.origin_red_shield_fee_strict and p.money < fee):
+                    saved = True
+                    # 打点费（ORIGIN_RED_SHIELD_FEE）：官照样保住，但要交钱；钱不够就全交。充公，不进分赃池。
+                    # STRICT 版交不起就走下面的正常降级
+                    fee = min(fee, max(0, p.money))
+                    p.money -= fee
+                    o.shield_fee_paid += fee
+                    continue
+                apply_demotion(p, DemotionKind.MINOR, cfg)
+                demoted = True
+            # 已经在基层的人降无可降：官职没动，就别播"由基层降为基层"
+            hit_the_floor = demoted and p.rank == before
+            o.origin_shielded_demotion = saved
+            o.warnings_after = p.warnings
+            o.demotion = DemotionKind.MINOR if demoted else DemotionKind.NONE
+
+            how = _report_source_phrase(o)
+            bits = []
+            if taken:
+                bits.append(f"赃款 {taken} 全部没收" if taken >= o.corrupt_amount
+                            else f"赃款 {o.corrupt_amount} 被没收 {taken}")
+            if bribe:
+                bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
+            elif o.bribe_unaffordable:
+                bits.append("赃款被抄后买官的钱不够了，官也没升成")
+            if family:
+                bits.append(f"调令背后的 {family_cost} 被认定为行贿（官照样升）")
+            detail = "，".join(bits)
+            if saved:
+                report_msgs.append(
+                    f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
+                    f"警告记满——上头有人打了招呼"
+                    f"{'、花钱打点压了下来' if cfg.origin_red_shield_fee is not None else ''}，"
+                    f"{cfg.rank_name(p.rank)}的位子纹丝不动。"
+                )
+            elif demoted and hit_the_floor:
+                report_msgs.append(
+                    f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
+                    f"警告记满——但已经在{cfg.rank_name(p.rank)}，再降无可降。"
+                )
+            elif demoted:
+                report_msgs.append(
+                    f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
+                    f"警告记满，由{cfg.rank_name(before)}降为{cfg.rank_name(p.rank)}。"
+                )
+            else:
+                left = cfg.warnings_before_demotion - p.warnings
+                report_msgs.append(
+                    f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
+                    f"记降职警告一次（再记 {left} 次就要降级）。"
+                )
+
+        # 分赃：举报人拿 report_reward_ratio，其余充公；多人举报再平分，
+        # 向下取整，零头也充公。
+        # 举报本身已经能降级 + 没收 + 冻结晋升了，拿钱这块要收着点。
+        #
+        # 比例按**毛贪污额**算，不是按实际没收额 —— 这两个数只有碰上会计
+        # 「做账」时才会不一样，而那张牌的设计就是"洗白只吃充公那份，
+        # 举报人一分不少"。按没收额算的话会计反而会让举报他的人少拿一半。
+        # 当然实际给出去的不能超过真抄到的钱。
+        for victim_id, taken in confiscated.items():
+            actors = report_actors.get(victim_id, [])
+            if taken <= 0 or not actors:
+                continue
+            o_victim = outcome.outcomes[victim_id]
+            # 毛额 = 本轮脏收入 + 查获的行贿。行贿那笔没有"洗白"一说，
+            # 它是原样并进分赃池的，所以两边都要算上。
+            family = (
+                math.floor(Fraction(o_victim.family_bribe + late_family.get(victim_id, 0))
+                           * cfg.bribe_forfeit_ratio)
+                if cfg.report_catches_bribery else 0
+            )
+            gross = o_victim.corrupt_amount + o_victim.bribe_lost + family
+            payout = min(taken, math.floor(Fraction(gross) * cfg.report_reward_ratio))
+            share = payout // len(actors) if cfg.report_reward_split_evenly else payout
+            share = max(0, share - cfg.report_reward_fee)  # 每人再扣跑腿费（充公）
+            if share <= 0:
+                continue
+            for actor_id in actors:
+                by_id[actor_id].money += share
+                outcome.outcomes[actor_id].money_from_reports += share
+
+        for pid in late_bribe:  # 没收敛时的兜底（正常收敛时分完赃都不会是负的）
+            by_id[pid].money = max(0, by_id[pid].money)
+
+        # 告知举报者结果（只说查实与否 + 自己分到多少，不泄露对方的家底）
+        for p in ordered:
+            o_actor = outcome.outcomes[p.id]
+            for target_id, actors in sorted(report_actors.items()):
+                if p.id not in actors:
+                    continue
+                if not outcome.outcomes[target_id].report_effective:
+                    o_actor.private_notes.append(
+                        f"你对 {names[target_id]} 的举报没有查到问题。"
+                    )
+                elif o_actor.money_from_reports > 0:
+                    o_actor.private_notes.append(
+                        f"你的举报查实了，分得赃款 {o_actor.money_from_reports}。"
+                    )
+                else:
+                    o_actor.private_notes.append("你的举报查实了，但没有分到赃款。")
+
+
+    # 举报作用在被举报人打出的每一张牌上，和他怎么排无关：排在自己举报后面、等赃款的买官也一样逃不掉。
+    # 可那张卡买不买得起，要看他分到多少赃款，分多少又要看谁被查实、没收了多少——
+    # 所以先按"等赃款的卡都不算"把举报判一遍，看出哪些等赃款的卡其实买得起、算行贿，
+    # 再从第 4 步开头重判，直到这份名单（和每人分到的赃款）不再变。名单只会变长，最多重判几遍。
+    start = ({p.id: (p.money, p.merit, p.rank, p.tenure, p.warnings) for p in ordered},
+             copy.deepcopy(outcome.outcomes), list(report_msgs), dict(report_counts))
+
+    def late_bribes(proceeds: dict[int, int]) -> tuple[dict[int, int], dict[int, int]]:
+        bribes: dict[int, int] = {}
+        family: dict[int, int] = {}
+        for p in ordered:
+            o = outcome.outcomes[p.id]
+            if not o.reported or o.promotion is not PromotionKind.NONE:
+                continue
+            q = p.clone()
+            q.rank = start[0][p.id][2]  # 按出牌那一刻的官职算（第 5 步可能已经降了级）
+            for card, money_at, merit_at, loot_at in waiting.get(p.id, []):
+                money = money_at + proceeds.get(p.id, 0) - (loot_at if o.report_effective else 0)
+                kind, bribe = _promotion_plan(q, card, o, cfg, money=money, merit=merit_at)
+                if kind is PromotionKind.NONE:
+                    continue
+                if bribe:
+                    bribes[p.id] = money_cost_for(q, cfg) or 0
+                elif card is Card.PROMOTE_FAMILY and kind is PromotionKind.MONEY:
+                    family[p.id] = money_cost_for(q, cfg) or 0
+                break
+        return bribes, family
+
+    late_bribe: dict[int, int] = {}
+    late_family: dict[int, int] = {}
+    proceeds: dict[int, int] = {}
+    for attempt in range(len(ordered) + 2):
+        judge_reports(late_bribe, late_family, proceeds)
+        got = {p.id: outcome.outcomes[p.id].money_from_reports for p in ordered}
+        nxt = late_bribes(got)
+        if attempt == len(ordered) + 1 or (
+                nxt == (late_bribe, late_family) and (not (late_bribe or late_family) or got == proceeds)):
             break
-        o = outcome.outcomes[p.id]
-        elig_money_pre = can_promote_by_money(p, cfg)
-        elig_merit_pre = can_promote_by_merit(p, cfg)
-        if o.attacked and elig_merit_pre:
-            o.merit_promotion_blocked = True
-        if o.attacked and o.report_effective and elig_money_pre and elig_merit_pre:
-            o.promotion_blocked_by_attack_report = True
-
-    # ---- 5. 没收 + 降职警告 --------------------------------------------------
-    # 查实的后果不再是"一次被抓就打回基层"那种断崖，而是一张分期账单：
-    #   * 本轮贪污所得全部没收
-    #   * 拿钱买的官作废，而且**钱照样没了**——礼送出去了，事没办成
-    #   * 记一次降职警告，工龄清零
-    #   * 警告攒够 WARNINGS_BEFORE_DEMOTION 次才降一级，然后警告清空
-    # 先把所有没收金额算完再统一扣，这样"甲举报乙、乙同时举报甲"能同时结算，
-    # 不会因为先后顺序让某一方多拿或少拿。
-    confiscated: dict[int, int] = {}
-    for p in ordered:
-        o = outcome.outcomes[p.id]
-        if not o.report_effective or not cfg.report_reward_enabled:
-            continue
-        # 本轮贪的按 report_seize_ratio 吐出来（默认全部；存款不动——那是以前"重大贪腐抄家"的活）
-        seize = math.ceil(Fraction(o.corrupt_amount) * cfg.report_seize_ratio)
-        if o.laundered:
-            # 会计「做账」：洗白的那部分抄不走。
-            seize = min(seize, o.corrupt_amount - o.laundered)
-        # 但**分赃池不减** —— 少抄只能吃掉"充公"那一份，举报人该拿的一分不少：
-        #     普通人： 贪 40 -> 没收 40 -> 举报人 20 + 充公 20
-        #     会计：   贪 40 -> 没收 20 -> 举报人 20 + 充公  0
-        # 不这么写的话，抓会计的回本比抓别人少，就没人愿意抓他了。
-        reporter_cut = math.floor(Fraction(o.corrupt_amount) * cfg.report_reward_ratio)
-        seize = max(reporter_cut, seize)
-        confiscated[p.id] = min(seize, p.money)
-
-    for p in ordered:
-        o = outcome.outcomes[p.id]
-        if not o.report_effective:
-            continue
-        before = p.rank
-
-        taken = confiscated.get(p.id, 0)
-        if taken:
-            p.money = max(0, p.money - taken)
-            o.money_confiscated = taken
-
-        # 行贿的钱打水漂：官没升成，钱也要不回来。
-        # 这笔钱同样是查获的赃款，要并进分赃池——
-        # 不然"抓到一个光买官没贪钱的"，举报人查实了却一分钱拿不到。
-        # 但先抄赃款、再看剩下的钱还买不买得起这一级：买不起的话买官本来就会失败，
-        # 剩下的钱不当行贿没收（以前是"有多少扣多少"，贪 18 被抄光、只剩 1 块也照扣，战报写成"行贿的 1 打了水漂"）。
-        afford = o.pending_bribe > 0 and p.money >= o.pending_bribe
-        bribe = min(
-            math.floor(Fraction(o.pending_bribe) * cfg.bribe_forfeit_ratio), p.money
-        ) if afford else 0
-        o.bribe_unaffordable = o.pending_bribe > 0 and not afford
-        if bribe:
-            p.money -= bribe
-            o.bribe_lost = bribe
-            confiscated[p.id] = confiscated.get(p.id, 0) + bribe
-        # 一纸调令用钱升的那笔：钱已经花掉了、官也不撤，但同样算查获的行贿，进分赃池
-        family = (
-            math.floor(Fraction(o.family_bribe) * cfg.bribe_forfeit_ratio)
-            if cfg.report_catches_bribery else 0
-        )
-        if family:
-            confiscated[p.id] = confiscated.get(p.id, 0) + family
-
-        issued = warnings_for(o.demotion, cfg)
-        o.warnings_issued = issued
-        p.warnings += issued
-        p.tenure = 0  # 任何一次警告都把工龄清零
-
-        # 红二代「硬保」：警告照记、工龄照清、赃款照抄，**但官职动不了**。
-        # 上头有人，查归查，位子保得住。
-        shielded = origin_is(p, "RED", cfg)
-        demoted = False
-        saved = False
-        while p.warnings >= cfg.warnings_before_demotion:
-            p.warnings -= cfg.warnings_before_demotion
-            fee = red_shield_fee(cfg, p.rank) if shielded else 0
-            if shielded and not (cfg.origin_red_shield_fee_strict and p.money < fee):
-                saved = True
-                # 打点费（ORIGIN_RED_SHIELD_FEE）：官照样保住，但要交钱；钱不够就全交。充公，不进分赃池。
-                # STRICT 版交不起就走下面的正常降级
-                fee = min(fee, p.money)
-                p.money -= fee
-                o.shield_fee_paid += fee
-                continue
-            apply_demotion(p, DemotionKind.MINOR, cfg)
-            demoted = True
-        # 已经在基层的人降无可降：官职没动，就别播"由基层降为基层"
-        hit_the_floor = demoted and p.rank == before
-        o.origin_shielded_demotion = saved
-        o.warnings_after = p.warnings
-        o.demotion = DemotionKind.MINOR if demoted else DemotionKind.NONE
-
-        how = _report_source_phrase(o)
-        bits = []
-        if taken:
-            bits.append(f"赃款 {taken} 全部没收" if taken >= o.corrupt_amount
-                        else f"赃款 {o.corrupt_amount} 被没收 {taken}")
-        if bribe:
-            bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
-        elif o.bribe_unaffordable:
-            bits.append("赃款被抄后买官的钱不够了，官也没升成")
-        if family:
-            bits.append(f"调令背后的 {o.family_bribe} 被认定为行贿（官照样升）")
-        detail = "，".join(bits)
-        if saved:
-            report_msgs.append(
-                f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
-                f"警告记满——上头有人打了招呼"
-                f"{'、花钱打点压了下来' if cfg.origin_red_shield_fee is not None else ''}，"
-                f"{cfg.rank_name(p.rank)}的位子纹丝不动。"
-            )
-        elif demoted and hit_the_floor:
-            report_msgs.append(
-                f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
-                f"警告记满——但已经在{cfg.rank_name(p.rank)}，再降无可降。"
-            )
-        elif demoted:
-            report_msgs.append(
-                f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
-                f"警告记满，由{cfg.rank_name(before)}降为{cfg.rank_name(p.rank)}。"
-            )
-        else:
-            left = cfg.warnings_before_demotion - p.warnings
-            report_msgs.append(
-                f"{names[p.id]} 因经济问题{how}，{detail + '，' if detail else ''}"
-                f"记降职警告一次（再记 {left} 次就要降级）。"
-            )
-
-    # 分赃：举报人拿 report_reward_ratio，其余充公；多人举报再平分，
-    # 向下取整，零头也充公。
-    # 举报本身已经能降级 + 没收 + 冻结晋升了，拿钱这块要收着点。
-    #
-    # 比例按**毛贪污额**算，不是按实际没收额 —— 这两个数只有碰上会计
-    # 「做账」时才会不一样，而那张牌的设计就是"洗白只吃充公那份，
-    # 举报人一分不少"。按没收额算的话会计反而会让举报他的人少拿一半。
-    # 当然实际给出去的不能超过真抄到的钱。
-    for victim_id, taken in confiscated.items():
-        actors = report_actors.get(victim_id, [])
-        if taken <= 0 or not actors:
-            continue
-        o_victim = outcome.outcomes[victim_id]
-        # 毛额 = 本轮脏收入 + 查获的行贿。行贿那笔没有"洗白"一说，
-        # 它是原样并进分赃池的，所以两边都要算上。
-        family = (
-            math.floor(Fraction(o_victim.family_bribe) * cfg.bribe_forfeit_ratio)
-            if cfg.report_catches_bribery else 0
-        )
-        gross = o_victim.corrupt_amount + o_victim.bribe_lost + family
-        payout = min(taken, math.floor(Fraction(gross) * cfg.report_reward_ratio))
-        share = payout // len(actors) if cfg.report_reward_split_evenly else payout
-        share = max(0, share - cfg.report_reward_fee)  # 每人再扣跑腿费（充公）
-        if share <= 0:
-            continue
-        for actor_id in actors:
-            by_id[actor_id].money += share
-            outcome.outcomes[actor_id].money_from_reports += share
-
-    # 告知举报者结果（只说查实与否 + 自己分到多少，不泄露对方的家底）
-    for p in ordered:
-        o_actor = outcome.outcomes[p.id]
-        for target_id, actors in sorted(report_actors.items()):
-            if p.id not in actors:
-                continue
-            if not outcome.outcomes[target_id].report_effective:
-                o_actor.private_notes.append(
-                    f"你对 {names[target_id]} 的举报没有查到问题。"
-                )
-            elif o_actor.money_from_reports > 0:
-                o_actor.private_notes.append(
-                    f"你的举报查实了，分得赃款 {o_actor.money_from_reports}。"
-                )
-            else:
-                o_actor.private_notes.append("你的举报查实了，但没有分到赃款。")
+        for p in ordered:
+            p.money, p.merit, p.rank, p.tenure, p.warnings = start[0][p.id]
+        outcome.outcomes.clear()
+        outcome.outcomes.update(copy.deepcopy(start[1]))
+        report_msgs[:] = start[2]
+        report_counts.clear()
+        report_counts.update(start[3])
+        (late_bribe, late_family), proceeds = nxt, got
 
     # ---- 5a. 作废的买官说明一句；补结算排在举报后面、等赃款的晋升卡 ---------------
     frozen_note = (

@@ -3870,6 +3870,62 @@ class TestPromotionResolvesInCardOrder(unittest.TestCase):
         self.assertEqual(out.outcomes[1].attack_merit_loss, gained // 2)
         self.assertEqual(p.merit, tc + 2 - gained // 2)
 
+    def test_report_catches_a_bribe_waiting_for_the_loot(self):
+        """举报作用在每张牌上：排在自己举报后面、等赃款的买官，被人举报也一样作废、钱打水漂——
+        和手上本来就有钱、当场买官的人结果一样，不会因为穷反而躲过去。"""
+        mc = REAL_CFG.money_cost(0)
+        results = {}
+        for start in (0, mc):
+            a, b, c = player(1, money=start), player(2), player(3)
+            out = resolve([a, b, c], {
+                1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_MONEY)],
+                2: [Action(Card.CORRUPT, value=20), Action(Card.CORRUPT, value=20)],
+                3: [Action(Card.REPORT, 1)],
+            }, cfg=REAL_CFG)
+            o = out.outcomes[1]
+            results[start] = (a.rank, o.report_effective, o.bribe_lost, out.outcomes[3].money_from_reports)
+            self.assertEqual(a.money, start + o.money_from_reports - mc)
+            self.assertNotIn("晋升为", "".join(out.public_messages))
+        self.assertEqual(results[0], (0, True, mc, results[mc][3]))
+        self.assertEqual(results[0], results[mc])
+
+    def test_waiting_bribes_caught_in_a_chain(self):
+        """B 等着用举报 D 分来的钱买官、A 举报了 B；A 等着用举报 B 分来的钱买官、C 举报了 A。
+        B 的买官钱没收后分给 A，A 才买得起——所以 A 也被查实（要反复判到稳定）。"""
+        mc = REAL_CFG.money_cost(0)
+        fee = REAL_CFG.report_reward_fee
+        from_b = math.floor(Fraction(mc) * REAL_CFG.bribe_forfeit_ratio * REAL_CFG.report_reward_ratio) - fee
+        a = player(1, money=mc - from_b)
+        b, c, d = player(2), player(3), player(4)
+        out = resolve([a, b, c, d], {
+            1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_MONEY)],
+            2: [Action(Card.REPORT, 4), Action(Card.PROMOTE_MONEY)],
+            3: [Action(Card.REPORT, 1)],
+            4: [Action(Card.CORRUPT, value=20), Action(Card.CORRUPT, value=20)],
+        }, cfg=REAL_CFG)
+        self.assertTrue(out.outcomes[2].report_effective)
+        self.assertEqual(out.outcomes[1].money_from_reports, from_b)
+        self.assertTrue(out.outcomes[1].report_effective)
+        self.assertEqual((a.rank, b.rank), (0, 0))
+        self.assertEqual(a.money, 0)
+        self.assertEqual(out.outcomes[3].money_from_reports, from_b)
+
+    def test_report_catches_a_waiting_family_card_paid_with_money(self):
+        """等赃款、用钱升的一纸调令被举报：官照样升，但同样算行贿——记警告、那笔钱进分赃池。"""
+        mc = REAL_CFG.money_cost(0)
+        red, b, c = player(1, origin=Origin.RED), player(2), player(3)
+        out = resolve([red, b, c], {
+            1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_FAMILY)],
+            2: [Action(Card.CORRUPT, value=20), Action(Card.CORRUPT, value=20)],
+            3: [Action(Card.REPORT, 1)],
+        }, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual((red.rank, o.promotion), (1, PromotionKind.MONEY))
+        self.assertTrue(o.report_effective)
+        self.assertEqual(red.warnings, 1)
+        share = math.floor(Fraction(mc) * REAL_CFG.bribe_forfeit_ratio * REAL_CFG.report_reward_ratio)
+        self.assertEqual(out.outcomes[3].money_from_reports, share - REAL_CFG.report_reward_fee)
+
     def test_bulletin_tells_promotion_before_demotion(self):
         """同一轮先凭政绩升上去、又被查实降下来：公报按发生顺序先说升职再说降级。"""
         p = player(1, rank=1, merit=REAL_CFG.merit_cost(1), warnings=REAL_CFG.warnings_before_demotion - 1)
