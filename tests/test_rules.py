@@ -3926,6 +3926,83 @@ class TestPromotionResolvesInCardOrder(unittest.TestCase):
         share = math.floor(Fraction(mc) * REAL_CFG.bribe_forfeit_ratio * REAL_CFG.report_reward_ratio)
         self.assertEqual(out.outcomes[3].money_from_reports, share - REAL_CFG.report_reward_fee)
 
+    def test_voided_waiting_bribe_still_counts_the_attack(self):
+        """等赃款的通用升职：政绩路被攻击按住、改走的钱又被举报作废——和手上本来有钱的人一样算穿小鞋。"""
+        for start in (0, REAL_CFG.money_cost(0)):
+            a = player(1, merit=REAL_CFG.merit_cost(0) + 2, money=start)
+            out = resolve([a, player(2), player(3), player(4)], {
+                1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_ANY)],
+                2: [Action(Card.CORRUPT, value=20), Action(Card.CORRUPT, value=20)],
+                3: [Action(Card.ATTACK, 1)],
+                4: [Action(Card.REPORT, 1)],
+            }, cfg=REAL_CFG)
+            self.assertTrue(out.outcomes[1].merit_promotion_blocked, start)
+            self.assertEqual(out.outcomes[3].attacks_landed, 1)
+            self.assertTrue(any("穿小鞋" in m for m in out.public_messages), out.public_messages)
+
+    def test_waiting_family_card_promotes_before_the_warning(self):
+        """等赃款的一纸调令被举报：先升官（钱靠分来的赃款），再挨处分——算行贿的钱真花出去了，
+        公报先说调任、再说降级，和最终官职对得上。"""
+        mc = REAL_CFG.money_cost(1)
+        red = player(1, rank=1, warnings=REAL_CFG.warnings_before_demotion - 1, money=5, origin=Origin.RED)
+        out = resolve([red, player(2), player(3)], {
+            1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_FAMILY)],
+            2: [Action(Card.CORRUPT, value=20), Action(Card.CORRUPT, value=20)],
+            3: [Action(Card.REPORT, 1)],
+        }, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual((o.promotion, o.promotion_money_cost, o.family_bribe), (PromotionKind.MONEY, mc, mc))
+        self.assertEqual(red.money, 5 + o.money_from_reports - mc - o.shield_fee_paid)
+        self.assertGreaterEqual(red.money, 0)
+        msgs = out.public_messages
+        up = next(i for i, m in enumerate(msgs) if "调任" in m)
+        self.assertLess(up, next(i for i, m in enumerate(msgs) if "被匿名举报" in m and "玩家1" in m))
+
+    def test_each_card_is_robbed_on_its_own(self):
+        """攻击分别作用在每张牌上：每张只被抢它自己那份的一半，政绩不会被扣成负数。"""
+        red = player(1, merit=15, origin=Origin.RED)
+        out = resolve([red, player(2), player(3)], {
+            1: [Action(Card.WORK, value=3), Action(Card.PROMOTE_FAMILY), Action(Card.WORK, value=1)],
+            2: [Action(Card.ATTACK, 1)],
+            3: [Action(Card.ATTACK, 1)],
+        }, cfg=REAL_CFG)
+        self.assertGreaterEqual(red.merit, 0)
+        g1 = rules.work_merit(3, 0, CALM, REAL_CFG)
+        g2 = rules.work_merit(1, red.rank, CALM, REAL_CFG)
+        pool = g1 // 2 + g2 // 2
+        self.assertEqual(out.outcomes[1].attack_merit_loss, pool // 2 * 2)
+
+    def test_two_waiting_cards_are_both_judged(self):
+        """举报 -> 贿赂升职 -> 一纸调令，都在等赃款：买官那张作废、钱打水漂，调令用钱升也算行贿进分赃池。"""
+        mc = REAL_CFG.money_cost(0)
+        red = player(1, origin=Origin.RED)
+        out = resolve([red, player(2), player(3)], {
+            1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_MONEY), Action(Card.PROMOTE_FAMILY)],
+            2: [Action(Card.CORRUPT, value=40), Action(Card.CORRUPT, value=40)],
+            3: [Action(Card.REPORT, 1)],
+        }, cfg=REAL_CFG)
+        o = out.outcomes[1]
+        self.assertEqual((red.rank, o.bribe_lost, o.family_bribe), (1, mc, mc))
+        pool = mc + math.floor(Fraction(mc) * REAL_CFG.bribe_forfeit_ratio)
+        self.assertEqual(out.outcomes[3].money_from_reports,
+                         math.floor(Fraction(pool) * REAL_CFG.report_reward_ratio) - REAL_CFG.report_reward_fee)
+        self.assertNotIn("官也没升成", "".join(out.public_messages))
+
+    def test_waiting_bribe_judged_at_the_rank_it_was_played(self):
+        """等赃款的通用升职按出牌那一刻的官职判成买官；被查实降了级，到低一级政绩够了也不改口。"""
+        for cannot in (True, False):
+            cfg = dataclasses.replace(REAL_CFG, demoted_cannot_promote_same_round=cannot)
+            p = player(1, rank=1, warnings=cfg.warnings_before_demotion - 1, merit=20)
+            self.assertLess(20, cfg.merit_cost(1))
+            self.assertGreaterEqual(20, cfg.merit_cost(0))
+            out = resolve([p, player(2), player(3)], {
+                1: [Action(Card.REPORT, 2), Action(Card.PROMOTE_ANY)],
+                2: [Action(Card.CORRUPT, value=30), Action(Card.CORRUPT, value=30)],
+                3: [Action(Card.REPORT, 1)],
+            }, cfg=cfg)
+            self.assertEqual(p.rank, 0, cannot)
+            self.assertTrue(out.outcomes[1].promotion_frozen_by_report)
+
     def test_bulletin_tells_promotion_before_demotion(self):
         """同一轮先凭政绩升上去、又被查实降下来：公报按发生顺序先说升职再说降级。"""
         p = player(1, rank=1, merit=REAL_CFG.merit_cost(1), warnings=REAL_CFG.warnings_before_demotion - 1)

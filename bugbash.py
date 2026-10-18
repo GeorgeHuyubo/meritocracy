@@ -229,6 +229,8 @@ class RP:
     voided_bribe: int = 0  # 被查实作废的那笔买官（当作没升过，钱看抄完赃款还够不够再没收）
     family_bribe: int = 0
     stolen: int = 0
+    late_family: int = 0  # 等赃款、在处分之前用钱升的一纸调令花的钱（算行贿）
+    robbed_from: int = 0  # rob() 已经看过的产出（下一张牌只抢新挣的那份）
     hat: int = 0
     from_attacks: int = 0
     overtime_merit: int = 0
@@ -472,20 +474,21 @@ class Referee:
 
     def rob(self, rp: RP) -> int:
         """攻击作用在被攻击者的每张工作牌上：挣到的政绩当场被抢走一份，晋升卡用不上，和他怎么排无关。
-        一共被抢 = 这一轮埋头工作 + 以权谋私挣的 × 1/2，按攻击人数平分、取整（零头留给他自己）。
-        返回这张牌被抢走多少（累计的减去之前已经抢走的）。"""
-        n = len(rp.attackers)
-        if not n:
+        每张牌各被扣下它自己那份的 1/2（向下取整）；C 步再按攻击人数平分，分不开的零头退给他。
+        返回这张牌被扣下多少。"""
+        if not rp.attackers:
             return 0
-        total = math.floor(Fraction(rp.merit_gained) * self.cfg.attack_steal_fraction) // n * n
-        cut = total - rp.stolen
-        rp.stolen = total
+        # 只看这一张牌挣的（rp.merit_gained 里最后加进去的就是这张）
+        this_card = rp.merit_gained - rp.robbed_from
+        rp.robbed_from = rp.merit_gained
+        cut = math.floor(Fraction(this_card) * self.cfg.attack_steal_fraction)
+        rp.stolen += cut
         return cut
 
-    def judge(self, players: dict[int, RP], caught: set[int], late: dict[int, tuple[str, int]],
+    def judge(self, players: dict[int, RP], caught: set[int], late: dict[int, dict[str, int]],
               proceeds: dict[int, int]) -> None:
         """D. 举报 / 反腐风暴：没收、行贿没收、警告、分赃。
-        late = 等赃款的晋升卡里算行贿的（"bribe" 作废、"family" 一纸调令官不撤）：玩家 -> (类型, 这一级的钱)；
+        late = 等赃款的晋升卡里算行贿的：玩家 -> {"bribe": 这一级的钱（作废）, "family": 这一级的钱（一纸调令，官不撤）}；
         proceeds = 上一遍每人分到的赃款。"""
         cfg = self.cfg
         ids = sorted(players)
@@ -518,15 +521,22 @@ class Referee:
                 rp.money -= lost
                 rp.bribe_lost = lost
                 pool_total[pid] += lost
-            kind, cost = late.get(pid, ("", 0))
-            if kind == "bribe" and not bribe:
+            cost = late.get(pid, {}).get("bribe", 0)
+            if cost and not bribe:
                 # 等赃款的买官：钱要靠分来的赃款才凑得齐（按上一遍分到的算）
                 if rp.money + proceeds.get(pid, 0) >= cost:
                     lost = math.floor(Fraction(cost) * cfg.bribe_forfeit_ratio)
                     rp.money -= lost  # 分赃在后面才到账，这里可能暂时是负的
                     rp.bribe_lost = lost
                     pool_total[pid] += lost
-            family_paid = rp.family_bribe + (cost if kind == "family" else 0)
+            cost = late.get(pid, {}).get("family", 0)
+            if cost and rp.promo is None and rp.money + proceeds.get(pid, 0) >= cost:
+                # 等赃款、用钱升的一纸调令：在处分之前就升（官不撤），钱靠分来的赃款凑（分赃在后面才到账）
+                pend = next(x for x in rp.pending if x["card"] is Card.PROMOTE_FAMILY)
+                self._promote(rp, "MONEY", False, True, pend["card"], pend["pos"])
+                rp.promo["family"] = True
+                rp.late_family = cost
+            family_paid = rp.family_bribe + rp.late_family
             if family_paid and cfg.report_catches_bribery:
                 pool_total[pid] += math.floor(Fraction(family_paid) * cfg.bribe_forfeit_ratio)
             major = rp.dirty >= cfg.major_corruption_threshold
@@ -553,7 +563,7 @@ class Referee:
             rp = players[pid]
             if not (rp.caught and rp.reporters and pool_total.get(pid, 0) > 0):
                 continue
-            fam_cost = rp.family_bribe + (late[pid][1] if late.get(pid, ("",))[0] == "family" else 0)
+            fam_cost = rp.family_bribe + rp.late_family
             family = math.floor(Fraction(fam_cost) * cfg.bribe_forfeit_ratio) \
                 if cfg.report_catches_bribery else 0
             gross = rp.dirty + rp.bribe_lost + family
@@ -567,10 +577,12 @@ class Referee:
         for pid in late:
             players[pid].money = max(0, players[pid].money)
 
-    def late_bribes(self, base: dict[int, RP], caught: set[int], got: dict[int, int]) -> dict[int, tuple[str, int]]:
+    def late_bribes(self, base: dict[int, RP], caught: set[int], got: dict[int, int]) -> dict[int, dict[str, int]]:
         """举报作用在每张牌上：等赃款的晋升卡要是（加上分来的赃款）买得起，被举报就算行贿。
         base = 举报结算之前的状态（官职按出牌那一刻）。"""
-        out: dict[int, tuple[str, int]] = {}
+        out: dict[int, dict[str, int]] = {}
+        if not self.cfg.report_catches_bribery:
+            return out  # 买官不算罪名：等赃款的卡怎么升都碰不到举报
         for pid, rp in base.items():
             if not (rp.reporters or rp.storm) or rp.promo is not None:
                 continue
@@ -581,9 +593,10 @@ class Referee:
                 if pend.get("top") and pend["merit_at"] < self.merit_cost(rp):
                     continue
                 if pend.get("bribe"):
-                    out[pid] = ("bribe", self.money_cost(rp))
-                elif pend["card"] is Card.PROMOTE_FAMILY:
-                    out[pid] = ("family", self.money_cost(rp))
+                    out.setdefault(pid, {}).setdefault("bribe", self.money_cost(rp))
+                    continue  # 被查实就作废，接着看下一张等着的卡
+                if pend["card"] is Card.PROMOTE_FAMILY:
+                    out.setdefault(pid, {})["family"] = self.money_cost(rp)
                 break
         return out
 
@@ -601,8 +614,10 @@ class Referee:
             # 抢功抢的是这一轮埋头工作和以权谋私挣的政绩（2026-10-17 定的口径，两份说明都改了）
             worked = any(a.card in (Card.WORK, Card.GRAFT) for a in tgt.acts)
             if worked and tgt.merit_gained > 0:
-                # 被抢的那份第 B 步在他的工作牌上就扣下了（tgt.stolen），这里分给攻击者
+                # 被抢的那份第 B 步在他的工作牌上就扣下了（tgt.stolen），这里平分给攻击者，零头退给他
                 share = tgt.stolen // len(tgt.attackers)
+                tgt.merit += tgt.stolen - share * len(tgt.attackers)
+                tgt.stolen = share * len(tgt.attackers)
                 for aid in tgt.attackers:
                     players[aid].merit += share
                     players[aid].from_attacks += share
@@ -631,7 +646,7 @@ class Referee:
         # D. 举报 / 反腐风暴。等赃款的买官也逃不掉举报，但它买不买得起要看分到多少赃款，
         # 所以反复判到"哪些等赃款的卡算行贿"和每人分到的赃款都不再变
         base = {pid: copy.deepcopy(players[pid]) for pid in ids}
-        late: dict[int, tuple[str, int]] = {}
+        late: dict[int, dict[str, int]] = {}
         proceeds: dict[int, int] = {}
         for attempt in range(len(ids) + 2):
             self.judge(players, caught, late, proceeds)

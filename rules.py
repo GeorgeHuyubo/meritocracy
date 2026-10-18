@@ -1017,11 +1017,11 @@ def resolve_round(
         robbers = len(attackers_of.get(p.id, [])) if cfg.attack_mode == "steal_work" else 0
 
         def keep(gained: int) -> int:
-            """这张牌挣的政绩里自己留下多少：累计被抢 = 本轮挣的 × 抢的比例，按人数平分取整。"""
+            """这张牌挣的政绩里自己留下多少：每张牌各被扣下一半（第 3 步按攻击人数平分，分不开的零头退给他）。"""
             if not robbers:
                 return gained
-            total = math.floor(Fraction(o.merit_gained) * cfg.attack_steal_fraction) // robbers * robbers
-            cut, robbed[p.id] = total - robbed[p.id], total
+            cut = math.floor(Fraction(gained) * cfg.attack_steal_fraction)
+            robbed[p.id] += cut
             return gained - cut
 
         produced_yet = False
@@ -1406,9 +1406,10 @@ def resolve_round(
                         )
                 continue
             # 被抢的那份第 2 步在他的工作牌上就扣下了，这里只是分给攻击者
-            pool = math.floor(Fraction(o_target.merit_gained) * cfg.attack_steal_fraction)
-            taken = robbed.get(target_id, 0)
-            share = taken // len(attacker_ids)
+            pool = robbed.get(target_id, 0)
+            share = pool // len(attacker_ids)
+            taken = share * len(attacker_ids)
+            target.merit += pool - taken  # 几个人分不开的零头退还给他
             # 抢到 0 点要说清楚为什么（大模型反馈："抢功抢了 0 点却不知道原因"）
             if pool <= 0:
                 why_zero = (f"他这轮只攒了 {o_target.merit_gained} 点，"
@@ -1640,7 +1641,20 @@ def resolve_round(
                 else:
                     o.bribe_unaffordable = True
             # 一纸调令用钱升的那笔：钱已经花掉了、官也不撤，但同样算查获的行贿，进分赃池
-            family_cost = o.family_bribe + late_family.get(p.id, 0)
+            fam = late_family.get(p.id, 0)
+            got = proceeds_prev.get(p.id, 0)
+            if fam and o.promotion is PromotionKind.NONE and p.money + got >= fam:
+                # 等赃款、用钱升的一纸调令：调令在处分之前就下了（官不撤），钱靠分来的赃款凑齐——
+                # 先把分赃临时算进去升级，再扣回来（分赃在下面才到账）
+                p.money += got
+                _apply_promotion(p, PromotionKind.MONEY, o, cfg)
+                p.money -= got
+                o.family_promotion = True
+                o.family_bribe = o.promotion_money_cost
+                # 公报按发生顺序：先说调令升官，紧接着就是他的查处（可能又降回去）
+                report_msgs.append(f"{names[p.id]} 家里一纸调令，直接调任{cfg.rank_name(p.rank)}。")
+                before = p.rank
+            family_cost = o.family_bribe
             family = (
                 math.floor(Fraction(family_cost) * cfg.bribe_forfeit_ratio)
                 if cfg.report_catches_bribery else 0
@@ -1683,7 +1697,7 @@ def resolve_round(
                 bits.append(f"赃款 {taken} 全部没收" if taken >= o.corrupt_amount
                             else f"赃款 {o.corrupt_amount} 被没收 {taken}")
             if bribe:
-                bits.append(f"行贿的 {bribe} 打了水漂、官也没升成")
+                bits.append(f"行贿的 {bribe} 打了水漂" + ("" if o.family_promotion else "、官也没升成"))
             elif o.bribe_unaffordable:
                 bits.append("赃款被抄后买官的钱不够了，官也没升成")
             if family:
@@ -1729,8 +1743,7 @@ def resolve_round(
             # 毛额 = 本轮脏收入 + 查获的行贿。行贿那笔没有"洗白"一说，
             # 它是原样并进分赃池的，所以两边都要算上。
             family = (
-                math.floor(Fraction(o_victim.family_bribe + late_family.get(victim_id, 0))
-                           * cfg.bribe_forfeit_ratio)
+                math.floor(Fraction(o_victim.family_bribe) * cfg.bribe_forfeit_ratio)
                 if cfg.report_catches_bribery else 0
             )
             gross = o_victim.corrupt_amount + o_victim.bribe_lost + family
@@ -1743,7 +1756,7 @@ def resolve_round(
                 by_id[actor_id].money += share
                 outcome.outcomes[actor_id].money_from_reports += share
 
-        for pid in late_bribe:  # 没收敛时的兜底（正常收敛时分完赃都不会是负的）
+        for pid in {**late_bribe, **late_family}:  # 没收敛时的兜底（正常收敛时分完赃都不会是负的）
             by_id[pid].money = max(0, by_id[pid].money)
 
         # 告知举报者结果（只说查实与否 + 自己分到多少，不泄露对方的家底）
@@ -1769,14 +1782,16 @@ def resolve_round(
     # 所以先按"等赃款的卡都不算"把举报判一遍，看出哪些等赃款的卡其实买得起、算行贿，
     # 再从第 4 步开头重判，直到这份名单（和每人分到的赃款）不再变。名单只会变长，最多重判几遍。
     start = ({p.id: (p.money, p.merit, p.rank, p.tenure, p.warnings) for p in ordered},
-             copy.deepcopy(outcome.outcomes), list(report_msgs), dict(report_counts))
+             copy.deepcopy(outcome.outcomes), list(report_msgs), dict(report_counts), list(promo_msgs))
 
     def late_bribes(proceeds: dict[int, int]) -> tuple[dict[int, int], dict[int, int]]:
         bribes: dict[int, int] = {}
         family: dict[int, int] = {}
+        if not cfg.report_catches_bribery:
+            return bribes, family  # 买官不算罪名：等赃款的卡碰不到举报
         for p in ordered:
             o = outcome.outcomes[p.id]
-            if not o.reported or o.promotion is not PromotionKind.NONE:
+            if not o.reported or start[1][p.id].promotion is not PromotionKind.NONE:
                 continue
             q = p.clone()
             q.rank = start[0][p.id][2]  # 按出牌那一刻的官职算（第 5 步可能已经降了级）
@@ -1786,8 +1801,10 @@ def resolve_round(
                 if kind is PromotionKind.NONE:
                     continue
                 if bribe:
-                    bribes[p.id] = money_cost_for(q, cfg) or 0
-                elif card is Card.PROMOTE_FAMILY and kind is PromotionKind.MONEY:
+                    # 被查实就作废，第 5a 步接着看下一张等着的卡
+                    bribes.setdefault(p.id, money_cost_for(q, cfg) or 0)
+                    continue
+                if card is Card.PROMOTE_FAMILY and kind is PromotionKind.MONEY:
                     family[p.id] = money_cost_for(q, cfg) or 0
                 break
         return bribes, family
@@ -1809,6 +1826,7 @@ def resolve_round(
         report_msgs[:] = start[2]
         report_counts.clear()
         report_counts.update(start[3])
+        promo_msgs[:] = start[4]
         (late_bribe, late_family), proceeds = nxt, got
 
     # ---- 5a. 作废的买官说明一句；补结算排在举报后面、等赃款的晋升卡 ---------------
@@ -1821,18 +1839,28 @@ def resolve_round(
         o = outcome.outcomes[p.id]
         if o.promotion_frozen_by_report:
             o.private_notes.append(frozen_note(o))
+        # 算不算买官按出牌那一刻的官职判（和上面重判时一样），第 5 步降了级也不改口
+        q = p.clone()
+        q.rank = start[0][p.id][2]
         for card, money_at, merit_at, loot_at in waiting.get(p.id, []):
+            if card is Card.PROMOTE_FAMILY and p.id in late_family and o.family_promotion:
+                continue  # 第 5 步已经在处分之前升过了
             if o.promotion is not PromotionKind.NONE:
                 o.private_notes.append("这一轮已经升过一级了，这张晋升卡用不上。")
                 continue
             # 那一刻手上的钱 + 举报分来的赃款；自己也被查实的话，那一刻手上的赃款已经被抄走
             money = money_at + o.money_from_reports - (loot_at if o.report_effective else 0)
-            kind, bribe = _promotion_plan(p, card, o, cfg, money=money, merit=merit_at)
+            kind, bribe = _promotion_plan(q, card, o, cfg, money=money, merit=merit_at)
             if kind is PromotionKind.NONE:
                 o.private_notes.append("举报分来的赃款加上也不够门槛，这张晋升卡没用上。")
                 continue
             if o.report_effective and bribe:
                 # 查实了就升不了：光记警告没降级也一样
+                if (card.can_use_merit and merit_at >= (merit_cost_for(q, cfg) or 10**9)
+                        and o.attacked and not smear_resisted(p, o, cfg)):
+                    # 政绩那条路被攻击按住、金钱那条路被举报堵死（规则书第 16 节），和排在哪儿无关
+                    _block_merit_route(p, o, cfg, names, promo_msgs)
+                    o.promotion_blocked_by_attack_report = True
                 o.promotion_frozen_by_report = True
                 o.private_notes.append(frozen_note(o))
                 continue

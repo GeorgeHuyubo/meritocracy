@@ -61,6 +61,15 @@ class TestRefereeCatchesBrokenEngine(unittest.TestCase):
              2: [("CORRUPT", 20, None), ("CORRUPT", 20, None)], 3: [("REPORT", 0, 1)]}, cfg=cfg)
         self.assertEqual(kinds(bash), set(), bash.findings)
 
+    def test_waiting_bribe_is_no_crime_when_bribery_is_not_reportable(self):
+        """买官不算罪名的变体：等赃款的买官被举报也照样升（裁判不能把它判成查实）。"""
+        cfg = dataclasses.replace(DEFAULT_CONFIG, report_catches_bribery=False)
+        bash, _ = bugbash.scenario(
+            [{"money": 3}, {}, {}],
+            {1: [("REPORT", 0, 2), ("PROMOTE_MONEY", 0, None)],
+             2: [("CORRUPT", 20, None), ("CORRUPT", 20, None)], 3: [("REPORT", 0, 1)]}, cfg=cfg)
+        self.assertEqual(kinds(bash), set(), bash.findings)
+
     def test_waiting_card_using_later_merit_is_caught(self):
         real = rules._resolve_promotion_card
         with mock.patch.object(rules, "_resolve_promotion_card",
